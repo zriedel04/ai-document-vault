@@ -19,7 +19,7 @@ The safety check rejects:
 | Documents and images outside `tests/**/fixtures/`, `demo/corpus/` (images also allowed in `docs/images/` and frontend asset folders) | Synthetic data only |
 | Files over 1 MiB (5 MiB for fixtures and lock files) | Keeps the repository small |
 
-Never weaken the check to get a commit through. Put synthetic files in the fixture or demo folders instead.
+The check works from file names, folders, sizes and file headers, so it cannot recognise private text inside an ordinary text or JSON file. Reviewing every diff for that is part of the process. Never weaken the check to get a commit through. Put synthetic files in the fixture or demo folders instead.
 
 If private data is ever committed, deleting the file is not enough: it stays in history. Stop, tell the maintainer, and rewrite history before anything is shared.
 

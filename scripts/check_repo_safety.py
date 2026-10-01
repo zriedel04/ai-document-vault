@@ -52,24 +52,49 @@ DATABASE_SUFFIXES = (
     ".sqlite3-shm",
     ".sqlite3-wal",
 )
-KEY_SUFFIXES = (".key", ".p12", ".pem", ".pfx")
+KEY_SUFFIXES = (
+    ".gpg",
+    ".jks",
+    ".kdbx",
+    ".key",
+    ".keystore",
+    ".p12",
+    ".p8",
+    ".pem",
+    ".pfx",
+    ".pgp",
+    ".ppk",
+)
 SSH_KEY_PREFIXES = ("id_dsa", "id_ecdsa", "id_ed25519", "id_rsa")
 MODEL_SUFFIXES = (".ckpt", ".gguf", ".onnx", ".pt", ".pth", ".safetensors")
 DOCUMENT_SUFFIXES = (
+    ".azw",
+    ".azw3",
     ".csv",
+    ".djvu",
     ".doc",
+    ".docm",
     ".docx",
+    ".dotx",
+    ".epub",
     ".eml",
+    ".mobi",
     ".msg",
+    ".numbers",
     ".odp",
     ".ods",
     ".odt",
+    ".pages",
     ".pdf",
+    ".potx",
     ".ppt",
     ".pptx",
     ".rtf",
+    ".tsv",
     ".xls",
+    ".xlsm",
     ".xlsx",
+    ".xps",
 )
 IMAGE_SUFFIXES = (".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")
 PRIVATE_DIR_NAMES = frozenset(
