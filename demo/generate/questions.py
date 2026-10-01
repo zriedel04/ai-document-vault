@@ -269,12 +269,20 @@ _RAW: list[_Row] = [
         ),
     ),
     _q(
-        "multi_doc",
+        "lookup",
         "Which comes first, the Calculus II final or the Operating Systems final?",
         "The Calculus II final (Tuesday, December 8 at 9:00 AM), one day before the Operating Systems final (Wednesday, December 9 at 1:00 PM).",
         (
-            s(MATH_SYLLABUS, "The final exam is on Tuesday, December 8, 2026 at 9:00 AM.", 2),
-            s(OS_SYLLABUS, "The final exam is on Wednesday, December 9, 2026 at 1:00 PM.", 2),
+            s(
+                STUDY,
+                "Tuesday, December 8 at 9:00 AM: Calculus II final - Wednesday, December 9 at 1:00 PM: Operating Systems final",
+            ),
+        ),
+        alternatives=(
+            s(
+                CALENDAR,
+                "Tue Dec 8: Calculus II final at 9:00 AM Wed Dec 9: Operating Systems final at 1:00 PM",
+            ),
         ),
     ),
     # --- multi_doc and reasoning ------------------------------------------------------------
@@ -347,7 +355,7 @@ _RAW: list[_Row] = [
     _q(
         "multi_doc",
         "How did the decision about in-app chat develop over time?",
-        "It was an open decision on September 22 and again at the October 2 meeting, and chat was removed from the first release in version 2 of the requirements on October 11.",
+        "It was an open question in a team standup and again in a team meeting, and it was later removed from the first release because it would take too long to build.",
         (
             s(
                 STANDUP_0922,
@@ -375,28 +383,28 @@ _RAW: list[_Row] = [
     _q(
         "version",
         "What is the maximum number of members in a study group in the current requirements?",
-        "10 members (version 2; version 1 said 8).",
+        "10 members.",
         (s(REQ_V2, "NFR-3: A study group shall have a maximum of 10 members."),),
         (REQ_V1,),
     ),
     _q(
         "version",
         "How quickly must search results load according to the submitted specification?",
-        "Within 2 seconds (version 1 said 3 seconds).",
+        "Within 2 seconds.",
         (s(REQ_V2, "NFR-1: Search results shall load within 2 seconds."),),
         (REQ_V1,),
     ),
     _q(
         "version",
         "How many concurrent users must the system support?",
-        "500 (version 2). Version 1 and the project journal mention 200.",
+        "500 concurrent users.",
         (s(REQ_V2, "NFR-2: The system shall support 500 concurrent users."),),
         (REQ_V1, JOURNAL),
     ),
     _q(
         "version",
         "Is in-app chat part of the first release?",
-        "No. It was in version 1 but version 2 lists it as out of scope.",
+        "No. In-app chat is out of scope for the first release.",
         (
             s(
                 REQ_V2,
@@ -408,11 +416,17 @@ _RAW: list[_Row] = [
     _q(
         "version",
         "Which requirements were added between version 1 and version 2 of the specification?",
-        "Exporting a meeting as an iCalendar file, leaving a group, removing a member, reporting inappropriate content, importing a course list from CSV (FR-8 to FR-12) and WCAG 2.1 AA contrast (NFR-6).",
+        "FR-8 (export a meeting as an iCalendar file), FR-9 (leave a group), FR-10 (remove a member), FR-11 (report inappropriate content), FR-12 (import the course list from a CSV file) and NFR-6 (WCAG 2.1 AA contrast).",
         (
             s(
                 REQ_V2,
                 "FR-8: The system shall let a student export a scheduled meeting as an iCalendar file.",
+            ),
+            s(REQ_V2, "FR-9: The system shall let a student leave a study group."),
+            s(REQ_V2, "FR-10: The system shall let a group owner remove a member from the group."),
+            s(
+                REQ_V2,
+                "FR-11: The system shall let a student report inappropriate content to an administrator.",
             ),
             s(
                 REQ_V2,
@@ -425,7 +439,7 @@ _RAW: list[_Row] = [
     _q(
         "version",
         "When is Assignment 2 due for Team Northwind?",
-        "Monday, October 12, 2026 at 11:59 PM, after the approved extension (the syllabus says October 9).",
+        "Monday, October 12 at 11:59 PM, after the approved extension.",
         (
             s(
                 MAIL_REPLY,
@@ -521,6 +535,7 @@ _RAW: list[_Row] = [
         "$97.15 ($89.95 plus $7.20 tax).",
         (
             s(BOOKS, "Software Engineering in Practice 4th Ed $89.95"),
+            s(BOOKS, "Tax (8%) $7.20"),
             s(BOOKS, "Total $97.15"),
         ),
         (),
@@ -539,7 +554,11 @@ _RAW: list[_Row] = [
         "numeric",
         "What was the laptop repair bill before tax?",
         "$174.00 ($129.00 for the screen plus $45.00 labor).",
-        (s(REPAIR, "Subtotal $174.00"),),
+        (
+            s(REPAIR, "Screen replacement $129.00"),
+            s(REPAIR, "Labor $45.00"),
+            s(REPAIR, "Subtotal $174.00"),
+        ),
         (),
     ),
     _q(

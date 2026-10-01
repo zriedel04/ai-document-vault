@@ -182,17 +182,19 @@ questions:
       and 4 minutes for questions.'
 - id: q018
   question: Which comes first, the Calculus II final or the Operating Systems final?
-  category: multi_doc
+  category: lookup
   answerable: true
   answer: The Calculus II final (Tuesday, December 8 at 9:00 AM), one day before the Operating Systems
     final (Wednesday, December 9 at 1:00 PM).
   sources:
-  - path: courses/math241/syllabus.pdf
-    page: 2
-    quote: The final exam is on Tuesday, December 8, 2026 at 9:00 AM.
-  - path: courses/cs350/syllabus.pdf
-    page: 2
-    quote: The final exam is on Wednesday, December 9, 2026 at 1:00 PM.
+  - path: notes/study-plan.md
+    page: null
+    quote: 'Tuesday, December 8 at 9:00 AM: Calculus II final - Wednesday, December 9 at 1:00 PM: Operating
+      Systems final'
+  alternatives:
+  - path: screenshots/calendar-finals-week.png
+    page: null
+    quote: 'Tue Dec 8: Calculus II final at 9:00 AM Wed Dec 9: Operating Systems final at 1:00 PM'
 - id: q019
   question: Why did Alex ask the instructor for more time on Assignment 2?
   category: lookup
@@ -267,8 +269,8 @@ questions:
   question: How did the decision about in-app chat develop over time?
   category: multi_doc
   answerable: true
-  answer: It was an open decision on September 22 and again at the October 2 meeting, and chat was removed
-    from the first release in version 2 of the requirements on October 11.
+  answer: It was an open question in a team standup and again in a team meeting, and it was later removed
+    from the first release because it would take too long to build.
   sources:
   - path: notes/standup-2026-09-22.txt
     page: null
@@ -301,7 +303,7 @@ questions:
   question: What is the maximum number of members in a study group in the current requirements?
   category: version
   answerable: true
-  answer: 10 members (version 2; version 1 said 8).
+  answer: 10 members.
   sources:
   - path: project/requirements-v2.docx
     page: null
@@ -312,7 +314,7 @@ questions:
   question: How quickly must search results load according to the submitted specification?
   category: version
   answerable: true
-  answer: Within 2 seconds (version 1 said 3 seconds).
+  answer: Within 2 seconds.
   sources:
   - path: project/requirements-v2.docx
     page: null
@@ -323,7 +325,7 @@ questions:
   question: How many concurrent users must the system support?
   category: version
   answerable: true
-  answer: 500 (version 2). Version 1 and the project journal mention 200.
+  answer: 500 concurrent users.
   sources:
   - path: project/requirements-v2.docx
     page: null
@@ -335,7 +337,7 @@ questions:
   question: Is in-app chat part of the first release?
   category: version
   answerable: true
-  answer: No. It was in version 1 but version 2 lists it as out of scope.
+  answer: No. In-app chat is out of scope for the first release.
   sources:
   - path: project/requirements-v2.docx
     page: null
@@ -346,12 +348,22 @@ questions:
   question: Which requirements were added between version 1 and version 2 of the specification?
   category: version
   answerable: true
-  answer: Exporting a meeting as an iCalendar file, leaving a group, removing a member, reporting inappropriate
-    content, importing a course list from CSV (FR-8 to FR-12) and WCAG 2.1 AA contrast (NFR-6).
+  answer: FR-8 (export a meeting as an iCalendar file), FR-9 (leave a group), FR-10 (remove a member),
+    FR-11 (report inappropriate content), FR-12 (import the course list from a CSV file) and NFR-6 (WCAG
+    2.1 AA contrast).
   sources:
   - path: project/requirements-v2.docx
     page: null
     quote: 'FR-8: The system shall let a student export a scheduled meeting as an iCalendar file.'
+  - path: project/requirements-v2.docx
+    page: null
+    quote: 'FR-9: The system shall let a student leave a study group.'
+  - path: project/requirements-v2.docx
+    page: null
+    quote: 'FR-10: The system shall let a group owner remove a member from the group.'
+  - path: project/requirements-v2.docx
+    page: null
+    quote: 'FR-11: The system shall let a student report inappropriate content to an administrator.'
   - path: project/requirements-v2.docx
     page: null
     quote: 'FR-12: The system shall let an administrator import the course list from a CSV file.'
@@ -364,8 +376,7 @@ questions:
   question: When is Assignment 2 due for Team Northwind?
   category: version
   answerable: true
-  answer: Monday, October 12, 2026 at 11:59 PM, after the approved extension (the syllabus says October
-    9).
+  answer: Monday, October 12 at 11:59 PM, after the approved extension.
   sources:
   - path: emails/advisor-reply.txt
     page: null
@@ -483,6 +494,9 @@ questions:
     quote: Software Engineering in Practice 4th Ed $89.95
   - path: receipts/bookstore-receipt.jpg
     page: null
+    quote: Tax (8%) $7.20
+  - path: receipts/bookstore-receipt.jpg
+    page: null
     quote: Total $97.15
 - id: q043
   question: Does the price on the bookstore receipt match the price in the CSE 485 syllabus?
@@ -502,6 +516,12 @@ questions:
   answerable: true
   answer: $174.00 ($129.00 for the screen plus $45.00 labor).
   sources:
+  - path: receipts/laptop-repair-receipt.jpg
+    page: null
+    quote: Screen replacement $129.00
+  - path: receipts/laptop-repair-receipt.jpg
+    page: null
+    quote: Labor $45.00
   - path: receipts/laptop-repair-receipt.jpg
     page: null
     quote: Subtotal $174.00

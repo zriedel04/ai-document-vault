@@ -247,6 +247,17 @@ class EvalSetTests(unittest.TestCase):
             elif q.answerable:
                 self.assertEqual(len(needed), 1, f"{q.id} needs {len(needed)} documents")
 
+    def test_no_single_document_can_answer_a_multi_doc_question(self) -> None:
+        # If one document holds every needed passage, a retriever that finds only it answers the
+        # question, and the other listed documents would be required for no reason.
+        for q in QUESTIONS:
+            if q.category != "multi_doc":
+                continue
+            for path, doc in DOCS.items():
+                text = norm(" ".join(doc.page_texts()))
+                with self.subTest(question=q.id, document=path):
+                    self.assertFalse(all(norm(s.quote) in text for s in q.sources))
+
     def test_alternatives_come_from_other_documents(self) -> None:
         for q in QUESTIONS:
             needed = {s.path for s in q.sources}
@@ -262,6 +273,17 @@ class EvalSetTests(unittest.TestCase):
             for alt in q.alternatives:
                 missing = numbers(q.answer) - numbers(alt.quote)
                 self.assertFalse(missing, f"{q.id}: {alt.path} lacks {sorted(missing)}")
+
+    def test_the_sources_carry_every_number_of_the_expected_answer(self) -> None:
+        # A retriever that finds every listed passage must have found everything the answer says.
+        for q in QUESTIONS:
+            if q.answerable:
+                evidence: set[str] = set()
+                for src in q.sources:
+                    evidence |= numbers(src.quote)
+                missing = numbers(q.answer) - evidence
+                with self.subTest(question=q.id):
+                    self.assertFalse(missing, f"no source passage has {sorted(missing)}")
 
     def test_the_number_rule_notices_a_missing_time(self) -> None:
         answer = "Monday, October 12, 2026 at 11:59 PM."
