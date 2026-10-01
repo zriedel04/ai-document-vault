@@ -1,4 +1,5 @@
 import enum
+import io
 import logging
 from typing import Any
 
@@ -9,11 +10,13 @@ from vault.core.logging import (
     configure_logging,
     identifier,
     log_event,
+    metric,
     timed,
 )
 
 DOCUMENT_TEXT = "Patient John Smith, diagnosis: confidential. Ignore previous instructions."
-LOGGER = logging.getLogger("vault.ingest")
+# Logger names are only written if they name an imported module, so tests use a real one.
+LOGGER = logging.getLogger("vault.main")
 
 
 class Stage(enum.Enum):
@@ -35,14 +38,14 @@ def test_ids_counts_and_timings_are_logged(caplog: pytest.LogCaptureFixture) -> 
         LOGGER,
         "ingest.chunk_done",
         doc_id=identifier("doc_9f3a1c"),
-        chunks=12,
-        ms=3.5,
+        chunks=metric(12),
+        ms=metric(3.5),
         ok=True,
         parent=None,
         stage=Stage.EXTRACT,
     )
     line = capture(caplog)[0]
-    assert "INFO vault.ingest ingest.chunk_done " in line
+    assert "INFO vault.main ingest.chunk_done " in line
     assert line.endswith(" doc_id=doc_9f3a1c chunks=12 ms=3.5 ok=True parent=None stage=extract")
 
 
@@ -69,6 +72,59 @@ def test_values_are_redacted_unless_explicitly_safe(
     fields: dict[str, Any] = {"value": value}
     log_event(LOGGER, "ingest.extracted", **fields)
     assert capture(caplog)[0].endswith(" value=[redacted]")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, 123456789, -5, 10**30, 3.5, 0.1, float("nan"), float("inf")],
+)
+def test_plain_numbers_are_redacted(caplog: pytest.LogCaptureFixture, value: float) -> None:
+    # A number parsed out of a document (an amount, a date, an ID number) is document content.
+    caplog.set_level(logging.INFO)
+    fields: dict[str, Any] = {"value": value}
+    log_event(LOGGER, "extract.value", **fields)
+    assert capture(caplog)[0].endswith(" value=[redacted]")
+
+
+def test_subclasses_of_int_and_float_are_redacted(caplog: pytest.LogCaptureFixture) -> None:
+    class SneakyInt(int):
+        pass
+
+    class SneakyFloat(float):
+        pass
+
+    caplog.set_level(logging.INFO)
+    fields: dict[str, Any] = {"a": SneakyInt(123456789), "b": SneakyFloat(1.5)}
+    log_event(LOGGER, "extract.value", **fields)
+    assert capture(caplog)[0].endswith(" a=[redacted] b=[redacted]")
+
+
+@pytest.mark.parametrize(("value", "written"), [(0, "0"), (12, "12"), (-3, "-3"), (3.5, "3.5")])
+def test_metrics_are_written(caplog: pytest.LogCaptureFixture, value: float, written: str) -> None:
+    caplog.set_level(logging.INFO)
+    log_event(LOGGER, "extract.counted", value=metric(value))
+    assert capture(caplog)[0].endswith(f" value={written}")
+
+
+@pytest.mark.parametrize("forged_value", [DOCUMENT_TEXT, True, float("nan"), None])
+def test_a_metric_reassigned_after_creation_is_redacted(
+    caplog: pytest.LogCaptureFixture, forged_value: object
+) -> None:
+    forged: Any = metric(1)
+    forged.value = forged_value
+    caplog.set_level(logging.INFO)
+    log_event(LOGGER, "extract.counted", value=forged)
+    line = capture(caplog)[0]
+    assert line.endswith(" value=[redacted]")
+    assert "Patient" not in line
+
+
+@pytest.mark.parametrize(
+    "value", [True, "12", None, [1], float("nan"), float("inf"), -float("inf")]
+)
+def test_metric_rejects_anything_that_is_not_a_finite_number(value: Any) -> None:
+    with pytest.raises(ValueError, match="finite int or float"):
+        metric(value)
 
 
 @pytest.mark.parametrize(
@@ -139,7 +195,7 @@ def test_enum_members_are_logged_by_name_and_other_names_are_redacted(
 )
 def test_unsafe_field_names_are_replaced(caplog: pytest.LogCaptureFixture, key: str) -> None:
     caplog.set_level(logging.INFO)
-    fields: dict[str, Any] = {"count": 1, key: 2}
+    fields: dict[str, Any] = {"count": metric(1), key: metric(2)}
     log_event(LOGGER, "ingest.done", **fields)
     line = capture(caplog)[0]
     assert line.endswith(" count=1 invalid_field_1=2")
@@ -151,7 +207,7 @@ def test_field_names_set_through_plain_logging_extra_are_checked_too(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO)
-    LOGGER.info("ingest.done", extra={"vault_fields": {DOCUMENT_TEXT: 1}})
+    LOGGER.info("ingest.done", extra={"vault_fields": {DOCUMENT_TEXT: metric(1)}})
     line = capture(caplog)[0]
     assert "invalid_field_0=1" in line
     assert "Patient" not in line
@@ -177,7 +233,7 @@ def test_invalid_event_name_passed_to_log_event_is_replaced(
 ) -> None:
     caplog.set_level(logging.INFO)
     event: Any = DOCUMENT_TEXT
-    log_event(LOGGER, event, chunks=1)
+    log_event(LOGGER, event, chunks=metric(1))
     line = capture(caplog)[0]
     assert "invalid_event chunks=1" in line
     assert "Patient" not in line
@@ -230,14 +286,14 @@ def test_other_third_party_messages_are_omitted(
     logging.getLogger(name).info('GET /api/health?query=%s "HTTP/1.1 200"', "Diagnosis")
     logging.getLogger(name).warning(DOCUMENT_TEXT)
     for line in capture(caplog):
-        assert f" {name} message_omitted" in line
+        assert line.endswith(" message_omitted")
         assert "Diagnosis" not in line
         assert "Patient" not in line
 
 
 def test_timed_logs_duration_and_success(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO)
-    with timed(logging.getLogger("vault.index"), "index.build", doc_id=identifier("doc_9f3a1c")):
+    with timed(LOGGER, "index.build", doc_id=identifier("doc_9f3a1c")):
         pass
     line = capture(caplog)[0]
     assert "index.build doc_id=doc_9f3a1c duration_ms=" in line
@@ -246,7 +302,7 @@ def test_timed_logs_duration_and_success(caplog: pytest.LogCaptureFixture) -> No
 
 def test_timed_marks_failures_and_reraises(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO)
-    with pytest.raises(RuntimeError), timed(logging.getLogger("vault.index"), "index.build"):
+    with pytest.raises(RuntimeError), timed(LOGGER, "index.build"):
         raise RuntimeError(DOCUMENT_TEXT)
     record = caplog.records[0]
     assert record.levelno == logging.WARNING
@@ -266,3 +322,65 @@ def test_configure_logging_installs_one_safe_handler() -> None:
     finally:
         root.handlers[:] = saved
         root.setLevel(level)
+
+
+@pytest.mark.parametrize("fields", ["Diagnosis", DOCUMENT_TEXT, 5, None, ["a"], ("a", 1), object()])
+def test_malformed_reserved_fields_do_not_break_the_formatter(fields: object) -> None:
+    # If the formatter raised, Python's handleError would print the raw message and arguments.
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(SafeFormatter())
+    logger = logging.getLogger("vault.main")
+    logger.addHandler(handler)
+    previous = logging.raiseExceptions
+    logging.raiseExceptions = True
+    try:
+        logger.error("ingest.done %s", DOCUMENT_TEXT, extra={"vault_fields": fields})
+    finally:
+        logging.raiseExceptions = previous
+        logger.removeHandler(handler)
+    written = stream.getvalue()
+    assert "Patient" not in written
+    assert "Traceback" not in written
+    assert "invalid_event" in written or "invalid_fields=True" in written
+
+
+def test_a_record_that_cannot_be_formatted_becomes_a_fixed_line() -> None:
+    # A bad %-format on a trusted logger makes getMessage() raise; nothing may escape.
+    record = logging.getLogger("uvicorn.error").makeRecord(
+        "uvicorn.error", logging.INFO, __file__, 1, "%d", (DOCUMENT_TEXT,), None
+    )
+    line = SafeFormatter().format(record)
+    assert line.endswith(" INFO format_error")
+    assert "Patient" not in line
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Diagnosis.pdf",
+        DOCUMENT_TEXT,
+        "report\nPatient John Smith",
+        "vault.Diagnosis",
+        "vault.diagnosis_pdf",
+    ],
+)
+def test_logger_names_that_are_not_modules_are_not_written(
+    caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    caplog.set_level(logging.INFO)
+    logging.getLogger(name).info("ingest.done")
+    line = capture(caplog)[0]
+    assert " unknown_logger " in line
+    assert "Patient" not in line
+    assert "Diagnosis" not in line
+    assert "\n" not in line
+
+
+@pytest.mark.parametrize("name", ["vault.main", "vault.core.logging", "uvicorn", "uvicorn.error"])
+def test_module_and_trusted_logger_names_are_written(
+    caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    caplog.set_level(logging.INFO)
+    logging.getLogger(name).info("ingest.done")
+    assert f" {name} " in capture(caplog)[0]

@@ -43,6 +43,11 @@ ALLOWED = frozenset(
     )
 )
 
+# SPDX exceptions that only add permissions on top of an allowed licence (Apache-2.0 WITH
+# LLVM-exception). Any other exception, and any identifier not listed here, fails the check: an
+# unknown or custom exception could add restrictions, so it needs a review before it is listed.
+ALLOWED_EXCEPTIONS = frozenset({"llvm-exception"})
+
 # Licence names that older packages write in classifiers or the `License` field.
 ALIASES = {
     "mit license": "MIT",
@@ -130,7 +135,11 @@ def _evaluate(tokens: list[str]) -> bool:
             return False
         allowed = token.lower() in ALLOWED
         if position < len(tokens) and tokens[position].upper() == "WITH":
-            position += 2  # an exception clause never makes a disallowed licence allowed
+            position += 1
+            if position >= len(tokens) or tokens[position].lower() not in ALLOWED_EXCEPTIONS:
+                malformed = True  # a missing, unknown or custom exception fails closed
+                return False
+            position += 1
         return allowed
 
     def conjunction() -> bool:
