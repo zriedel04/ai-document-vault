@@ -32,7 +32,7 @@ py -m pip install --user pre-commit
 pre-commit install
 ```
 
-Frontend work needs Node 22 or newer. From `frontend/`, `npm ci` installs the locked dependencies, and the commands in [`frontend/README.md`](frontend/README.md) run the tests, lint, type check and build. Commit `frontend/package-lock.json` with any dependency change. After an API change, regenerate `frontend/openapi.json` and the TypeScript types as described there; CI fails if they are stale.
+Frontend work needs Node 22.13 or newer on an even-numbered line (22.13+, 24 or 26+; see `frontend/README.md`). From `frontend/`, `npm ci` installs the locked dependencies, and the commands in [`frontend/README.md`](frontend/README.md) run the tests, lint, type check and build. Commit `frontend/package-lock.json` with any dependency change. After an API change, regenerate `frontend/openapi.json` and the TypeScript types as described there; CI fails if they are stale.
 
 Backend work needs Python 3.12 and [uv](https://docs.astral.sh/uv/). From `backend/`, `uv sync` installs the locked dependencies, and the commands in [`backend/README.md`](backend/README.md) run the tests, Ruff, mypy and the licence check. CI runs the same checks. Commit `backend/uv.lock` with any dependency change, and add a dependency only if its licence passes `scripts/check_python_licenses.py` (see Licences below).
 

@@ -4,7 +4,7 @@ The React app (Vite, TypeScript, Mantine) that the backend serves in normal use.
 
 ## Commands
 
-Run from this folder. Node 22 or newer is required.
+Run from this folder. Node 22.13 or newer on an even-numbered line is required (22.13+, 24 or 26+). The range in `package.json` is the intersection of the `engines` of the locked packages (Vite needs 22.12+, ESLint and jsdom 22.13+, Vitest only even-numbered releases); re-derive it when a dependency update changes one.
 
 | Task                                                         | Command                                   |
 | ------------------------------------------------------------ | ----------------------------------------- |
