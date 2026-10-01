@@ -1,0 +1,7 @@
+Team Northwind standup, Tuesday, October 6, 2026
+Attendees: Alex, Jordan, Sam
+
+Alex: collecting feedback on the requirements from the peer review in class.
+Jordan: still working on the join request endpoint.
+Sam: borrowing a library computer until the laptop repair is done.
+Blockers: Sam cannot run the prototype locally.

@@ -21,7 +21,7 @@ questions:
     page: 1
     quote: Class meets on Tuesdays and Thursdays from 2:00 PM to 3:15 PM in Room 214 of Harbor Hall.
 - id: q003
-  question: When are the instructor's office hours?
+  question: When are Dr. Raman's office hours?
   category: lookup
   answerable: true
   answer: Wednesdays from 10:00 AM to 12:00 PM in Room 318 of Harbor Hall.
@@ -49,7 +49,7 @@ questions:
     page: 2
     quote: 'Final report: 25 percent'
 - id: q006
-  question: What is the penalty for handing work in late?
+  question: What is the penalty for handing work in late in CSE 485?
   category: lookup
   answerable: true
   answer: 10 percent per day for up to five days; after five days the work is not accepted.
@@ -58,7 +58,7 @@ questions:
     page: 2
     quote: Late work loses 10 percent per day, up to five days. After five days the work is not accepted.
 - id: q007
-  question: Is there a final exam in the course?
+  question: Is there a final exam in CSE 485?
   category: lookup
   answerable: true
   answer: No, there is no final exam.
@@ -75,6 +75,7 @@ questions:
   - path: courses/cse485/syllabus.pdf
     page: 3
     quote: 'Design review: Friday, October 30, 2026'
+  alternatives:
   - path: project/design-review-feedback.docx
     page: null
     quote: Design review held on Friday, October 30, 2026.
@@ -118,15 +119,6 @@ questions:
     page: 3
     quote: 'Could have: nice to have if time allows'
 - id: q013
-  question: What are the qualities of a good requirement?
-  category: lookup
-  answerable: true
-  answer: It is unambiguous, testable, necessary and feasible.
-  sources:
-  - path: courses/cse485/lecture-04-slide-notes.pdf
-    page: 2
-    quote: A good requirement is unambiguous, testable, necessary and feasible.
-- id: q014
   question: Which database did Jordan choose for the prototype?
   category: lookup
   answerable: true
@@ -135,16 +127,7 @@ questions:
   - path: notes/standup-2026-09-15.txt
     page: null
     quote: 'Jordan: chose SQLite for the prototype.'
-- id: q015
-  question: What happens if the team vote on a disagreement is tied?
-  category: lookup
-  answerable: true
-  answer: The team asks Dr. Raman.
-  sources:
-  - path: notes/team-contract.md
-    page: null
-    quote: If the vote is tied, the team asks Dr. Raman.
-- id: q016
+- id: q014
   question: How many items does a list endpoint return by default and what is the most a client can ask
     for?
   category: lookup
@@ -155,16 +138,7 @@ questions:
     page: null
     quote: List endpoints return 20 items by default. A client may ask for at most 100 items per page
       with the limit parameter.
-- id: q017
-  question: What does the API return when a group does not exist?
-  category: lookup
-  answerable: true
-  answer: '404.'
-  sources:
-  - path: notes/api-design-notes.md
-    page: null
-    quote: A request for a group that does not exist returns 404.
-- id: q018
+- id: q015
   question: When is the Operating Systems final?
   category: lookup
   answerable: true
@@ -173,12 +147,55 @@ questions:
   - path: notes/study-plan.md
     page: null
     quote: 'Wednesday, December 9 at 1:00 PM: Operating Systems final'
+  alternatives:
   - path: screenshots/calendar-finals-week.png
     page: null
     quote: 'Wed Dec 9: Operating Systems final at 1:00 PM'
+  - path: courses/cs350/syllabus.pdf
+    page: 2
+    quote: The final exam is on Wednesday, December 9, 2026 at 1:00 PM.
+- id: q016
+  question: When is the Calculus II final exam?
+  category: lookup
+  answerable: true
+  answer: Tuesday, December 8, 2026 at 9:00 AM.
+  sources:
+  - path: courses/math241/syllabus.pdf
+    page: 2
+    quote: The final exam is on Tuesday, December 8, 2026 at 9:00 AM.
+  alternatives:
+  - path: notes/study-plan.md
+    page: null
+    quote: 'Tuesday, December 8 at 9:00 AM: Calculus II final'
+  - path: screenshots/calendar-finals-week.png
+    page: null
+    quote: 'Tue Dec 8: Calculus II final at 9:00 AM'
+- id: q017
+  question: How long is each team's prototype demo and how is the time split?
+  category: lookup
+  answerable: true
+  answer: '12 minutes: 8 to present and 4 for questions.'
+  sources:
+  - path: emails/class-announcement-demo-day.txt
+    page: null
+    quote: 'Each team has 12 minutes for its prototype demo on Friday, November 20: 8 minutes to present
+      and 4 minutes for questions.'
+- id: q018
+  question: Which comes first, the Calculus II final or the Operating Systems final?
+  category: multi_doc
+  answerable: true
+  answer: The Calculus II final (Tuesday, December 8 at 9:00 AM), one day before the Operating Systems
+    final (Wednesday, December 9 at 1:00 PM).
+  sources:
+  - path: courses/math241/syllabus.pdf
+    page: 2
+    quote: The final exam is on Tuesday, December 8, 2026 at 9:00 AM.
+  - path: courses/cs350/syllabus.pdf
+    page: 2
+    quote: The final exam is on Wednesday, December 9, 2026 at 1:00 PM.
 - id: q019
   question: Why did Alex ask the instructor for more time on Assignment 2?
-  category: multi_doc
+  category: lookup
   answerable: true
   answer: Sam's laptop screen broke, the repair would take five business days, and Sam held the latest
     draft.
@@ -187,6 +204,7 @@ questions:
     page: null
     quote: Our teammate Sam's laptop screen broke today and the repair shop says the repair will take
       five business days. Sam holds the latest draft of our requirements specification.
+  alternatives:
   - path: notes/project-journal.md
     page: null
     quote: Sam's laptop screen broke. The repair shop quoted five business days.
@@ -205,7 +223,7 @@ questions:
     quote: this request is sent six days before it
 - id: q021
   question: Does the approved extension apply to the other assignments too?
-  category: multi_doc
+  category: lookup
   answerable: true
   answer: No, it applies to Assignment 2 only.
   sources:
@@ -215,13 +233,14 @@ questions:
 - id: q022
   question: What did the instructor ask the team to put on the first page of the specification after the
     extension?
-  category: multi_doc
+  category: lookup
   answerable: true
   answer: A short note saying that the deadline was extended.
   sources:
   - path: emails/advisor-reply.txt
     page: null
     quote: Please add a short note on the first page of the specification that says the deadline was extended.
+  alternatives:
   - path: project/requirements-v2.docx
     page: null
     quote: The deadline for this assignment was extended to October 12, 2026 by the instructor.
@@ -242,7 +261,7 @@ questions:
     quote: Peer evaluation,5,96,100
 - id: q024
   question: What was the design review score and what did the reviewer ask the team to add?
-  category: multi_doc
+  category: lookup
   answerable: true
   answer: 92 out of 100; an index on the course code column for the group search query.
   sources:
@@ -271,10 +290,11 @@ questions:
   distractors:
   - project/requirements-v1.docx
 - id: q026
-  question: Which teammate's computer broke and what did the repair cost in total?
+  question: How much did it cost to repair the laptop screen that broke on October 3?
   category: multi_doc
   answerable: true
-  answer: Sam Patel's laptop; the repair cost $187.92.
+  answer: $187.92 (Sam Patel's repair, Quick Fix Computers). The journal dates the breakage and the receipt
+    gives the bill.
   sources:
   - path: notes/project-journal.md
     page: null
@@ -328,6 +348,7 @@ questions:
   - path: project/requirements-v2.docx
     page: null
     quote: Payments, video calls, in-app chat and a native mobile application are out of scope.
+  alternatives:
   - path: notes/project-journal.md
     page: null
     quote: We removed in-app chat from the first release because it would take too long to build.
@@ -361,6 +382,7 @@ questions:
   - path: emails/advisor-reply.txt
     page: null
     quote: Your team may submit Assignment 2 by Monday, October 12 at 11:59 PM with no late penalty.
+  alternatives:
   - path: project/requirements-v2.docx
     page: null
     quote: The deadline for this assignment was extended to October 12, 2026 by the instructor.
@@ -376,6 +398,7 @@ questions:
   - path: project/requirements-v2.docx
     page: null
     quote: Version 2.0 (submitted), October 11, 2026.
+  alternatives:
   - path: notes/project-journal.md
     page: null
     quote: Submitted version 2 of the requirements.
@@ -482,8 +505,8 @@ questions:
     page: null
     quote: Total $97.15
 - id: q043
-  question: Does the price on the bookstore receipt match the price in the syllabus?
-  category: numeric
+  question: Does the price on the bookstore receipt match the price in the CSE 485 syllabus?
+  category: multi_doc
   answerable: true
   answer: Yes, both give 89.95 dollars before tax.
   sources:
@@ -513,7 +536,7 @@ questions:
     quote: Total,82.90
 - id: q046
   question: Does the poster printing receipt agree with the project budget?
-  category: numeric
+  category: multi_doc
   answerable: true
   answer: Yes, both show $7.50.
   sources:
@@ -554,7 +577,7 @@ questions:
     page: null
     quote: 'Customer: Sam Patel'
 - id: q050
-  question: What is the rule if I turn work in a week after the deadline without asking?
+  question: What is the CSE 485 rule if I turn work in a week after the deadline without asking?
   category: paraphrase
   answerable: true
   answer: It is not accepted, because late work is only accepted for up to five days.

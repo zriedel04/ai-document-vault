@@ -3,6 +3,14 @@
   "generated_by": "demo/generate/build.py",
   "documents": [
     {
+      "path": "courses/cs350/syllabus.pdf",
+      "kind": "pdf_text",
+      "bytes": 3853,
+      "sha256": "43f28d47fbfb3561bd285274adc890c98eb356233eb271e54783840fab2f77c1",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
       "path": "courses/cse485/assignment-1-project-proposal.pdf",
       "kind": "pdf_text",
       "bytes": 3669,
@@ -27,6 +35,14 @@
       "needs_ocr": false
     },
     {
+      "path": "courses/cse485/lecture-05-slide-notes.pdf",
+      "kind": "pdf_text",
+      "bytes": 3266,
+      "sha256": "77275f70a72cf042abf2fc41a678257b907a4a5299b64e5fb178a9b767545530",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
       "path": "courses/cse485/syllabus-copy.pdf",
       "kind": "pdf_text",
       "bytes": 7253,
@@ -42,6 +58,22 @@
       "bytes": 7253,
       "sha256": "3c574d57801f77cebc59416984e51765ebf302f87c43b63a5f64684dfb365ddb",
       "pages": 3,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/math241/syllabus.pdf",
+      "kind": "pdf_text",
+      "bytes": 4100,
+      "sha256": "1ac03b518920af8f1ed6766d4ab99d08328dfa338d6ebdee6beef478928453ec",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
+      "path": "data/class-schedule.csv",
+      "kind": "csv",
+      "bytes": 157,
+      "sha256": "06f025157c9717ba05d03cdbf5deeb29d39140b5d4f6c55121be523ea6fb5d28",
+      "pages": null,
       "needs_ocr": false
     },
     {
@@ -85,10 +117,26 @@
       "needs_ocr": false
     },
     {
+      "path": "emails/class-announcement-demo-day.txt",
+      "kind": "txt",
+      "bytes": 474,
+      "sha256": "405bc85be95b6c5fc302934eafe78baf9c6d84ed3a66130600280bc0f95fa17b",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
       "path": "notes/api-design-notes.md",
       "kind": "md",
       "bytes": 487,
       "sha256": "1a8704667f2e7ede8c8024eacafc8da2cff050b9211b1e1eff5f5044af5c38b0",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/final-report-outline.md",
+      "kind": "md",
+      "bytes": 394,
+      "sha256": "60c01d746f182501493e7a52a081a0cdeff576f6fdad5d316f7908deaa82a178",
       "pages": null,
       "needs_ocr": false
     },
@@ -143,6 +191,22 @@
       "needs_ocr": false
     },
     {
+      "path": "notes/standup-2026-09-29.txt",
+      "kind": "txt",
+      "bytes": 267,
+      "sha256": "48cd8bf68919f1f6f1064bd19ea2ec722aaa0ff212ff6b15b5750d3a67b7755d",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/standup-2026-10-06.txt",
+      "kind": "txt",
+      "bytes": 323,
+      "sha256": "e170d34b55b39c4ac8b8cf9836129b76759d1ca5ccc4be08d869a72a5f9b3bad",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
       "path": "notes/study-plan.md",
       "kind": "md",
       "bytes": 399,
@@ -163,6 +227,14 @@
       "kind": "docx",
       "bytes": 3105,
       "sha256": "95c9f8d35127842bc62ebebc0c0d785cbddb21ed1adf07d2f4fb90db4287b9ad",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "project/project-proposal.docx",
+      "kind": "docx",
+      "bytes": 3152,
+      "sha256": "091564a162fcafb1f15e6c0041fb317ab42ea40c9eefd956604334e7fca8a548",
       "pages": null,
       "needs_ocr": false
     },
@@ -197,32 +269,42 @@
     {
       "path": "receipts/bookstore-receipt.jpg",
       "kind": "jpg",
-      "bytes": 45721,
-      "sha256": "741f5422f6ab90bb3b3f004247d4032cacf1446bdc3d633e6c0fe8a92967d362",
+      "bytes": 48976,
+      "sha256": "f6b810b773bfe502aaa534e90f7773a8e5c73349fcc33e8a9a549a61e55047ea",
       "pages": null,
       "needs_ocr": true
     },
     {
+      "path": "receipts/coffee-receipt-copy.jpg",
+      "kind": "jpg",
+      "bytes": 37090,
+      "sha256": "aaf97b32bc62de81b1ba5ab6f9c9f8a204bde81cba34b73e71bb41a9f1a768a8",
+      "pages": null,
+      "needs_ocr": true,
+      "exact_duplicate_of": "receipts/coffee-receipt.jpg",
+      "note": "Byte-for-byte copy of coffee-receipt.jpg"
+    },
+    {
       "path": "receipts/coffee-receipt.jpg",
       "kind": "jpg",
-      "bytes": 34043,
-      "sha256": "683c01a740b3c2f25ce9b4725e1c6c1bd0a7f65c0aac0a9548142a1818c42f7c",
+      "bytes": 37090,
+      "sha256": "aaf97b32bc62de81b1ba5ab6f9c9f8a204bde81cba34b73e71bb41a9f1a768a8",
       "pages": null,
       "needs_ocr": true
     },
     {
       "path": "receipts/laptop-repair-receipt.jpg",
       "kind": "jpg",
-      "bytes": 48641,
-      "sha256": "6cd97cf8bc541d8bb7bb44b179f97e0f2c3ceba6fdfcfb4471f0c8a651715d00",
+      "bytes": 52857,
+      "sha256": "ca2c714a7cfa0e33449a8242f496991b54ab50794188dbc1ee15cede167b57a4",
       "pages": null,
       "needs_ocr": true
     },
     {
       "path": "receipts/printing-receipt.jpg",
       "kind": "jpg",
-      "bytes": 29910,
-      "sha256": "b403291f0ec6e0bf98217a8ef234d9461e4bda0d674b0cb19b9d88dd06afd2af",
+      "bytes": 32835,
+      "sha256": "8beb93529a1ed95fd089c4b4789633af986c6d4e2d6cec0f4f69b2fce99e555b",
       "pages": null,
       "needs_ocr": true
     },
@@ -231,6 +313,15 @@
       "kind": "pdf_scan",
       "bytes": 121204,
       "sha256": "6efe750d60b58c83a7d6a513aac07487a6fe8bee32e99b9252da383cde1cc5a8",
+      "pages": 1,
+      "needs_ocr": true,
+      "note": "Scanned-style PDF: an image only, no text layer"
+    },
+    {
+      "path": "scans/library-overdue-notice-scan.pdf",
+      "kind": "pdf_scan",
+      "bytes": 101467,
+      "sha256": "079d3686986f51885a9e56e832961be451f1c9559c77ed2876c40a88f8d10edf",
       "pages": 1,
       "needs_ocr": true,
       "note": "Scanned-style PDF: an image only, no text layer"
@@ -263,8 +354,8 @@
     {
       "path": "screenshots/chat-with-advisor.png",
       "kind": "png",
-      "bytes": 29247,
-      "sha256": "e00b5df2f9c5f262cc676d95987691c8cdc58c81d5d3c4eb88e57bccf610eb59",
+      "bytes": 30957,
+      "sha256": "b9061a2aac29369a2791eec6159b46753599d0af7c91ac7fa9021e44c6011bea",
       "pages": null,
       "needs_ocr": true
     },

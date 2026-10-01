@@ -1,0 +1,12 @@
+From: Dr. Priya Raman <priya.raman@lit.example>
+To: CSE 485 class list <cse485-all@lit.example>
+Date: Mon, Nov 9, 2026 at 8:05 AM
+Subject: Prototype demo logistics
+
+Hello everyone,
+
+Each team has 12 minutes for its prototype demo on Friday, November 20: 8 minutes to present and 4 minutes for questions. Sign up for a time slot on the course portal by Friday, November 13.
+
+Please bring a laptop that can connect to the projector, and test it before the session.
+
+Dr. Raman

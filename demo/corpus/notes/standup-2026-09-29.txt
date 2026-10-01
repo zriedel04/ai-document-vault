@@ -1,0 +1,7 @@
+Team Northwind standup, Tuesday, September 29, 2026
+Attendees: Alex, Jordan, Sam
+
+Alex: the first draft of the requirements specification is finished and shared.
+Jordan: started the join request endpoint.
+Sam: working on the mockup of the group page.
+Blockers: none.
