@@ -21,7 +21,7 @@ Run from this folder. Python 3.12 and [uv](https://docs.astral.sh/uv/) are requi
 
 ## Logging
 
-Use `vault.core.logging.log_event` and `timed`, never a bare `logger.info("... %s", text)`. Logging is deny by default: event names are literals like `ingest.chunk_done`, field names are `lower_snake_case`, and a field value is written only if it is a number, a boolean, `None`, an enum member or an `Identifier`. Every other value, including every plain `str`, is replaced by `[redacted]`. Create an `Identifier` with `identifier(...)` only from an id the application generated (`doc_9f3a1c`, a content hash, a UUID), never from document text or a file name. Exceptions are logged as type and location only.
+Use `vault.core.logging.log_event` and `timed`, never a bare `logger.info("... %s", text)`. Logging is deny by default: event names are literals like `ingest.chunk_done`, field names are `lower_snake_case`, and a field value is written only if it is a number, a boolean, `None`, an enum member or an `Identifier`. Every other value, including every plain `str`, is replaced by `[redacted]`. Create an `Identifier` with `identifier(...)` only from an id the application generated (`doc_9f3a1c`, a content hash, a UUID), never from document text or a file name. Exceptions are logged as type and location only. Third-party loggers are deny by default too: only `uvicorn` and `uvicorn.error` messages are written, any other library's record is written as `message_omitted`, and the server runs with `access_log=False` because uvicorn's access log writes request paths and query strings.
 
 ## Dependencies
 

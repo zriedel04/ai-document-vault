@@ -208,10 +208,31 @@ def test_exception_logged_through_plain_logging_has_no_message(
     assert "Traceback" not in line
 
 
-def test_third_party_messages_pass_through(caplog: pytest.LogCaptureFixture) -> None:
+def test_uvicorn_start_up_and_error_messages_pass_through(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     caplog.set_level(logging.INFO)
     logging.getLogger("uvicorn.error").info("Started server process [%d]", 42)
-    assert capture(caplog)[0].endswith("uvicorn.error Started server process [42]")
+    logging.getLogger("uvicorn").info("Uvicorn running")
+    lines = capture(caplog)
+    assert lines[0].endswith("uvicorn.error Started server process [42]")
+    assert lines[1].endswith("uvicorn Uvicorn running")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["uvicorn.access", "httpx2", "pdfminer.pdfpage", "pdfplumber", "PIL.PngImagePlugin", "root"],
+)
+def test_other_third_party_messages_are_omitted(
+    caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger(name).info('GET /api/health?query=%s "HTTP/1.1 200"', "Diagnosis")
+    logging.getLogger(name).warning(DOCUMENT_TEXT)
+    for line in capture(caplog):
+        assert f" {name} message_omitted" in line
+        assert "Diagnosis" not in line
+        assert "Patient" not in line
 
 
 def test_timed_logs_duration_and_success(caplog: pytest.LogCaptureFixture) -> None:

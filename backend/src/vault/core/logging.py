@@ -17,8 +17,11 @@ looks harmless (a single word of document text looks like an identifier).
 - An exception is logged as its type and the place it was raised, never its message, which could
   quote the content that failed to parse.
 
-Records from third-party libraries (uvicorn and so on) are written as they are; they never see
-document content, and extraction code that does runs behind our own loggers.
+- Third-party loggers are deny by default too. Libraries log things we do not control (uvicorn's
+  access log writes the request path and query, which can carry private text), so only
+  ``uvicorn`` and ``uvicorn.error`` messages (start-up and errors) are written. A record from any
+  other logger is written as its name and level with ``message_omitted``. The server also runs
+  with ``access_log=False``.
 """
 
 from __future__ import annotations
@@ -35,6 +38,8 @@ from enum import Enum
 from typing import Final, LiteralString
 
 APP_LOGGER: Final = "vault"
+# Third-party loggers whose messages are written as they are. Everything else is omitted.
+TRUSTED_LOGGERS: Final = frozenset({"uvicorn", "uvicorn.error"})
 EVENT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")  # at least ``domain.action``
 FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 # An application-generated id: ``doc_9f3a1c``, a content hash, or a UUID.
@@ -95,7 +100,12 @@ class SafeFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         own = record.name == APP_LOGGER or record.name.startswith(f"{APP_LOGGER}.")
-        message = record.getMessage() if not own else self._event(record)
+        if own:
+            message = self._event(record)
+        elif record.name in TRUSTED_LOGGERS:
+            message = record.getMessage()
+        else:
+            message = "message_omitted"
         parts = [self.formatTime(record, self.datefmt), record.levelname, record.name, message]
         fields: dict[str, object] = getattr(record, FIELDS_ATTR, {})
         for position, (key, value) in enumerate(fields.items()):
