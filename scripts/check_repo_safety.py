@@ -73,8 +73,22 @@ ARCHIVE_MAGIC = (
     b"Rar!\x1a\x07",
     b"\xfd7zXZ\x00",
     b"\x28\xb5\x2f\xfd",  # zstandard
+    b"MSCF",  # cabinet
 )
 BZIP2_MAGIC = b"BZh"
+DOCUMENT_MAGIC = (
+    b"%PDF-",
+    b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",  # legacy Office: doc, xls, ppt, msg
+    b"{\\rtf",
+)
+IMAGE_MAGIC = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+    b"II*\x00",
+    b"MM\x00*",
+)
 KEY_SUFFIXES = (
     ".gpg",
     ".jks",
@@ -218,13 +232,37 @@ def is_archive(head: bytes) -> bool:
     return head.startswith(BZIP2_MAGIC) and head[3:4].isdigit() and head[4:10] == b"1AY&SY"
 
 
-def content_problem(head: bytes, archives_allowed: bool = False) -> str | None:
-    """A reason if the first bytes show a database or archive, whatever the file is called."""
+def is_image(head: bytes) -> bool:
+    """True if the first bytes are the signature of a common image format."""
+    if head.startswith(IMAGE_MAGIC):
+        return True
+    return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+
+
+def content_problem(head: bytes, allowed: frozenset[str] = frozenset()) -> str | None:
+    """A reason if the first bytes show private-looking content, whatever the file is called.
+
+    ``allowed`` lists the kinds ("archive", "document", "image") that are fine where the file
+    lives. A database is never allowed.
+    """
     if head.startswith(SQLITE_HEADER):
         return "SQLite database detected from file content"
-    if not archives_allowed and is_archive(head):
+    if "archive" not in allowed and is_archive(head):
         return "archive detected from file content"
+    if "document" not in allowed and head.startswith(DOCUMENT_MAGIC):
+        return "document (PDF, Office or RTF) detected from file content"
+    if "image" not in allowed and is_image(head):
+        return "image detected from file content"
     return None
+
+
+def allowed_content(path: str) -> frozenset[str]:
+    """Content kinds that may live at ``path``: synthetic fixtures may hold anything."""
+    if is_fixture_path(path):
+        return frozenset({"archive", "document", "image"})
+    if _normalise(path).as_posix().startswith(IMAGE_DIR_PREFIXES):
+        return frozenset({"image"})
+    return frozenset()
 
 
 def reasons_for(path: str, size: int | None, head: bytes) -> list[str]:
@@ -239,7 +277,7 @@ def reasons_for(path: str, size: int | None, head: bytes) -> list[str]:
     if problem:
         reasons.append(problem)
     if not any(reason.startswith("database") for reason in reasons):
-        problem = content_problem(head, archives_allowed=is_fixture_path(path))
+        problem = content_problem(head, allowed_content(path))
         if problem:
             reasons.append(problem)
     return reasons
