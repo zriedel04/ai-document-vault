@@ -1,0 +1,13 @@
+# Copy to config.toml (git-ignored) and adjust. Never put API keys in this file.
+# Later sections (processing, ai, pricing) arrive with their phases.
+
+[vault]
+# Must be outside this repository.
+path = 'D:\AIVault'
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[logging]
+level = "INFO"
