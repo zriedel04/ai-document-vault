@@ -54,7 +54,7 @@ A written licence audit is done before the repository is made public.
 
 ## Architecture decisions
 
-Significant decisions are recorded as ADRs in `docs/decisions/`. Changing an accepted decision needs a new ADR and the maintainer's approval.
+Significant decisions are recorded as ADRs in `docs/decisions/` (see its README for the template, statuses and rules). Changing an accepted decision needs a new ADR that supersedes it and the maintainer's approval. Hardware-dependent choices stay Proposed until their spike has run on the maintainer's Windows PC. `python scripts/check_adrs.py` checks ADR structure, statuses and the index.
 
 ## AI-assisted development
 
