@@ -72,7 +72,12 @@ DOCUMENT_SUFFIXES = (
     ".xlsx",
 )
 IMAGE_SUFFIXES = (".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")
-PRIVATE_DIR_NAMES = frozenset({"backups", "blobs", "derived", "exports", "logs"})
+PRIVATE_DIR_NAMES = frozenset(
+    {".cache", "backups", "blobs", "derived", "exports", "logs", "secrets"}
+)
+"""Folders that hold private data wherever they appear in the tree."""
+ROOT_PRIVATE_DIR_NAMES = frozenset({"aivault", "models", "vault", "vaults"})
+"""Private only at the repository root: backend/src/vault/ is source code."""
 IMAGE_DIR_PREFIXES = ("docs/images/", "frontend/public/", "frontend/src/assets/")
 
 
@@ -126,6 +131,8 @@ def path_problems(path: str) -> list[str]:
     if name.endswith(".log"):
         problems.append("log file")
     private_folders = sorted(PRIVATE_DIR_NAMES.intersection(folders))
+    if folders[:1] and folders[0] in ROOT_PRIVATE_DIR_NAMES:
+        private_folders.append(folders[0])
     if private_folders:
         problems.append(f"inside a private data folder ({private_folders[0]}/)")
     if folders[:2] == ("eval", "private"):

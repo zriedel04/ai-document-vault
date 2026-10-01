@@ -48,6 +48,16 @@ class PathRulesTest(unittest.TestCase):
     def test_private_folders(self) -> None:
         self.assertBlocked("blobs/sha256/aa/bb/x.txt", "private data folder")
         self.assertBlocked("logs/app.txt", "private data folder")
+        for path in (
+            "vault/extracted.txt",
+            "vaults/alice/chunks.json",
+            "AIVault/notes.txt",
+            "models/tokenizer.json",
+            "secrets/token.txt",
+            "backend/secrets/token.txt",
+            ".cache/huggingface/x.json",
+        ):
+            self.assertBlocked(path, "private data folder")
         self.assertBlocked("run.log", "log file")
         self.assertBlocked("eval/private/questions.yaml", "private evaluation")
         self.assertAllowed("eval/public/questions.yaml")
@@ -72,7 +82,14 @@ class PathRulesTest(unittest.TestCase):
             self.assertAllowed(path)
 
     def test_ordinary_files_allowed(self) -> None:
-        for path in ("README.md", "backend/app/main.py", "frontend/src/App.tsx"):
+        for path in (
+            "README.md",
+            "backend/app/main.py",
+            "frontend/src/App.tsx",
+            "backend/src/vault/main.py",
+            "backend/src/vault/storage/blob_store.py",
+            "docs/models.md",
+        ):
             self.assertAllowed(path)
 
 
@@ -139,6 +156,14 @@ class GitIntegrationTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("vault.db", result.stderr)
+
+    def test_force_added_vault_folder_files_fail(self) -> None:
+        self.commit("vault/extracted.txt", b"text taken from a private document\n")
+        self.commit("backend/src/vault/main.py", b"print('code')\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("vault/extracted.txt", result.stderr)
+        self.assertNotIn("backend/src/vault/main.py", result.stderr)
 
     def test_sqlite_content_detected_under_innocent_name(self) -> None:
         self.commit("notes.txt", safety.SQLITE_HEADER + b"\0" * 100)
