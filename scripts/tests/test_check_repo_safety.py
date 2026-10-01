@@ -37,7 +37,16 @@ class PathRulesTest(unittest.TestCase):
             self.assertAllowed(path)
 
     def test_keys(self) -> None:
-        for path in ("server.pem", "a/b.key", "id_rsa", "id_ed25519"):
+        for path in (
+            "server.pem",
+            "a/b.key",
+            "id_rsa",
+            "id_ed25519",
+            "credentials.ppk",
+            "signing.p8",
+            "store.jks",
+            "passwords.kdbx",
+        ):
             self.assertBlocked(path, "private key")
         self.assertAllowed("id_ed25519.pub")
 
@@ -70,6 +79,9 @@ class PathRulesTest(unittest.TestCase):
         self.assertAllowed("backend/tests/unit/fixtures/a.docx")
         self.assertAllowed("demo/corpus/syllabus.pdf")
         self.assertAllowed("demo\\corpus\\grades.csv")
+        for path in ("notes/book.epub", "scans/letter.djvu", "a/b.xlsm", "x/y.pages"):
+            self.assertBlocked(path, "document outside")
+        self.assertAllowed("tests/fixtures/book.epub")
 
     def test_images(self) -> None:
         self.assertBlocked("photo.jpg", "image outside")

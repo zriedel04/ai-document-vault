@@ -41,6 +41,13 @@ secrets/
 *.key
 *.pfx
 *.p12
+*.p8
+*.ppk
+*.jks
+*.keystore
+*.kdbx
+*.gpg
+*.pgp
 
 # Model weights and caches (downloaded at install time)
 /models/
