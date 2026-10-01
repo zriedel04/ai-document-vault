@@ -143,6 +143,35 @@ class ViolationsTest(unittest.TestCase):
         changed = package("pathspec", classifiers=("GNU General Public License v3 (GPLv3)",))
         self.assertEqual(len(licences.violations([changed])), 1)
 
+    def test_reviewed_exception_needs_the_winning_metadata_source_to_say_so(self) -> None:
+        mpl = "Mozilla Public License 2.0 (MPL 2.0)"
+        gpl = "GNU General Public License v3 (GPLv3)"
+        # The expression wins over the classifiers, so an old MPL classifier cannot rescue GPL.
+        gpl_expression = package("pathspec", "GPL-3.0-only", classifiers=(mpl,))
+        self.assertEqual(len(licences.violations([gpl_expression])), 1)
+        # The same for the free-text field, behind both of the others.
+        gpl_classifier = package("pathspec", classifiers=(gpl,), field=mpl)
+        self.assertEqual(len(licences.violations([gpl_classifier])), 1)
+        # An extra classifier next to the reviewed one ends the exception.
+        extra = package("pathspec", classifiers=(mpl, gpl))
+        self.assertEqual(len(licences.violations([extra])), 1)
+        # An allowed expression with the reviewed classifier is simply allowed.
+        self.assertEqual(licences.violations([package("pathspec", "MIT", classifiers=(mpl,))]), [])
+        # The reviewed licence in the winning source is still accepted (outside strict mode).
+        self.assertEqual(licences.violations([package("pathspec", classifiers=(mpl,))]), [])
+        self.assertEqual(licences.violations([package("pathspec", field=mpl)]), [])
+        self.assertEqual(len(licences.violations([package("pathspec", field=mpl)], strict=True)), 1)
+
+    def test_licence_source_follows_the_precedence_of_the_allowed_check(self) -> None:
+        self.assertEqual(
+            licences.licence_source(package(expression="MIT", classifiers=("x",), field="y")),
+            ("MIT",),
+        )
+        self.assertEqual(licences.licence_source(package(classifiers=("x",), field="y")), ("x",))
+        self.assertEqual(licences.licence_source(package(field="y")), ("y",))
+        self.assertEqual(licences.licence_source(package(field="y\nz")), ())
+        self.assertEqual(licences.licence_source(package()), ())
+
     def test_exception_is_per_package(self) -> None:
         other = package("something-else", classifiers=("Mozilla Public License 2.0 (MPL 2.0)",))
         self.assertEqual(len(licences.violations([other])), 1)
@@ -199,6 +228,17 @@ class EnvironmentTest(unittest.TestCase):
             self.install(root, "ours", "")
             self.assertEqual(self.run_main(root)[0], 1)
             self.assertEqual(self.run_main(root, "--ignore", "ours")[0], 0)
+
+    def test_a_gpl_expression_is_not_rescued_by_a_reviewed_classifier(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            self.install(
+                root,
+                "pathspec",
+                "License-Expression: GPL-3.0-only\n"
+                "Classifier: License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)\n",
+            )
+            self.assertEqual(self.run_main(root)[0], 1)
 
     def test_strict_mode_rejects_reviewed_exceptions(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
