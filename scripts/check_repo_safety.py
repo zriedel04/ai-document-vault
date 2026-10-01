@@ -202,6 +202,8 @@ def path_problems(path: str) -> list[str]:
         problems.append(
             "local configuration (only config.example.toml and config.demo.toml may be committed)"
         )
+    if name == "local-token":
+        problems.append("the install's access token for the local API (created in the vault folder)")
     if name.endswith(KEY_SUFFIXES) or (
         name.startswith(SSH_KEY_PREFIXES) and not name.endswith(".pub")
     ):
