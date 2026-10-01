@@ -50,11 +50,13 @@ from typing import Final, LiteralString
 APP_LOGGER: Final = "vault"
 # Third-party loggers whose messages are written as they are. Everything else is omitted.
 TRUSTED_LOGGERS: Final = frozenset({"uvicorn", "uvicorn.error"})
-EVENT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")  # at least ``domain.action``
-FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# Always use ``fullmatch`` with these: ``$`` also matches before a trailing newline, so ``match``
+# would accept ``"patient.diagnosis\n"``.
+EVENT_NAME = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+")  # at least ``domain.action``
+FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
 # An application-generated id: ``doc_9f3a1c``, a content hash, or a UUID.
 IDENTIFIER = re.compile(
-    r"^(?:[a-z]{1,12}_[0-9a-f]{6,64}|[0-9a-f]{8,64}|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$"
+    r"[a-z]{1,12}_[0-9a-f]{6,64}|[0-9a-f]{8,64}|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 )
 REDACTED: Final = "[redacted]"
 FIELDS_ATTR: Final = "vault_fields"
@@ -132,7 +134,7 @@ def _safe(value: object) -> str:
         return REDACTED
     if isinstance(value, Identifier) and IDENTIFIER.fullmatch(str(value)):
         return str.__str__(value)
-    if isinstance(value, Enum) and FIELD_NAME.match(name := value.name.lower()):
+    if isinstance(value, Enum) and FIELD_NAME.fullmatch(name := value.name.lower()):
         return name
     return REDACTED
 
@@ -171,7 +173,7 @@ class SafeFormatter(logging.Formatter):
         for position, (key, value) in enumerate(fields.items()):
             name = (
                 key
-                if isinstance(key, str) and FIELD_NAME.match(key)
+                if isinstance(key, str) and FIELD_NAME.fullmatch(key)
                 else f"invalid_field_{position}"
             )
             parts.append(f"{name}={_safe(value)}")
@@ -185,7 +187,7 @@ class SafeFormatter(logging.Formatter):
     @staticmethod
     def _event(record: logging.LogRecord) -> str:
         message = record.msg
-        if isinstance(message, str) and not record.args and EVENT_NAME.match(message):
+        if isinstance(message, str) and not record.args and EVENT_NAME.fullmatch(message):
             return message
         return "invalid_event"
 
@@ -226,7 +228,7 @@ def _emit(
     fields: dict[str, FieldValue],
     exc_info: bool | BaseException | None = None,
 ) -> None:
-    if not EVENT_NAME.match(event):
+    if not EVENT_NAME.fullmatch(event):
         event = "invalid_event"
     logger.log(level, event, extra={FIELDS_ATTR: fields}, exc_info=exc_info)
 
