@@ -13,8 +13,8 @@ Each file here records one decision: the context, what was decided, the alternat
 
 ## Rules
 
-- A change to an Accepted decision needs a new ADR that supersedes it, and the owner's approval before the change is made.
-- Nothing marked `Hardware-dependent: yes` may be Accepted until a spike result is linked from the ADR (`- Spike results: docs/spikes/NN-topic.md`, an existing file in that folder other than its README). See [`docs/spikes/`](../spikes/README.md).
+- A change to an Accepted decision needs a new ADR that supersedes it, and the owner's approval before the change is made. The new ADR is Accepted and says `- Supersedes: ADR NNNN`; the old one becomes `Superseded by ADR NNNN`. The check requires both lines and rejects a replacement that does not exist, is older, or is not Accepted.
+- Nothing marked `Hardware-dependent: yes` may be Accepted until a spike result is linked from the ADR (`- Spike results: docs/spikes/NN-topic.md`, an existing file in that folder other than its README, with non-empty Question, Environment, Method, Results and Conclusion sections). The check is structural: it cannot show the experiment ran on the Windows PC, so the owner confirms the results before approving. See [`docs/spikes/`](../spikes/README.md).
 - A Proposed ADR has an "Evidence needed" section saying what would settle it.
 - Copy [`0000-template.md`](0000-template.md) for a new ADR and add it to the index below. `python scripts/check_adrs.py` checks the structure, the statuses and this index, in pre-commit and in CI.
 

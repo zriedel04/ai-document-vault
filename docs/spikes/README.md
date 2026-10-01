@@ -8,7 +8,7 @@ Metrics and conclusions only. **Never document text.** That means never the text
 
 ## One file per spike
 
-Name the file `NN-topic.md` (for example `01-embedding-model.md`) and include:
+Name the file `NN-topic.md` (for example `01-embedding-model.md`) and include these five sections as `## ` headings (`scripts/check_adrs.py` requires each to be non-empty before a hardware-dependent ADR can be Accepted):
 
 - **Question**: what the spike decides, and the ADR it feeds.
 - **Environment**: Windows version, CPU, RAM, GPU and VRAM, Python version, package versions.

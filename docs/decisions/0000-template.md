@@ -7,6 +7,8 @@
 
 <!--
 Status is one of: Proposed, Accepted, Rejected, Superseded by ADR NNNN.
+An ADR that replaces another is Accepted, adds "- Supersedes: ADR NNNN" under Plan reference, and
+the old ADR's status becomes "Superseded by ADR <this one>" (the check requires both).
 Set "Hardware-dependent: yes" when the choice depends on the owner's Windows PC or sample
 documents. Such an ADR stays Proposed until the spikes have run (see docs/spikes/README.md).
 Proposed ADRs also need an "Evidence needed" section.
