@@ -31,3 +31,9 @@ repos:
         entry: python scripts/check_repo_safety.py --staged
         language: system
         types: [file]
+      - id: adr-check
+        name: ADR structure check
+        entry: python scripts/check_adrs.py
+        language: system
+        pass_filenames: false
+        files: ^(docs/decisions/|docs/spikes/|scripts/check_adrs\.py$)

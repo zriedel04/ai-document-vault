@@ -14,6 +14,12 @@ Run on a Windows desktop as a local web app: import documents, extract and OCR t
 
 No personal documents, extracted text, databases, keys, logs or local configuration are ever committed. Tests and the demo use synthetic data only. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Architecture
+
+- [Architecture and development plan](docs/architecture.md) (approved baseline, revision 2)
+- [Architecture decision records](docs/decisions/README.md): why each major choice was made, and which are still Proposed
+- [Spikes](docs/spikes/README.md): how hardware-dependent choices are tested and recorded
+
 ## Development
 
 - [Contributing](CONTRIBUTING.md)
