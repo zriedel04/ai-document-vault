@@ -25,6 +25,19 @@ derived/
 *.sqlite3-shm
 *.sqlite3-journal
 
+# Archives (a synthetic fixture that needs one is added with git add -f)
+*.zip
+*.7z
+*.rar
+*.tar
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.zst
+*.cab
+*.iso
+
 # Logs and private evaluation data
 logs/
 *.log

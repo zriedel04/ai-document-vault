@@ -83,6 +83,12 @@ class PathRulesTest(unittest.TestCase):
             self.assertBlocked(path, "document outside")
         self.assertAllowed("tests/fixtures/book.epub")
 
+    def test_archives_only_in_fixture_folders(self) -> None:
+        for path in ("notes.zip", "a/b.7z", "x/backup.tar.gz", "scans.rar", "disk.iso"):
+            self.assertBlocked(path, "archive")
+        self.assertAllowed("tests/fixtures/corrupt.zip")
+        self.assertAllowed("demo/corpus/bundle.zip")
+
     def test_images(self) -> None:
         self.assertBlocked("photo.jpg", "image outside")
         for path in (
@@ -117,6 +123,18 @@ class SizeRulesTest(unittest.TestCase):
     def test_sqlite_content(self) -> None:
         self.assertIsNotNone(safety.content_problem(safety.SQLITE_HEADER))
         self.assertIsNone(safety.content_problem(b"hello"))
+
+    def test_archive_content(self) -> None:
+        for head in (
+            b"PK\x03\x04" + b"\0" * 12,
+            b"\x1f\x8b\x08" + b"\0" * 13,
+            b"7z\xbc\xaf\x27\x1c" + b"\0" * 10,
+            b"Rar!\x1a\x07\x00" + b"\0" * 9,
+            b"BZh91AY&SY" + b"\0" * 6,
+        ):
+            self.assertIn("archive", safety.content_problem(head) or "", head)
+            self.assertIsNone(safety.content_problem(head, archives_allowed=True), head)
+        self.assertIsNone(safety.content_problem(b"BZh is not bzip2"))
 
 
 class GitIntegrationTest(unittest.TestCase):
@@ -176,6 +194,14 @@ class GitIntegrationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("vault/extracted.txt", result.stderr)
         self.assertNotIn("backend/src/vault/main.py", result.stderr)
+
+    def test_archive_content_detected_under_innocent_name(self) -> None:
+        self.commit("notes.txt", b"PK\x03\x04" + b"\0" * 100)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("archive detected", result.stderr)
+        self.commit("tests/fixtures/sample.docx", b"PK\x03\x04" + b"\0" * 100)
+        self.assertNotIn("sample.docx", self.run_check().stderr)
 
     def test_sqlite_content_detected_under_innocent_name(self) -> None:
         self.commit("notes.txt", safety.SQLITE_HEADER + b"\0" * 100)
