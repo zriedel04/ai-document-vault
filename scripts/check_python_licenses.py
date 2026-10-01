@@ -176,14 +176,27 @@ def name_allowed(name: str) -> bool:
     return key in ALIASES or expression_allowed(cleaned)
 
 
+def licence_source(package: Package) -> tuple[str, ...]:
+    """The licence values the check goes by, from the one metadata source that wins.
+
+    The SPDX expression wins over the classifiers, which win over the free-text field. Both the
+    allowed-licence check and the reviewed-exception check use this, so they cannot read different
+    sources: a package whose expression says GPL is not rescued by an old MPL classifier.
+    """
+    if package.expression:
+        return (package.expression,)
+    if package.classifiers:
+        return package.classifiers
+    if package.field and len(package.field) <= MAX_FIELD_LENGTH and "\n" not in package.field:
+        return (package.field,)
+    return ()
+
+
 def package_allowed(package: Package) -> bool:
     if package.expression:
         return expression_allowed(package.expression)
-    if package.classifiers:
-        return all(name_allowed(classifier) for classifier in package.classifiers)
-    if package.field and len(package.field) <= MAX_FIELD_LENGTH and "\n" not in package.field:
-        return name_allowed(package.field)
-    return False
+    source = licence_source(package)
+    return bool(source) and all(name_allowed(value) for value in source)
 
 
 def read(distribution: Distribution) -> Package:
@@ -206,8 +219,9 @@ def reviewed(package: Package) -> bool:
     entry = REVIEWED.get(normalise(package.name))
     if entry is None:
         return False
-    licence = entry[0]
-    return licence in package.classifiers or licence in (package.expression, package.field)
+    # Exactly the reviewed licence and nothing else: an extra or different value in the winning
+    # source (a second classifier, a different expression) ends the exception.
+    return licence_source(package) == (entry[0],)
 
 
 def violations(
