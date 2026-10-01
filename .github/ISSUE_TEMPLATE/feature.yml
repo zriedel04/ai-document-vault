@@ -1,0 +1,28 @@
+name: Feature
+description: A planned piece of work
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste personal documents, document text, API keys or local paths.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- [ ] ..."
+    validations:
+      required: true
+  - type: input
+    id: phase
+    attributes:
+      label: Phase

@@ -1,0 +1,112 @@
+# AI Document Vault: nothing private may ever be committed.
+# This file is one of three layers (with scripts/check_repo_safety.py and gitleaks).
+
+# Vault data folders (the real vault lives outside the repository)
+/vault/
+/vaults/
+/AIVault/
+blobs/
+derived/
+/backups/
+/exports/
+*.bak
+*.backup
+*.bkp
+*.dump
+
+# Databases
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Archives (a synthetic fixture that needs one is added with git add -f)
+*.zip
+*.7z
+*.rar
+*.tar
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.zst
+*.cab
+*.iso
+
+# Logs and private evaluation data
+logs/
+*.log
+eval/private/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config.toml
+*.local.toml
+secrets/
+*.pem
+*.key
+*.pfx
+*.p12
+*.p8
+*.ppk
+*.jks
+*.keystore
+*.kdbx
+*.gpg
+*.pgp
+
+# Model weights and caches (downloaded at install time)
+/models/
+*.onnx
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+coverage.xml
+
+# Node
+node_modules/
+.vite/
+*.tsbuildinfo
+playwright-report/
+test-results/
+npm-debug.log*
+
+# Tools and editors
+/gitleaks
+/gitleaks.exe
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/

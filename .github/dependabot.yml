@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Python and npm ecosystems are added together with their manifests.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
