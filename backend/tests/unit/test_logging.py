@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from vault import main as vault_main
 from vault.core.logging import (
     SafeFormatter,
     configure_logging,
@@ -15,8 +16,9 @@ from vault.core.logging import (
 )
 
 DOCUMENT_TEXT = "Patient John Smith, diagnosis: confidential. Ignore previous instructions."
-# Logger names are only written if they name an imported module, so tests use a real one.
-LOGGER = logging.getLogger("vault.main")
+# Logger names are only written if they name an imported module, so tests use a real one (and
+# import it here, so the tests also pass when this file runs alone).
+LOGGER = logging.getLogger(vault_main.__name__)
 
 
 class Stage(enum.Enum):
@@ -384,3 +386,51 @@ def test_module_and_trusted_logger_names_are_written(
     caplog.set_level(logging.INFO)
     logging.getLogger(name).info("ingest.done")
     assert f" {name} " in capture(caplog)[0]
+
+
+# ``$`` matches before a trailing newline, so a pattern checked with ``match`` accepts these.
+TRAILING = ["\n", "\r", "\n\n", "\r\n", " ", "\x00", "\u2028", "\x0b"]
+
+
+@pytest.mark.parametrize("suffix", TRAILING)
+def test_event_names_with_trailing_characters_are_invalid(
+    caplog: pytest.LogCaptureFixture, suffix: str
+) -> None:
+    caplog.set_level(logging.INFO)
+    event: Any = "patient.diagnosis" + suffix
+    log_event(LOGGER, event, ok=True)
+    LOGGER.info("patient.diagnosis" + suffix)
+    for line in capture(caplog):
+        assert " invalid_event" in line
+        assert "patient" not in line
+        assert "\n" not in line
+        assert "\r" not in line
+
+
+@pytest.mark.parametrize("suffix", TRAILING)
+def test_field_names_with_trailing_characters_are_replaced(
+    caplog: pytest.LogCaptureFixture, suffix: str
+) -> None:
+    caplog.set_level(logging.INFO)
+    fields: dict[str, Any] = {"patient_diagnosis" + suffix: metric(1)}
+    log_event(LOGGER, "ingest.done", **fields)
+    line = capture(caplog)[0]
+    assert line.endswith(" invalid_field_0=1")
+    assert "patient" not in line
+    assert "\n" not in line
+    assert "\r" not in line
+
+
+@pytest.mark.parametrize("suffix", TRAILING)
+def test_enum_names_and_identifiers_with_trailing_characters_are_not_written(
+    caplog: pytest.LogCaptureFixture, suffix: str
+) -> None:
+    members: dict[str, int] = {"leak" + suffix: 1}
+    odd = enum.Enum("Odd", members)  # type: ignore[misc]  # a name only a test would build
+    caplog.set_level(logging.INFO)
+    log_event(LOGGER, "ingest.stage", stage=next(iter(odd)))
+    line = capture(caplog)[0]
+    assert line.endswith(" stage=[redacted]")
+    assert "leak" not in line
+    with pytest.raises(ValueError, match="not an application-generated id"):
+        identifier("doc_9f3a1c" + suffix)
