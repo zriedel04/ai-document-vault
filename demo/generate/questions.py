@@ -307,7 +307,7 @@ _RAW: list[_Row] = [
                 "Extension requests must be sent to the instructor at least 48 hours before the deadline.",
                 2,
             ),
-            s(MAIL_ASK, "this request is sent six days before it"),
+            s(MAIL_ASK, "This request is sent six days before the deadline."),
         ),
         (),
     ),
@@ -370,14 +370,14 @@ _RAW: list[_Row] = [
         (REQ_V1,),
     ),
     _q(
-        "multi_doc",
-        "How much did it cost to repair the laptop screen that broke on October 3?",
-        "$187.92 (Sam Patel's repair, Quick Fix Computers). The journal dates the breakage and the receipt gives the bill.",
+        "lookup",
+        "How much did Sam Patel's laptop screen repair cost?",
+        "$187.92, at Quick Fix Computers.",
         (
-            s(JOURNAL, "Sam's laptop screen broke."),
             s(REPAIR, "Customer: Sam Patel"),
             s(REPAIR, "Total $187.92"),
         ),
+        (JOURNAL, MAIL_ASK),
     ),
     # --- version conflicts ------------------------------------------------------------------
     _q(
@@ -414,10 +414,14 @@ _RAW: list[_Row] = [
         (REQ_V1,),
     ),
     _q(
-        "version",
+        "multi_doc",
         "Which requirements were added between version 1 and version 2 of the specification?",
         "FR-8 (export a meeting as an iCalendar file), FR-9 (leave a group), FR-10 (remove a member), FR-11 (report inappropriate content), FR-12 (import the course list from a CSV file) and NFR-6 (WCAG 2.1 AA contrast).",
         (
+            s(
+                REQ_V1,
+                "FR-8: The system shall send an email reminder 24 hours before a scheduled meeting.",
+            ),
             s(
                 REQ_V2,
                 "FR-8: The system shall let a student export a scheduled meeting as an iCalendar file.",
@@ -434,7 +438,7 @@ _RAW: list[_Row] = [
             ),
             s(REQ_V2, "NFR-6: All pages shall meet the WCAG 2.1 level AA contrast requirements."),
         ),
-        (REQ_V1,),
+        (),
     ),
     _q(
         "version",

@@ -258,6 +258,22 @@ class EvalSetTests(unittest.TestCase):
                 with self.subTest(question=q.id, document=path):
                     self.assertFalse(all(norm(s.quote) in text for s in q.sources))
 
+    def test_the_documents_of_a_multi_doc_question_do_not_repeat_each_other(self) -> None:
+        # The extension email once repeated the syllabus rule, so the email alone answered "did
+        # it follow the rule" and the syllabus was required for no reason. A general check on
+        # numbers was tried and flagged only incidental matches (a 10 in a grade file, 24 hours in
+        # two spec versions), so the known cases are pinned here and the rest is for review.
+        email = norm(" ".join(DOCS["emails/advisor-extension-request.txt"].page_texts()))
+        self.assertNotIn("48 hours", email)
+        timing = next(q for q in QUESTIONS if q.question.startswith("Did the extension request"))
+        self.assertEqual(
+            {s.path for s in timing.sources},
+            {"courses/cse485/syllabus.pdf", "emails/advisor-extension-request.txt"},
+        )
+        added = next(q for q in QUESTIONS if "were added between version 1" in q.question)
+        self.assertEqual(added.category, "multi_doc")
+        self.assertIn("project/requirements-v1.docx", {s.path for s in added.sources})
+
     def test_alternatives_come_from_other_documents(self) -> None:
         for q in QUESTIONS:
             needed = {s.path for s in q.sources}

@@ -103,8 +103,8 @@
     {
       "path": "emails/advisor-extension-request.txt",
       "kind": "txt",
-      "bytes": 588,
-      "sha256": "2ddd4bce862a91b856517c39e7fa5bcbc456b094239ec5a808052605f878d60c",
+      "bytes": 514,
+      "sha256": "8100c0e6ec77e4e5beb063f72573c7df89fd5b59aca41db8d2c6a445a89e0292",
       "pages": null,
       "needs_ocr": false
     },

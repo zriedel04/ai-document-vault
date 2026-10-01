@@ -218,7 +218,7 @@ questions:
     quote: Extension requests must be sent to the instructor at least 48 hours before the deadline.
   - path: emails/advisor-extension-request.txt
     page: null
-    quote: this request is sent six days before it
+    quote: This request is sent six days before the deadline.
 - id: q021
   question: Does the approved extension apply to the other assignments too?
   category: lookup
@@ -284,21 +284,20 @@ questions:
   distractors:
   - project/requirements-v1.docx
 - id: q026
-  question: How much did it cost to repair the laptop screen that broke on October 3?
-  category: multi_doc
+  question: How much did Sam Patel's laptop screen repair cost?
+  category: lookup
   answerable: true
-  answer: $187.92 (Sam Patel's repair, Quick Fix Computers). The journal dates the breakage and the receipt
-    gives the bill.
+  answer: $187.92, at Quick Fix Computers.
   sources:
-  - path: notes/project-journal.md
-    page: null
-    quote: Sam's laptop screen broke.
   - path: receipts/laptop-repair-receipt.jpg
     page: null
     quote: 'Customer: Sam Patel'
   - path: receipts/laptop-repair-receipt.jpg
     page: null
     quote: Total $187.92
+  distractors:
+  - notes/project-journal.md
+  - emails/advisor-extension-request.txt
 - id: q027
   question: What is the maximum number of members in a study group in the current requirements?
   category: version
@@ -346,12 +345,15 @@ questions:
   - project/requirements-v1.docx
 - id: q031
   question: Which requirements were added between version 1 and version 2 of the specification?
-  category: version
+  category: multi_doc
   answerable: true
   answer: FR-8 (export a meeting as an iCalendar file), FR-9 (leave a group), FR-10 (remove a member),
     FR-11 (report inappropriate content), FR-12 (import the course list from a CSV file) and NFR-6 (WCAG
     2.1 AA contrast).
   sources:
+  - path: project/requirements-v1.docx
+    page: null
+    quote: 'FR-8: The system shall send an email reminder 24 hours before a scheduled meeting.'
   - path: project/requirements-v2.docx
     page: null
     quote: 'FR-8: The system shall let a student export a scheduled meeting as an iCalendar file.'
@@ -370,8 +372,6 @@ questions:
   - path: project/requirements-v2.docx
     page: null
     quote: 'NFR-6: All pages shall meet the WCAG 2.1 level AA contrast requirements.'
-  distractors:
-  - project/requirements-v1.docx
 - id: q032
   question: When is Assignment 2 due for Team Northwind?
   category: version

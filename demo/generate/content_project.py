@@ -201,7 +201,7 @@ Dear Dr. Raman,
 
 Our teammate Sam's laptop screen broke today and the repair shop says the repair will take five business days. Sam holds the latest draft of our requirements specification.
 
-May our team have until Monday, October 12 at 11:59 PM to submit Assignment 2? The syllabus asks for extension requests at least 48 hours before the deadline, and this request is sent six days before it.
+May our team have until Monday, October 12 at 11:59 PM to submit Assignment 2? This request is sent six days before the deadline.
 
 Thank you,
 Alex Rivera
