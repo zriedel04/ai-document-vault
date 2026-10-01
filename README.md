@@ -4,7 +4,7 @@ A local-first AI knowledge system for securely indexing, searching, and querying
 
 ## Status
 
-Pre-alpha. Phase 0 (foundations) is in progress: see the [milestone](https://github.com/zriedel04/ai-document-vault/milestone/1). There is nothing to install yet.
+Pre-alpha. Phase 0 (foundations) is in progress: see the [milestone](https://github.com/zriedel04/ai-document-vault/milestone/1). The backend skeleton exists ([`backend/`](backend/README.md): a FastAPI app with `GET /api/health`), but there is nothing to install or use yet.
 
 ## What it will do
 
