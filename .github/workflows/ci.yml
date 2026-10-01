@@ -33,6 +33,8 @@ jobs:
         run: python -m unittest discover -s scripts/tests -v
       - name: Safety check on tracked files and full history
         run: python scripts/check_repo_safety.py --history
+      - name: ADR structure check
+        run: python scripts/check_adrs.py
       - name: Install gitleaks
         run: |
           curl -sSfL -o gitleaks.tar.gz \
