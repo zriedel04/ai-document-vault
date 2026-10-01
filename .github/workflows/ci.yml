@@ -118,3 +118,76 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
+
+  frontend:
+    name: Frontend (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "uv==${UV_VERSION}"
+      - name: Install frontend dependencies from the lock file
+        working-directory: frontend
+        run: npm ci
+      - name: ESLint
+        working-directory: frontend
+        run: npm run lint
+      - name: Prettier
+        working-directory: frontend
+        run: npm run format:check
+      - name: Unit tests
+        working-directory: frontend
+        run: npm test
+      - name: Type check and build
+        working-directory: frontend
+        run: npm run build
+      - name: API client is current with the backend schema
+        run: |
+          cd backend
+          uv sync --locked
+          uv run python -m vault.openapi ../frontend/openapi.json
+          cd ../frontend
+          npm run api:generate
+          git diff --exit-code -- openapi.json src/api/schema.d.ts
+      - name: Licence check (development tools included, reviewed exceptions allowed)
+        run: python scripts/check_npm_licenses.py
+      - name: Licence check (runtime only, no exceptions)
+        run: python scripts/check_npm_licenses.py --strict
+      - name: Dependency audit
+        working-directory: frontend
+        run: npm audit
+      - name: Backend serves the built frontend
+        run: |
+          cd backend
+          AIVAULT_SERVER__PORT=18765 uv run python -m vault &
+          cd ..
+          python scripts/smoke_test_server.py http://127.0.0.1:18765
+
+  frontend-windows:
+    name: Frontend (Windows)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

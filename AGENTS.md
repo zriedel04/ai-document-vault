@@ -39,7 +39,8 @@ Docs, ADRs, tests, `AGENTS.md` and `CLAUDE.md` are updated in the same PR as the
 | Safety check, files and history | `python scripts/check_repo_safety.py --history` |
 | All hooks | `pre-commit run --all-files` |
 | Backend tests, lint and types (in `backend/`) | `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` |
-| Python licence check (in `backend/`) | `uv run python ../scripts/check_python_licenses.py --ignore vault` |
+| Frontend checks (in `frontend/`) | `npm test`, `npm run lint`, `npm run format:check`, `npm run build` |
+| Python and npm licence checks | `uv run python ../scripts/check_python_licenses.py --ignore vault` (in `backend/`), `python scripts/check_npm_licenses.py` |
 
 ## Review guidelines
 
