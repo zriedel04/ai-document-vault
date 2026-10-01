@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from starlette.routing import Match
+from starlette.routing import Match, Route
+from starlette.types import Receive, Scope, Send
 
 INDEX = "index.html"
 
@@ -36,29 +37,37 @@ def find_file(dist: Path, request_path: str) -> Path | None:
 
 def install_frontend(app: FastAPI, dist: Path) -> None:
     """Add the routes for the built frontend. Call it after the API routers."""
+    # The methods a real route may offer, probed to build the ``Allow`` header of a 405.
     api_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
-    @app.api_route("/api", methods=api_methods, include_in_schema=False)
-    @app.api_route("/api/{api_path:path}", methods=api_methods, include_in_schema=False)
-    def unknown_api(request: Request, api_path: str = "") -> None:
+    class UnknownApi:
         """An API path no route answers is a 404 for every method, never the frontend.
 
         If a real route matches the path but not the method, the answer is the usual 405 with
         its ``Allow`` header instead.
         """
-        # Ask each real route which methods it would answer for this path. Probing with a method
-        # works for every kind of route (the included routers have no ``methods`` attribute).
-        allowed: set[str] = set()
-        for route in request.app.router.routes:
-            if getattr(route, "endpoint", None) in (unknown_api, frontend):
-                continue  # the two catch-alls are not "real" routes
-            for method in api_methods:
-                match, _ = route.matches({**request.scope, "method": method})
-                if match == Match.FULL:
-                    allowed.add(method)
-        if allowed:
-            raise HTTPException(status_code=405, headers={"Allow": ", ".join(sorted(allowed))})
-        raise HTTPException(status_code=404)
+
+        # A class with ``__call__`` is mounted as a plain ASGI app, which Starlette routes for
+        # every HTTP method. A function endpoint would be limited to GET, and a fixed method list
+        # would leave TRACE, CONNECT and custom verbs to Starlette's own 405.
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            # Ask each real route which methods it would answer for this path. Probing with a
+            # method works for every kind of route (the included routers have no ``methods``).
+            allowed: set[str] = set()
+            for route in app.router.routes:
+                if getattr(route, "endpoint", None) in (unknown_api, frontend):
+                    continue  # the catch-alls are not "real" routes
+                for method in api_methods:
+                    match, _ = route.matches({**scope, "method": method})
+                    if match == Match.FULL:
+                        allowed.add(method)
+            if allowed:
+                raise HTTPException(status_code=405, headers={"Allow": ", ".join(sorted(allowed))})
+            raise HTTPException(status_code=404)
+
+    unknown_api = UnknownApi()
+    app.router.routes.append(Route("/api", unknown_api, include_in_schema=False))
+    app.router.routes.append(Route("/api/{api_path:path}", unknown_api, include_in_schema=False))
 
     @app.api_route("/{request_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def frontend(request_path: str) -> FileResponse:

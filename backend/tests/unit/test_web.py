@@ -59,7 +59,9 @@ def test_unknown_api_paths_are_404_not_the_app(client: TestClient, path: str) ->
     assert "root" not in response.text
 
 
-@pytest.mark.parametrize("method", ["post", "put", "patch", "delete", "options", "head"])
+@pytest.mark.parametrize(
+    "method", ["post", "put", "patch", "delete", "options", "head", "trace", "connect", "FOO"]
+)
 @pytest.mark.parametrize("path", ["/api/nothing", "/api/", "/api/health/extra", "/api"])
 def test_unknown_api_paths_are_404_for_every_method(
     client: TestClient, method: str, path: str
