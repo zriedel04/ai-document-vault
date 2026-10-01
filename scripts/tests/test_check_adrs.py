@@ -133,8 +133,78 @@ class CheckAdrsTest(unittest.TestCase):
         self.assertIn("without gaps", self.problems())
 
     def test_superseded_status_is_allowed(self) -> None:
-        name = self.write_adr(1, status="Superseded by ADR 0002")
-        self.write_index({name: "Superseded by ADR 0002"})
+        old = self.write_adr(1, status="Superseded by ADR 0002")
+        new = self.write_adr(2)
+        self.write_index({old: "Superseded by ADR 0002", new: "Accepted"})
+        self.assertEqual(check_adrs.check(self.root), [])
+
+    def test_superseded_by_missing_adr_is_reported(self) -> None:
+        name = self.write_adr(1, status="Superseded by ADR 9999")
+        self.write_index({name: "Superseded by ADR 9999"})
+        self.assertIn("must name an existing, newer ADR", self.problems())
+
+    def test_superseded_by_itself_or_older_adr_is_reported(self) -> None:
+        first = self.write_adr(1)
+        second = self.write_adr(2, status="Superseded by ADR 0001")
+        third = self.write_adr(3, status="Superseded by ADR 0003")
+        self.write_index(
+            {first: "Accepted", second: "Superseded by ADR 0001", third: "Superseded by ADR 0003"}
+        )
+        problems = check_adrs.check(self.root)
+        self.assertEqual(sum("must name an existing, newer ADR" in p for p in problems), 2)
+
+    def test_spike_link_must_be_a_spike_result_file(self) -> None:
+        spikes = self.root / "docs" / "spikes"
+        spikes.mkdir(parents=True)
+        (spikes / "README.md").write_text("index\n")
+        (spikes / "01-example.md").write_text("results\n")
+        (spikes / "nested").mkdir()
+        (spikes / "nested" / "02-example.md").write_text("results\n")
+        (self.root / "docs" / "architecture.md").write_text("plan\n")
+        bad_links = (
+            "docs/architecture.md",
+            "docs/spikes/README.md",
+            "docs/spikes/nested/02-example.md",
+            "docs/spikes/../architecture.md",
+            "docs/spikes/01-example.MD",
+            str(self.root / "docs" / "spikes" / "01-example.md"),
+            "/etc/passwd",
+            "",
+        )
+        for link in bad_links:
+            with self.subTest(link=link):
+                for old in self.folder.glob("0*.md"):
+                    old.unlink()
+                name = self.write_adr(1, hardware="yes", extra=f"- Spike results: {link}\n")
+                self.write_index({name: "Accepted"})
+                self.assertIn("cannot be Accepted without", self.problems())
+
+    def test_spike_link_may_not_escape_through_a_symlink(self) -> None:
+        spikes = self.root / "docs" / "spikes"
+        spikes.mkdir(parents=True)
+        (self.root / "docs" / "architecture.md").write_text("plan\n")
+        try:
+            (spikes / "01-link.md").symlink_to(self.root / "docs" / "architecture.md")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available")
+        name = self.write_adr(1, hardware="yes", extra="- Spike results: docs/spikes/01-link.md\n")
+        self.write_index({name: "Accepted"})
+        self.assertIn("cannot be Accepted without", self.problems())
+
+    def test_malformed_file_names_are_reported(self) -> None:
+        name = self.write_adr(1)
+        self.write_index({name: "Accepted"})
+        for stray in ("0002_new-decision.md", "0002-New-Decision.md", "0002-new.MD", "notes.md"):
+            with self.subTest(stray=stray):
+                path = self.folder / stray
+                path.write_text("# stray\n")
+                self.assertIn(f"{stray}: not a valid ADR file name", self.problems())
+                path.unlink()
+
+    def test_readme_and_template_are_not_strays(self) -> None:
+        name = self.write_adr(1)
+        self.write_index({name: "Accepted"})
+        (self.folder / "0000-template.md").write_text("# template\n")
         self.assertEqual(check_adrs.check(self.root), [])
 
     def test_repository_adrs_pass(self) -> None:

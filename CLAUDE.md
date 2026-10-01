@@ -22,7 +22,7 @@ Codex may review any PR and post comments. Retrieve every finding and sort each 
 
 ## Lessons from review
 
-These patterns came up repeatedly in Codex's reviews of the repository safety check (`scripts/check_repo_safety.py`, six review rounds, about fifteen findings). Check for them before pushing, not after a review.
+These patterns came up repeatedly in Codex's reviews of the repository safety check (`scripts/check_repo_safety.py`, six review rounds, about fifteen findings) and of the ADR checker. Check for them before pushing, not after a review.
 
 1. **Fix the class, not the instance.** A finding names one example (`.epub`, `.ppk`, a zip). Before replying, list the whole class (every ebook format, every key format, every archive format) and cover all of it, with a test that fails when a member is missing. Fixing only the named example invited the next round.
 2. **Close every layer of a rule.** A protection usually exists in several places that must agree: `.gitignore`, the path rule in the checker, the content rule (file signature), the staged index, the working tree and git history. Adding a suffix without its signature check, or an ignore rule without a checker rule (`vault/`, `*.bak`), left a gap. When adding to one layer, list the others and cover them or say why not.
@@ -30,6 +30,8 @@ These patterns came up repeatedly in Codex's reviews of the repository safety ch
 4. **Read the whole input.** Fixed-size reads (16 bytes) missed signatures that sit deeper in the file (tar at offset 257). State the assumption about input size or position and test the boundary.
 5. **Review your own diff adversarially before pushing.** Ask what a careless or hostile user would commit that this change still lets through, and what legitimate file it would wrongly block (the planned `backend/src/vault/` package is source code, not a vault folder).
 6. **Do not state a claim you have not checked.** One reply said every archive suffix had a signature check when `.tar` and `.iso` did not. Verify a claim against the code before posting it.
+
+7. **Validate what a value points at, not just its shape.** A status naming a superseding ADR, a link to spike results and a file name pattern each passed a loose check (a regex, `is_file()`, a glob) while accepting nonsense (`ADR 9999`, `docs/architecture.md`, `0016_typo.md`). For every reference or naming rule, test a missing target, a wrong kind of target, and a name that nearly matches, and make the checker report what it skips instead of ignoring it.
 
 Add to this list when a new pattern appears in review, and remove entries that no longer apply.
 

@@ -19,7 +19,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 ADR_FILE = re.compile(r"^(\d{4})-[a-z0-9-]+\.md$")
-SUPERSEDED = re.compile(r"^Superseded by ADR \d{4}$")
+SUPERSEDED = re.compile(r"^Superseded by ADR (\d{4})$")
+SPIKE_FILE = re.compile(r"^docs/spikes/\d{2}-[a-z0-9-]+\.md$")
+NOT_ADRS = ("README.md", "0000-template.md")
 STATUSES = ("Proposed", "Accepted", "Rejected")
 REQUIRED_SECTIONS = ("Context", "Decision", "Alternatives considered", "Consequences")
 INDEX_ROW = re.compile(r"^\|\s*\[(\d{4})\]\(([^)]+)\)\s*\|[^|]*\|\s*([^|]+?)\s*\|\s*$")
@@ -35,8 +37,17 @@ def _sections(text: str) -> dict[str, str]:
     return {parts[i]: parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
 
 
-def check_adr(path: Path, root: Path) -> tuple[list[str], str | None]:
-    """Problems with one ADR, and its status."""
+def _spike_problem(spike: str | None, root: Path) -> bool:
+    """True unless ``spike`` names an existing result file docs/spikes/NN-topic.md."""
+    if spike is None or not SPIKE_FILE.match(spike):
+        return True
+    path = root / spike
+    folder = (root / "docs" / "spikes").resolve()
+    return not path.is_file() or not path.resolve().is_relative_to(folder)
+
+
+def check_adr(path: Path, root: Path, numbers: Sequence[int]) -> tuple[list[str], str | None]:
+    """Problems with one ADR, and its status. ``numbers`` are the ADR numbers that exist."""
     text = path.read_text(encoding="utf-8")
     name = path.name
     problems: list[str] = []
@@ -53,6 +64,13 @@ def check_adr(path: Path, root: Path) -> tuple[list[str], str | None]:
             f"{name}: status '{status}' must be Proposed, Accepted, Rejected or "
             "'Superseded by ADR NNNN'"
         )
+    elif status is not None and (superseded := SUPERSEDED.match(status)):
+        replacement = int(superseded.group(1))
+        if replacement not in numbers or replacement <= int(number):
+            problems.append(
+                f"{name}: '{status}' must name an existing, newer ADR "
+                f"(existing: {sorted(numbers)})"
+            )
 
     date = _field(text, "Date")
     if date is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -74,11 +92,11 @@ def check_adr(path: Path, root: Path) -> tuple[list[str], str | None]:
         problems.append(f"{name}: a Proposed ADR needs an '## Evidence needed' section")
 
     if hardware == "yes" and status == "Accepted":
-        spike = _field(text, "Spike results")
-        if spike is None or not (root / spike).is_file():
+        if _spike_problem(_field(text, "Spike results"), root):
             problems.append(
                 f"{name}: hardware-dependent ADRs cannot be Accepted without "
-                "'- Spike results: docs/spikes/<file>.md' pointing at an existing file"
+                "'- Spike results: docs/spikes/NN-topic.md' pointing at an existing "
+                "spike result file"
             )
     return problems, status
 
@@ -87,8 +105,21 @@ def adr_files(root: Path) -> list[Path]:
     folder = root / "docs" / "decisions"
     return sorted(
         path
-        for path in folder.glob("*.md")
-        if ADR_FILE.match(path.name) and path.name != "0000-template.md"
+        for path in folder.iterdir()
+        if path.is_file() and ADR_FILE.match(path.name) and path.name not in NOT_ADRS
+    )
+
+
+def stray_files(root: Path) -> list[Path]:
+    """Markdown files in docs/decisions/ that are neither an ADR nor README/template."""
+    folder = root / "docs" / "decisions"
+    return sorted(
+        path
+        for path in folder.iterdir()
+        if path.is_file()
+        and path.suffix.lower() == ".md"
+        and path.name not in NOT_ADRS
+        and not ADR_FILE.match(path.name)
     )
 
 
@@ -96,8 +127,12 @@ def check(root: Path) -> list[str]:
     folder = root / "docs" / "decisions"
     problems: list[str] = []
     adrs = adr_files(root)
+    problems.extend(
+        f"{path.name}: not a valid ADR file name (use NNNN-lowercase-title.md)"
+        for path in stray_files(root)
+    )
     if not adrs:
-        return [f"no ADRs found in {folder}"]
+        return [*problems, f"no ADRs found in {folder}"]
 
     numbers = [int(path.name[:4]) for path in adrs]
     if numbers != list(range(1, len(adrs) + 1)):
@@ -105,7 +140,7 @@ def check(root: Path) -> list[str]:
 
     statuses: dict[str, str | None] = {}
     for path in adrs:
-        adr_problems, status = check_adr(path, root)
+        adr_problems, status = check_adr(path, root, numbers)
         problems.extend(adr_problems)
         statuses[path.name] = status
 
