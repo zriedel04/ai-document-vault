@@ -1,0 +1,13 @@
+From: Alex Rivera <alex.rivera@lit.example>
+To: Dr. Priya Raman <priya.raman@lit.example>
+Date: Sat, Oct 3, 2026 at 6:12 PM
+Subject: Extension request for Assignment 2
+
+Dear Dr. Raman,
+
+Our teammate Sam's laptop screen broke today and the repair shop says the repair will take five business days. Sam holds the latest draft of our requirements specification.
+
+May our team have until Monday, October 12 at 11:59 PM to submit Assignment 2? The syllabus asks for extension requests at least 48 hours before the deadline, and this request is sent six days before it.
+
+Thank you,
+Alex Rivera
