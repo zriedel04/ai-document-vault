@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.routing import Match
 
 INDEX = "index.html"
 
@@ -34,15 +35,41 @@ def find_file(dist: Path, request_path: str) -> Path | None:
 
 
 def install_frontend(app: FastAPI, dist: Path) -> None:
-    """Add the catch-all route for the built frontend. Call it after the API routers."""
+    """Add the routes for the built frontend. Call it after the API routers."""
+    api_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+    @app.api_route("/api", methods=api_methods, include_in_schema=False)
+    @app.api_route("/api/{api_path:path}", methods=api_methods, include_in_schema=False)
+    def unknown_api(request: Request, api_path: str = "") -> None:
+        """An API path no route answers is a 404 for every method, never the frontend.
+
+        If a real route matches the path but not the method, the answer is the usual 405 with
+        its ``Allow`` header instead.
+        """
+        # Ask each real route which methods it would answer for this path. Probing with a method
+        # works for every kind of route (the included routers have no ``methods`` attribute).
+        allowed: set[str] = set()
+        for route in request.app.router.routes:
+            if getattr(route, "endpoint", None) in (unknown_api, frontend):
+                continue  # the two catch-alls are not "real" routes
+            for method in api_methods:
+                match, _ = route.matches({**request.scope, "method": method})
+                if match == Match.FULL:
+                    allowed.add(method)
+        if allowed:
+            raise HTTPException(status_code=405, headers={"Allow": ", ".join(sorted(allowed))})
+        raise HTTPException(status_code=404)
 
     @app.api_route("/{request_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def frontend(request_path: str) -> FileResponse:
-        if request_path == "api" or request_path.startswith("api/"):
-            raise HTTPException(status_code=404)
         file = find_file(dist, request_path) if request_path else None
         if file is not None:
             return FileResponse(file)
         if PurePosixPath(request_path).suffix:  # a missing script or image is a real 404
             raise HTTPException(status_code=404)
-        return FileResponse(dist / INDEX)
+        # The index is checked like any other file, so an index.html that is a symlink to a file
+        # outside dist is never served, even if it changed after start-up.
+        index = find_file(dist, INDEX)
+        if index is None:
+            raise HTTPException(status_code=404)
+        return FileResponse(index)

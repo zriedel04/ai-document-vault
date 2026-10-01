@@ -59,6 +59,23 @@ def test_unknown_api_paths_are_404_not_the_app(client: TestClient, path: str) ->
     assert "root" not in response.text
 
 
+@pytest.mark.parametrize("method", ["post", "put", "patch", "delete", "options", "head"])
+@pytest.mark.parametrize("path", ["/api/nothing", "/api/", "/api/health/extra", "/api"])
+def test_unknown_api_paths_are_404_for_every_method(
+    client: TestClient, method: str, path: str
+) -> None:
+    response = client.request(method, path)
+    assert response.status_code == 404
+    assert "root" not in response.text
+
+
+def test_a_wrong_method_on_a_real_api_route_is_still_405(client: TestClient) -> None:
+    response = client.post("/api/health")
+    assert response.status_code == 405
+    assert "GET" in response.headers["allow"]
+    assert client.delete("/api/openapi.json").status_code == 405
+
+
 @pytest.mark.parametrize("path", ["/missing.js", "/assets/missing.css", "/favicon.ico"])
 def test_missing_files_are_404_not_the_app(client: TestClient, path: str) -> None:
     assert client.get(path).status_code == 404
@@ -92,6 +109,38 @@ def test_a_symlink_pointing_outside_dist_is_not_followed(client: TestClient, dis
     except (OSError, NotImplementedError):
         pytest.skip("symlinks are not available")
     response = client.get("/assets/link.js")
+    assert "outside the dist folder" not in response.text
+
+
+def test_an_index_that_is_a_symlink_outside_dist_is_never_served(
+    tmp_path: Path, dist: Path
+) -> None:
+    index = dist / "index.html"
+    index.unlink()
+    try:
+        index.symlink_to(dist.parent / "secret.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available")
+    settings = Settings.model_validate({"frontend": {"dist": str(dist)}})
+    client = TestClient(create_app(settings))  # refuses to serve the frontend at all
+    for path in ("/", "/documents"):
+        response = client.get(path)
+        assert response.status_code == 404
+        assert "outside the dist folder" not in response.text
+
+
+def test_an_index_swapped_for_a_symlink_after_start_up_is_not_served(
+    client: TestClient, dist: Path
+) -> None:
+    assert client.get("/documents").text == INDEX_HTML
+    index = dist / "index.html"
+    index.unlink()
+    try:
+        index.symlink_to(dist.parent / "secret.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available")
+    response = client.get("/documents")
+    assert response.status_code == 404
     assert "outside the dist folder" not in response.text
 
 

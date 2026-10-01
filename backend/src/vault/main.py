@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from vault.api import health
 from vault.core.config import Settings, load_settings
 from vault.core.logging import configure_logging, log_event
-from vault.web import INDEX, install_frontend
+from vault.web import INDEX, find_file, install_frontend
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.settings = settings
     app.include_router(health.router, prefix="/api")
     dist = settings.frontend.dist or DEFAULT_FRONTEND_DIST
-    serving = serve_frontend and (dist / INDEX).is_file()
+    serving = serve_frontend and find_file(dist, INDEX) is not None
     if serving:
         install_frontend(app, dist)
     log_event(logger, "app.created", frontend=serving)
