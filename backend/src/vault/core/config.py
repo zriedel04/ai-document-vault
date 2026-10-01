@@ -46,11 +46,17 @@ class ServerSettings(_Section):
     @field_validator("host")
     @classmethod
     def _loopback_only(cls, host: str) -> str:
-        """The server is local-only: refuse any address other than loopback."""
+        """The server is local-only: refuse any address other than loopback.
+
+        ``[::1]`` is accepted as a spelling of ``::1`` and returned without the brackets, which
+        is the form uvicorn and the socket layer expect.
+        """
         if host in LOOPBACK_NAMES:
             return host
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
         try:
-            is_loopback = ipaddress.ip_address(host.strip("[]")).is_loopback
+            is_loopback = ipaddress.ip_address(host).is_loopback
         except ValueError:
             is_loopback = False
         if not is_loopback:

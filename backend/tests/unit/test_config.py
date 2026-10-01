@@ -88,12 +88,29 @@ def test_invalid_files_are_rejected(tmp_path: Path, text: str) -> None:
         load_settings(write(tmp_path / "c.toml", text))
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "::1", "[::1]", "localhost"])
-def test_loopback_hosts_are_accepted(host: str) -> None:
-    assert Settings.model_validate({"server": {"host": host}}).server.host == host
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("127.0.0.2", "127.0.0.2"),
+        ("::1", "::1"),
+        ("[::1]", "::1"),  # brackets are dropped: uvicorn and sockets want the bare address
+        ("localhost", "localhost"),
+    ],
+)
+def test_loopback_hosts_are_accepted_in_the_form_the_server_needs(host: str, expected: str) -> None:
+    assert Settings.model_validate({"server": {"host": host}}).server.host == expected
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5", "example.com", "", "8.8.8.8"])  # noqa: S104
+def test_bracketed_host_reaches_uvicorn_without_brackets() -> None:
+    settings = Settings.model_validate({"server": {"host": "[::1]"}})
+    assert settings.server.host == "::1"
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["0.0.0.0", "::", "192.168.1.5", "example.com", "", "8.8.8.8", "[::", "::1]", "[127.0.0.1"],  # noqa: S104
+)
 def test_non_loopback_hosts_are_rejected(host: str) -> None:
     with pytest.raises(ValidationError):
         Settings.model_validate({"server": {"host": host}})

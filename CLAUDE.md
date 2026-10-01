@@ -31,6 +31,9 @@ These patterns came up repeatedly in Codex's reviews of the repository safety ch
 5. **Review your own diff adversarially before pushing.** Ask what a careless or hostile user would commit that this change still lets through, and what legitimate file it would wrongly block (the planned `backend/src/vault/` package is source code, not a vault folder).
 6. **Do not state a claim you have not checked.** One reply said every archive suffix had a signature check when `.tar` and `.iso` did not. Verify a claim against the code before posting it.
 
+7. **Allow by construction, not by appearance.** A privacy guarantee that rests on a value "looking harmless" fails on the first harmless-looking leak: the logging check let a one-word piece of document text through because it matched the identifier pattern, and it copied field names into the log unchecked. Make the default deny (a type or an explicit marker says a value is safe), cover every channel into the output (values, field names, event names, exception messages), and test with realistic document text, not only obviously bad input.
+8. **Check what your tooling enforces before claiming it.** The logging docstring said mypy rejects a computed event name; mypy does not enforce `LiteralString`. Run the claim as an experiment (a short file that should fail) before writing it down.
+
 Add to this list when a new pattern appears in review, and remove entries that no longer apply.
 
 ## Keeping documents current

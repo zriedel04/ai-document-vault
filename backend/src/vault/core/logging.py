@@ -1,11 +1,19 @@
 """Logging that records ids, counts and timings, and never document content.
 
-Document text is untrusted and private (AGENTS.md hard rules), so the logging API makes it hard to
-log by accident:
+Document text is untrusted and private (AGENTS.md hard rules), so the logging API is deny by
+default: a value is written only if its type says it is safe. Nothing is allowed because it merely
+looks harmless (a single word of document text looks like an identifier).
 
-- Our own loggers (``vault.*``) are called through :func:`log_event`. The event name must look like
-  ``ingest.chunk_done`` and every field must be a number, a boolean, ``None`` or a short
-  identifier (letters, digits and ``_ . : -``). A free-text value is replaced by ``[redacted]``.
+- Our own loggers (``vault.*``) are called through :func:`log_event`. The event name must be a
+  string literal of the form ``domain.action`` such as ``ingest.chunk_done``. The form is checked
+  at run time (anything else is written as ``invalid_event``), but a string that happens to match
+  it would pass, and mypy does not enforce ``LiteralString``, so never build an event name from
+  data; reviewers check that every call site passes a literal.
+- A field value is written only if it is a number, a boolean, ``None``, an enum member (a name
+  fixed in code) or an :class:`Identifier`, which the caller creates explicitly with
+  :func:`identifier` from an id the application generated (``doc_9f3a1c``, a content hash, a
+  UUID). Any other value, including every plain ``str``, is replaced by ``[redacted]``.
+- A field name must be ``lower_snake_case``; anything else is replaced by ``invalid_field_N``.
 - An exception is logged as its type and the place it was raised, never its message, which could
   quote the content that failed to parse.
 
@@ -23,23 +31,59 @@ import time
 import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Final
+from enum import Enum
+from typing import Final, LiteralString
 
 APP_LOGGER: Final = "vault"
-EVENT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
-SAFE_STRING = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+EVENT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")  # at least ``domain.action``
+FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# An application-generated id: ``doc_9f3a1c``, a content hash, or a UUID.
+IDENTIFIER = re.compile(
+    r"^(?:[a-z]{1,12}_[0-9a-f]{6,64}|[0-9a-f]{8,64}|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$"
+)
 REDACTED: Final = "[redacted]"
 FIELDS_ATTR: Final = "vault_fields"
 
-type FieldValue = int | float | bool | str | None
+
+class Identifier(str):
+    """An id the application generated, marked as safe to log. Create it with :func:`identifier`."""
+
+    __slots__ = ()
+
+    def __new__(cls, value: str) -> Identifier:
+        if not IDENTIFIER.fullmatch(value):
+            msg = "not an application-generated id (like doc_9f3a1c, a hex hash or a UUID)"
+            raise ValueError(msg)
+        return super().__new__(cls, value)
+
+
+def identifier(value: str) -> Identifier:
+    """Mark ``value`` as an id that is safe to log. Raises ValueError for anything else.
+
+    Only call this on ids the application generated itself. Never pass text taken from a document
+    or a file name: the check only rejects values that do not look like an id, so reviewers must
+    treat every call as a place document content could enter.
+    """
+    return Identifier(value)
+
+
+type FieldValue = int | float | bool | Identifier | Enum | None
 
 
 def _safe(value: object) -> str:
-    """Render one field value, redacting anything that could be free text."""
-    if value is None or isinstance(value, bool | int | float):
-        return str(value)
-    if isinstance(value, str) and SAFE_STRING.match(value):
-        return value
+    """Render one field value; anything not explicitly safe is redacted."""
+    if value is None:
+        return "None"
+    if isinstance(value, bool):
+        return str(bool(value))
+    if isinstance(value, int):
+        return str(int(value))
+    if isinstance(value, float):
+        return repr(float(value))
+    if isinstance(value, Identifier) and IDENTIFIER.fullmatch(str(value)):
+        return str.__str__(value)
+    if isinstance(value, Enum) and FIELD_NAME.match(name := value.name.lower()):
+        return name
     return REDACTED
 
 
@@ -54,7 +98,13 @@ class SafeFormatter(logging.Formatter):
         message = record.getMessage() if not own else self._event(record)
         parts = [self.formatTime(record, self.datefmt), record.levelname, record.name, message]
         fields: dict[str, object] = getattr(record, FIELDS_ATTR, {})
-        parts.extend(f"{key}={_safe(value)}" for key, value in fields.items())
+        for position, (key, value) in enumerate(fields.items()):
+            name = (
+                key
+                if isinstance(key, str) and FIELD_NAME.match(key)
+                else f"invalid_field_{position}"
+            )
+            parts.append(f"{name}={_safe(value)}")
         if record.exc_info and (exc_type := record.exc_info[0]) is not None:
             parts.append(f"exc_type={exc_type.__name__}")
             if tb := record.exc_info[2]:
@@ -81,7 +131,7 @@ def configure_logging(level: str = "INFO") -> None:
 
 def log_event(
     logger: logging.Logger,
-    event: str,
+    event: LiteralString,
     /,
     *,
     level: int = logging.INFO,
@@ -105,7 +155,7 @@ def _emit(
 
 
 @contextmanager
-def timed(logger: logging.Logger, event: str, **fields: FieldValue) -> Iterator[None]:
+def timed(logger: logging.Logger, event: LiteralString, **fields: FieldValue) -> Iterator[None]:
     """Log ``event`` with ``duration_ms`` when the block ends, and ``ok=False`` if it raised."""
     started = time.perf_counter()
     ok = True
