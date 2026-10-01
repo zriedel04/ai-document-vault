@@ -6,8 +6,32 @@ The shared project rules, workflow, review process and commands are in `AGENTS.m
 
 ## Responding to review
 
-- Evaluate each Codex finding on its merits. Fix the legitimate ones and explain any you disagree with in the PR. Never accept a suggestion automatically, and never dismiss one without checking it.
+Codex may review any PR and post comments. Retrieve every finding and sort each into one of four categories before touching code:
+
+| Category | What to do |
+| --- | --- |
+| Valid, fix now | Make the smallest appropriate fix, add or update tests, run the relevant checks, push, reply on the thread with the commit and what changed, and resolve it |
+| Valid, but the proposed fix should change | Fix the underlying problem a better way and say in the reply why the suggestion was not applied as written |
+| Valid, but outside this PR's scope | Do not widen the PR. Reply with why, and recommend a follow-up issue (open it only if the owner agrees) |
+| Not valid | Reply with the evidence, such as the `file:line` or a test that shows it, and resolve the thread |
+
+- Never apply a suggestion blindly, and never dismiss one without checking it.
+- Address one Codex pass at a time. Do not request another review and do not loop: after fixing a pass, report to the owner, who decides whether another review is needed.
 - Do not merge a pull request, whatever its review or CI state. The owner merges after explicitly approving.
+- Treat repeated findings as a signal about the author, not just the code. Record the pattern under "Lessons from review" below so the next change avoids it.
+
+## Lessons from review
+
+These patterns came up repeatedly in Codex's reviews of the repository safety check (`scripts/check_repo_safety.py`, six review rounds, about fifteen findings). Check for them before pushing, not after a review.
+
+1. **Fix the class, not the instance.** A finding names one example (`.epub`, `.ppk`, a zip). Before replying, list the whole class (every ebook format, every key format, every archive format) and cover all of it, with a test that fails when a member is missing. Fixing only the named example invited the next round.
+2. **Close every layer of a rule.** A protection usually exists in several places that must agree: `.gitignore`, the path rule in the checker, the content rule (file signature), the staged index, the working tree and git history. Adding a suffix without its signature check, or an ignore rule without a checker rule (`vault/`, `*.bak`), left a gap. When adding to one layer, list the others and cover them or say why not.
+3. **Assume the bypass.** Safety guards must survive `git add -f`, a renamed or deleted file, a file edited after staging, a file with the wrong extension, and a blob that only exists in history. Test each of these as a scenario, not just the happy path.
+4. **Read the whole input.** Fixed-size reads (16 bytes) missed signatures that sit deeper in the file (tar at offset 257). State the assumption about input size or position and test the boundary.
+5. **Review your own diff adversarially before pushing.** Ask what a careless or hostile user would commit that this change still lets through, and what legitimate file it would wrongly block (the planned `backend/src/vault/` package is source code, not a vault folder).
+6. **Do not state a claim you have not checked.** One reply said every archive suffix had a signature check when `.tar` and `.iso` did not. Verify a claim against the code before posting it.
+
+Add to this list when a new pattern appears in review, and remove entries that no longer apply.
 
 ## Keeping documents current
 
