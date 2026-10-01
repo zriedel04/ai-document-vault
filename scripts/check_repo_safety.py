@@ -5,17 +5,18 @@ AI Document Vault manages personal documents, so this repository must never
 contain real documents or anything derived from them. This check is one of
 three layers, together with .gitignore and gitleaks. It runs:
 
-* as a pre-commit hook, on the files being committed, and
-* in CI, on every tracked file and (with --history) on every file that was
-  ever committed.
+* as a pre-commit hook, on the staged version of the files being committed, and
+* in CI, on every tracked file and (with --history) on every file version that
+  was ever committed, whatever it was called at the time.
 
 It uses only the Python standard library, so it works before any project
 tooling is installed.
 
 Usage:
-    python scripts/check_repo_safety.py              # all tracked files
+    python scripts/check_repo_safety.py              # all tracked files, as staged in the index
     python scripts/check_repo_safety.py --history    # ...plus the full git history
-    python scripts/check_repo_safety.py PATH [PATH ...]
+    python scripts/check_repo_safety.py PATH [PATH ...]            # files on disk
+    python scripts/check_repo_safety.py --staged PATH [PATH ...]   # staged version of each file
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -78,7 +80,7 @@ IMAGE_DIR_PREFIXES = ("docs/images/", "frontend/public/", "frontend/src/assets/"
 class Violation:
     path: str
     reason: str
-    source: str = "working tree"
+    source: str = "current"
 
 
 def _normalise(path: str) -> PurePosixPath:
@@ -157,55 +159,157 @@ def content_problem(head: bytes) -> str | None:
     return None
 
 
+def reasons_for(path: str, size: int | None, head: bytes) -> list[str]:
+    """Every reason a file must not be committed, from its path, size and first bytes.
+
+    ``size`` is None when the content is unavailable, so only the path is judged.
+    """
+    reasons = path_problems(path)
+    if size is None:
+        return reasons
+    problem = size_problem(path, size)
+    if problem:
+        reasons.append(problem)
+    if not any(reason.startswith("database") for reason in reasons):
+        problem = content_problem(head)
+        if problem:
+            reasons.append(problem)
+    return reasons
+
+
 def check_files(entries: Iterable[tuple[str, Path]]) -> list[Violation]:
     """Check (repository-relative path, file on disk) pairs."""
     violations: list[Violation] = []
     for relative, on_disk in entries:
-        reasons = path_problems(relative)
+        size: int | None = None
+        head = b""
         if on_disk.is_file():
-            problem = size_problem(relative, on_disk.stat().st_size)
-            if problem:
-                reasons.append(problem)
-            if not any(reason.startswith("database") for reason in reasons):
-                with on_disk.open("rb") as handle:
-                    problem = content_problem(handle.read(len(SQLITE_HEADER)))
-                if problem:
-                    reasons.append(problem)
+            size = on_disk.stat().st_size
+            with on_disk.open("rb") as handle:
+                head = handle.read(len(SQLITE_HEADER))
+        reasons = reasons_for(relative, size, head)
         violations.extend(Violation(relative, reason) for reason in reasons)
     return violations
 
 
-def history_blobs(root: Path) -> Iterator[tuple[str, int]]:
-    """Yield (path, size) for every file version reachable from any ref."""
-    paths_by_object: dict[str, set[str]] = {}
-    for line in _git(root, "rev-list", "--objects", "--all").splitlines():
-        object_id, _, path = line.partition(" ")
-        if path:
-            paths_by_object.setdefault(object_id, set()).add(path)
-    if not paths_by_object:
-        return
+def blob_facts(root: Path, object_ids: Iterable[str]) -> dict[str, tuple[int, bytes]]:
+    """Size and first bytes of each blob. Objects that are missing or not blobs are left out."""
+    ids = sorted(set(object_ids))
+    if not ids:
+        return {}
     listing = _git(
         root,
         "cat-file",
         "--batch-check=%(objectname) %(objecttype) %(objectsize)",
-        input_text="\n".join(paths_by_object) + "\n",
+        input_text="\n".join(ids) + "\n",
     )
+    sizes: dict[str, int] = {}
     for line in listing.splitlines():
-        object_id, object_type, size = line.split(" ")
-        if object_type == "blob":
-            for path in sorted(paths_by_object[object_id]):
-                yield path, int(size)
+        parts = line.split(" ")
+        if len(parts) == 3 and parts[1] == "blob":
+            sizes[parts[0]] = int(parts[2])
+    # Over-size blobs are rejected by size alone, so their content is never read.
+    readable = [oid for oid in ids if 0 < sizes.get(oid, 0) <= MAX_LARGE_FILE_BYTES]
+    heads = _read_heads(root, readable)
+    return {oid: (size, heads.get(oid, b"")) for oid, size in sizes.items()}
+
+
+def _read_heads(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
+    """First bytes of each blob, streamed so no blob is held in memory."""
+    heads: dict[str, bytes] = {}
+    if not object_ids:
+        return heads
+    with tempfile.TemporaryFile() as feed:
+        feed.write(("\n".join(object_ids) + "\n").encode())
+        feed.seek(0)
+        with subprocess.Popen(
+            ["git", "cat-file", "--batch"], cwd=root, stdin=feed, stdout=subprocess.PIPE
+        ) as process:
+            assert process.stdout is not None
+            for object_id in object_ids:
+                size = int(process.stdout.readline().split()[2])
+                head = process.stdout.read(min(size, len(SQLITE_HEADER)))
+                heads[object_id] = head
+                remaining = size - len(head) + 1  # the newline after the content
+                while remaining > 0:
+                    chunk = process.stdout.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+    return heads
+
+
+def index_entries(root: Path, paths: Sequence[str] = ()) -> dict[str, str]:
+    """Map path to blob id for files in the git index (all of them, or just ``paths``)."""
+    args = ["--literal-pathspecs", "ls-files", "--stage", "-z"]
+    if paths:
+        args += ["--", *paths]
+    entries: dict[str, str] = {}
+    for record in _git(root, *args).split("\0"):
+        meta, _, path = record.partition("\t")
+        if not path:
+            continue
+        mode, object_id, _stage = meta.split(" ")
+        if mode != "160000":  # a submodule is a commit, not a file
+            entries[path] = object_id
+    return entries
+
+
+def check_index(root: Path, paths: Sequence[str] = ()) -> tuple[list[Violation], set[str]]:
+    """Check files as staged in the index, which is what a commit would contain.
+
+    Returns the violations and the paths that were found in the index.
+    """
+    entries = index_entries(root, paths)
+    facts = blob_facts(root, entries.values())
+    violations: list[Violation] = []
+    for path, object_id in entries.items():
+        size, head = facts.get(object_id, (None, b""))
+        violations.extend(Violation(path, reason) for reason in reasons_for(path, size, head))
+    return violations, set(entries)
+
+
+def history_files(root: Path) -> set[tuple[str, str]]:
+    """Every (blob id, path) pair that any commit on any ref ever contained.
+
+    Walks the changes of every commit, so a file renamed or copied under another name
+    is still seen under each of its names. ``rev-list --objects`` would report a blob
+    only once, under one name.
+    """
+    log = _git(
+        root,
+        "log",
+        "--all",
+        "--no-renames",
+        "-m",
+        "--raw",
+        "--no-abbrev",
+        "-z",
+        "--format=",
+    )
+    tokens = log.split("\0")
+    pairs: set[tuple[str, str]] = set()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith(":") or index + 1 >= len(tokens):
+            index += 1
+            continue
+        _old_mode, new_mode, _old_id, new_id, status = token[1:].split(" ")
+        if status != "D" and new_mode != "160000":
+            pairs.add((new_id, tokens[index + 1]))
+        index += 2
+    return pairs
 
 
 def check_history(root: Path) -> list[Violation]:
-    """Check the name and size of every file ever committed."""
+    """Check every file version ever committed: its name, size and first bytes."""
+    pairs = history_files(root)
+    facts = blob_facts(root, (object_id for object_id, _ in pairs))
     found: set[Violation] = set()
-    for path, size in history_blobs(root):
-        reasons = path_problems(path)
-        problem = size_problem(path, size)
-        if problem:
-            reasons.append(problem)
-        found.update(Violation(path, reason, "history") for reason in reasons)
+    for object_id, path in pairs:
+        size, head = facts.get(object_id, (None, b""))
+        found.update(Violation(path, reason, "history") for reason in reasons_for(path, size, head))
     return sorted(found, key=lambda violation: (violation.path, violation.reason))
 
 
@@ -244,7 +348,7 @@ def _explicit_entries(paths: Sequence[str], root: Path) -> list[tuple[str, Path]
 
 def _report(violations: Sequence[Violation]) -> None:
     print("Repository safety check failed. These files must not be committed:", file=sys.stderr)
-    for source in ("working tree", "history"):
+    for source in ("current", "history"):
         reasons_by_path: dict[str, list[str]] = {}
         for violation in violations:
             if violation.source == source:
@@ -280,21 +384,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--history", action="store_true", help="also check every file in the git history"
     )
+    parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="check the staged version of each given file, not the copy on disk",
+    )
     args = parser.parse_args(argv)
 
     root = _repo_root(Path.cwd())
-    if root is None and (args.history or not args.paths):
+    if root is None and (args.history or args.staged or not args.paths):
         print("Not inside a git repository; pass file paths to check.", file=sys.stderr)
         return 2
 
-    if args.paths:
-        entries = _explicit_entries(args.paths, root or Path.cwd())
-    else:
+    if not args.paths:
         assert root is not None
-        tracked = [path for path in _git(root, "ls-files", "-z").split("\0") if path]
-        entries = [(path, root / path) for path in tracked]
+        violations, checked = check_index(root)
+        count = len(checked)
+    else:
+        entries = _explicit_entries(args.paths, root or Path.cwd())
+        violations = []
+        staged: set[str] = set()
+        if args.staged:
+            assert root is not None
+            violations, staged = check_index(root, [relative for relative, _ in entries])
+        violations.extend(check_files(entry for entry in entries if entry[0] not in staged))
+        count = len(entries)
 
-    violations = check_files(entries)
     if args.history:
         assert root is not None
         already_reported = {(violation.path, violation.reason) for violation in violations}
@@ -308,7 +423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _report(violations)
         return 1
     scope = " and git history" if args.history else ""
-    print(f"Repository safety check passed: {len(entries)} files{scope} checked.")
+    print(f"Repository safety check passed: {count} files{scope} checked.")
     return 0
 
 

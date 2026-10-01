@@ -21,6 +21,6 @@ repos:
     hooks:
       - id: repo-safety
         name: Repository safety check
-        entry: python scripts/check_repo_safety.py
+        entry: python scripts/check_repo_safety.py --staged
         language: system
         types: [file]

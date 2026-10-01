@@ -155,6 +155,64 @@ class GitIntegrationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Already in git history", result.stderr)
 
+    def test_deleted_sqlite_content_under_innocent_name_caught_in_history(self) -> None:
+        self.commit("notes.txt", safety.SQLITE_HEADER + b"\0" * 100)
+        self.git("rm", "-q", "notes.txt")
+        self.git("commit", "-q", "-m", "remove")
+        self.assertEqual(self.run_check().returncode, 0)
+        result = self.run_check("--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SQLite database detected", result.stderr)
+
+    def test_renamed_file_caught_under_its_old_name_in_history(self) -> None:
+        self.commit("taxes.pdf", b"%PDF-1.7 private\n")
+        self.git("mv", "taxes.pdf", "README.md")
+        self.git("commit", "-q", "-m", "rename")
+        self.git("rm", "-q", "README.md")
+        self.git("commit", "-q", "-m", "remove")
+        result = self.run_check("--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("taxes.pdf", result.stderr)
+        self.assertIn("document outside", result.stderr)
+
+    def test_history_covers_merged_branches(self) -> None:
+        self.commit("README.md", b"hello\n")
+        self.git("checkout", "-q", "-b", "side")
+        self.commit("vault.db", b"x")
+        self.git("rm", "-q", "vault.db")
+        self.git("commit", "-q", "-m", "remove")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "-m", "merge", "side")
+        self.git("branch", "-q", "-D", "side")
+        result = self.run_check("--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("vault.db", result.stderr)
+
+    def stage_database_then_overwrite_with_text(self) -> None:
+        target = self.repo / "notes.txt"
+        target.write_bytes(safety.SQLITE_HEADER + b"\0" * 100)
+        self.git("add", "notes.txt")
+        target.write_text("harmless\n")
+
+    def test_staged_bytes_are_checked_not_the_working_copy(self) -> None:
+        self.stage_database_then_overwrite_with_text()
+        self.assertEqual(self.run_check("notes.txt").returncode, 0)  # the copy on disk is harmless
+        result = self.run_check("--staged", "notes.txt")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SQLite database detected", result.stderr)
+
+    def test_all_tracked_mode_checks_the_index(self) -> None:
+        self.stage_database_then_overwrite_with_text()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SQLite database detected", result.stderr)
+
+    def test_staged_mode_falls_back_to_disk_for_unstaged_files(self) -> None:
+        self.commit("README.md", b"hello\n")
+        (self.repo / "big.txt").write_bytes(b"a" * (safety.MIB + 1))
+        self.assertEqual(self.run_check("--staged", "big.txt").returncode, 1)
+        self.assertEqual(self.run_check("--staged", "README.md").returncode, 0)
+
     def test_explicit_paths_mode(self) -> None:
         self.commit("README.md", b"hello\n")
         (self.repo / "big.txt").write_bytes(b"a" * (safety.MIB + 1))

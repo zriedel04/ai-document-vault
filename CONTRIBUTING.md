@@ -5,7 +5,7 @@
 This project handles personal documents, so three layers stop them reaching the repository:
 
 1. `.gitignore` keeps vault data, databases, logs, secrets and local config untracked.
-2. `scripts/check_repo_safety.py` runs as a pre-commit hook and in CI (on all tracked files and the full history).
+2. `scripts/check_repo_safety.py` runs as a pre-commit hook (on the staged version of each file) and in CI (on all tracked files and every file version in the full history).
 3. gitleaks scans for secrets in pre-commit and in CI (full history).
 
 The safety check rejects:
