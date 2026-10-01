@@ -110,3 +110,7 @@ npm-debug.log*
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+
+# Spike results are drafts for the owner's review; the reviewed files go in docs/spikes/
+spike-results/
+scripts/spikes/uv.lock

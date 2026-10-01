@@ -1,0 +1,131 @@
+"""Spike 2: embedding speed and retrieval quality of the candidate models on this PC.
+
+Decides ADR 0013. For each candidate the script measures load time, throughput in chunks per
+second, peak memory, a projection for a vault of a given size, and Recall@10, MRR and Hit@1 on
+the public eval questions. The models are injected (:class:`Embedder`), so the unit tests run the
+whole spike with a fake and CI never downloads a model.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Protocol
+
+from vault_spikes.corpus import Corpus, Document, Question, canonical_paths
+from vault_spikes.metrics import mean, peak_memory_mib, per_second
+from vault_spikes.report import Environment, Report, collect_environment
+from vault_spikes.retrieval import K, rank_by_similarity, score_all
+
+QUESTION = (
+    "How fast does each candidate embedding model run on this PC (CPU and GPU if present), how "
+    "much memory does it need, how long would a vault of the stated size take, and how well does "
+    "it retrieve on the public eval questions? Feeds ADR 0013."
+)
+METHOD = (
+    "`python -m vault_spikes embedding --candidate NAME --device DEVICE`, one candidate per "
+    "process so the peak memory is that candidate's. The public corpus (`demo/corpus/`) is cut "
+    "into chunks of at most 800 characters; throughput is chunks embedded per second in batches. "
+    "Each answerable public question is embedded and its top 10 chunks are ranked by cosine "
+    "similarity: Recall@10 is the share of required documents found, MRR@10 the reciprocal rank of "
+    "the first acceptable document, Hit@1 whether the top chunk is acceptable. Questions whose "
+    "documents the script cannot read (scans, pictures) are left out and counted. Private sample "
+    "documents are never read by this spike."
+)
+PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
+
+
+class Embedder(Protocol):
+    """A model that turns text into vectors. ``name`` is a label fixed in code."""
+
+    name: str
+
+    def load(self) -> None: ...
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+    def embed_queries(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+
+@dataclass(frozen=True)
+class EmbeddingInputs:
+    corpus: Corpus
+    documents: list[Document]
+    questions: list[Question]
+
+
+def run_embedding_spike(
+    embedder: Embedder,
+    inputs: EmbeddingInputs,
+    *,
+    batch_size: int = 16,
+    vault_chunks: int = 100_000,
+    environment: Environment | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+) -> Report:
+    """Measure one candidate and return a report with one row."""
+    corpus = inputs.corpus
+    if not corpus.chunks:
+        msg = "the corpus has no readable chunks"
+        raise ValueError(msg)
+    report = Report(
+        "embedding",
+        "Embedding models on this PC",
+        QUESTION,
+        METHOD,
+        environment or collect_environment(PACKAGES),
+    )
+
+    begin = clock()
+    embedder.load()
+    load_seconds = clock() - begin
+
+    texts = [chunk.text for chunk in corpus.chunks]
+    embedder.embed_documents(texts[:batch_size])  # warm-up, not timed: the first call allocates
+    begin = clock()
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        vectors.extend(embedder.embed_documents(texts[start : start + batch_size]))
+    embed_seconds = clock() - begin
+    if len(vectors) != len(texts):
+        msg = "the model returned the wrong number of vectors"
+        raise RuntimeError(msg)
+    chunks_per_second = per_second(len(texts), embed_seconds)
+
+    readable = corpus.readable
+    scored = [
+        q
+        for q in inputs.questions
+        if q.answerable and q.source_paths and set(q.source_paths) <= readable
+    ]
+    ranked: dict[str, list[str]] = {}
+    if scored:
+        query_vectors = embedder.embed_queries([q.text for q in scored])
+        chunk_docs = [chunk.doc_path for chunk in corpus.chunks]
+        for question, vector in zip(scored, query_vectors, strict=True):
+            ranked[question.id] = rank_by_similarity(vector, vectors, chunk_docs, K)
+    scores = score_all(scored, ranked, canonical_paths(inputs.documents)) if scored else None
+
+    metrics: dict[str, int | float] = {
+        "dimensions": len(vectors[0]),
+        "load_seconds": load_seconds,
+        "chunks": len(texts),
+        "mean_chunk_chars": mean([len(t) for t in texts]),
+        "chunks_per_second": chunks_per_second,
+        "hours_for_vault_of_chunks": vault_chunks / chunks_per_second / 3600,
+        "vault_chunks_assumed": vault_chunks,
+        "questions_scored": scores.questions if scores else 0,
+        "questions_left_out": len([q for q in inputs.questions if q.answerable])
+        - (scores.questions if scores else 0),
+    }
+    if scores:
+        metrics |= {
+            "recall_at_10": scores.recall_at_10,
+            "mrr_at_10": scores.mrr_at_10,
+            "hit_at_1": scores.hit_at_1,
+        }
+    if (peak := peak_memory_mib()) is not None:
+        metrics["peak_memory_mib"] = peak
+    report.add(embedder.name, **metrics)
+    return report
