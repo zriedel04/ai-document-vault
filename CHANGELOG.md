@@ -7,3 +7,4 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 ### Added
 
 - Repository foundation: ignore rules, repository safety check, pre-commit hooks, CI, templates and contributor docs.
+- Architecture plan (revision 2) in `docs/architecture.md`, a template and 15 ADRs (12 Accepted, 3 Proposed pending Windows spikes), and an ADR structure check.
