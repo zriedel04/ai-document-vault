@@ -38,7 +38,11 @@ pre-commit install
 2. Create a branch named `<type>/<description>` (never commit to `main`).
 3. Make small commits using Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, `ci:`).
 4. Run `pre-commit run --all-files` and the tests.
-5. Open a pull request using the template. The maintainer reviews and merges.
+5. Open a pull request using the template, covering what changed, why, architectural decisions, files and components affected, and how it was tested.
+6. An independent reviewer (OpenAI Codex, arranged by the maintainer) reviews the PR. Each finding is evaluated on its merits: legitimate ones are fixed, and disagreement is explained in the PR rather than ignored.
+7. The maintainer merges only after explicitly approving.
+
+Docs, ADRs and tests are updated in the same PR as the change, so a reviewer needs no conversation history. After a major phase, the whole phase may be audited against the architecture plan and ADRs.
 
 ## Licences
 

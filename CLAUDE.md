@@ -17,6 +17,18 @@ A local-first personal document library that acts as external memory for AI: imp
 - Conventional Commits, small logical commits, one focused PR per issue using the PR template.
 - Run `pre-commit run --all-files` before pushing.
 
+## Review process
+
+1. Claude Code implements one focused change on a branch.
+2. Tests, linting, type checking, security checks and CI must pass.
+3. The PR description covers what changed, why, architectural decisions, files and components affected, and how it was tested, so a reviewer needs no chat history.
+4. The owner has OpenAI Codex independently review the PR before merge.
+5. Review findings may be returned for correction. Evaluate each finding on its merits: fix the legitimate ones and explain disagreement. Never accept a suggestion automatically.
+6. The owner merges, and only after explicitly approving. Claude Code never merges.
+7. After a major phase, Codex may audit the whole phase against `docs/architecture.md` and the ADRs.
+
+Keep CLAUDE.md, ADRs, tests and architecture docs current in the same PR as the change, so the intended behaviour is understandable without the conversation history.
+
 ## Commands
 
 | Task | Command |

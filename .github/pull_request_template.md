@@ -1,6 +1,10 @@
 ## Summary
 
-<!-- What this PR does and why. Closes #N -->
+<!-- What changed. Closes #N -->
+
+## Why
+
+<!-- The reason for the change, so a reviewer without chat history can follow it. -->
 
 ## Before / After
 
@@ -8,7 +12,15 @@
 
 **After:**
 
-## How to test
+## Architectural decisions
+
+<!-- Decisions made or relied on, with links to ADRs. "None" if there are none. -->
+
+## Files and components affected
+
+## How it was tested
+
+<!-- Commands run and results: tests, lint, type checking, security checks. -->
 
 ## Checklist
 
