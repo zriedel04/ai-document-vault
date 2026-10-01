@@ -37,6 +37,8 @@ MAX_LARGE_FILE_BYTES = 5 * MIB
 
 LARGE_FILE_NAMES = frozenset({"package-lock.json", "uv.lock"})
 SQLITE_HEADER = b"SQLite format 3\x00"
+HEAD_BYTES = 512
+"""How many leading bytes of each file are inspected (a tar's signature is at offset 257)."""
 
 DATABASE_SUFFIXES = (
     ".db",
@@ -73,14 +75,18 @@ ARCHIVE_MAGIC = (
     b"Rar!\x1a\x07",
     b"\xfd7zXZ\x00",
     b"\x28\xb5\x2f\xfd",  # zstandard
-    b"MSCF",  # cabinet
+    b"MSCF\x00\x00\x00\x00",  # cabinet
 )
 BZIP2_MAGIC = b"BZh"
 DOCUMENT_MAGIC = (
     b"%PDF-",
     b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",  # legacy Office: doc, xls, ppt, msg
     b"{\\rtf",
+    b"AT&TFORM",  # djvu
 )
+PALM_BOOK_TYPES = (b"BOOKMOBI", b"TEXtREAd")  # mobi, azw, azw3 at offset 60
+BMP_DIB_HEADER_SIZES = (12, 40, 52, 56, 64, 108, 124)
+HEIF_BRANDS = (b"avif", b"heic", b"heim", b"heis", b"heix", b"hevc", b"hevx", b"mif1", b"msf1")
 IMAGE_MAGIC = (
     b"\x89PNG\r\n\x1a\n",
     b"\xff\xd8\xff",
@@ -133,7 +139,19 @@ DOCUMENT_SUFFIXES = (
     ".xlsx",
     ".xps",
 )
-IMAGE_SUFFIXES = (".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")
+IMAGE_SUFFIXES = (
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+)
+BACKUP_SUFFIXES = (".backup", ".bak", ".bkp", ".dump", ".old", ".orig")
 PRIVATE_DIR_NAMES = frozenset(
     {".cache", "backups", "blobs", "derived", "exports", "logs", "secrets"}
 )
@@ -192,6 +210,8 @@ def path_problems(path: str) -> list[str]:
         problems.append(
             "archive that may contain private documents (outside tests/**/fixtures/, demo/corpus/)"
         )
+    if name.endswith(BACKUP_SUFFIXES):
+        problems.append("backup or dump file")
     if name.endswith(MODEL_SUFFIXES):
         problems.append("model weights (downloaded at install time, never committed)")
     if name.endswith(".log"):
@@ -227,16 +247,25 @@ def size_problem(path: str, size: int) -> str | None:
 
 def is_archive(head: bytes) -> bool:
     """True if the first bytes are the signature of a common archive format."""
-    if head.startswith(ARCHIVE_MAGIC):
+    if head.startswith(ARCHIVE_MAGIC) or head[257:262] == b"ustar":
         return True
     return head.startswith(BZIP2_MAGIC) and head[3:4].isdigit() and head[4:10] == b"1AY&SY"
+
+
+def is_document(head: bytes) -> bool:
+    """True if the first bytes are the signature of a PDF, Office, RTF, djvu or ebook file."""
+    return head.startswith(DOCUMENT_MAGIC) or head[60:68] in PALM_BOOK_TYPES
 
 
 def is_image(head: bytes) -> bool:
     """True if the first bytes are the signature of a common image format."""
     if head.startswith(IMAGE_MAGIC):
         return True
-    return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True
+    if head[:2] == b"BM" and len(head) >= 18:
+        return int.from_bytes(head[14:18], "little") in BMP_DIB_HEADER_SIZES
+    return head[4:8] == b"ftyp" and head[8:12] in HEIF_BRANDS
 
 
 def content_problem(head: bytes, allowed: frozenset[str] = frozenset()) -> str | None:
@@ -249,7 +278,7 @@ def content_problem(head: bytes, allowed: frozenset[str] = frozenset()) -> str |
         return "SQLite database detected from file content"
     if "archive" not in allowed and is_archive(head):
         return "archive detected from file content"
-    if "document" not in allowed and head.startswith(DOCUMENT_MAGIC):
+    if "document" not in allowed and is_document(head):
         return "document (PDF, Office or RTF) detected from file content"
     if "image" not in allowed and is_image(head):
         return "image detected from file content"
@@ -292,7 +321,7 @@ def check_files(entries: Iterable[tuple[str, Path]]) -> list[Violation]:
         if on_disk.is_file():
             size = on_disk.stat().st_size
             with on_disk.open("rb") as handle:
-                head = handle.read(len(SQLITE_HEADER))
+                head = handle.read(HEAD_BYTES)
         reasons = reasons_for(relative, size, head)
         violations.extend(Violation(relative, reason) for reason in reasons)
     return violations
@@ -334,7 +363,7 @@ def _read_heads(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
             assert process.stdout is not None
             for object_id in object_ids:
                 size = int(process.stdout.readline().split()[2])
-                head = process.stdout.read(min(size, len(SQLITE_HEADER)))
+                head = process.stdout.read(min(size, HEAD_BYTES))
                 heads[object_id] = head
                 remaining = size - len(head) + 1  # the newline after the content
                 while remaining > 0:
