@@ -131,10 +131,36 @@ class SizeRulesTest(unittest.TestCase):
             b"7z\xbc\xaf\x27\x1c" + b"\0" * 10,
             b"Rar!\x1a\x07\x00" + b"\0" * 9,
             b"BZh91AY&SY" + b"\0" * 6,
+            b"MSCF\0\0\0\0" + b"\0" * 8,
         ):
             self.assertIn("archive", safety.content_problem(head) or "", head)
-            self.assertIsNone(safety.content_problem(head, archives_allowed=True), head)
+            self.assertIsNone(safety.content_problem(head, frozenset({"archive"})), head)
         self.assertIsNone(safety.content_problem(b"BZh is not bzip2"))
+
+    def test_document_and_image_content(self) -> None:
+        documents = (
+            b"%PDF-1.7\n%\xe2\xe3",
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 8,
+            b"{\\rtf1\\ansi",
+        )
+        images = (
+            b"\x89PNG\r\n\x1a\n" + b"\0" * 8,
+            b"\xff\xd8\xff\xe0" + b"\0" * 12,
+            b"GIF89a" + b"\0" * 10,
+        )
+        webp = b"RIFF\0\0\0\0WEBPVP8 "
+        for head in documents:
+            self.assertIn("document", safety.content_problem(head) or "", head)
+            self.assertIsNone(safety.content_problem(head, frozenset({"document"})), head)
+        for head in (*images, webp):
+            self.assertIn("image", safety.content_problem(head) or "", head)
+            self.assertIsNone(safety.content_problem(head, frozenset({"image"})), head)
+        self.assertIsNone(safety.content_problem(b"%PDF is mentioned in this text"))
+
+    def testallowed_content_by_location(self) -> None:
+        self.assertEqual(len(safety.allowed_content("tests/fixtures/a.txt")), 3)
+        self.assertEqual(safety.allowed_content("docs/images/a.txt"), frozenset({"image"}))
+        self.assertEqual(safety.allowed_content("notes/a.txt"), frozenset())
 
 
 class GitIntegrationTest(unittest.TestCase):
@@ -194,6 +220,28 @@ class GitIntegrationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("vault/extracted.txt", result.stderr)
         self.assertNotIn("backend/src/vault/main.py", result.stderr)
+
+    def test_disguised_pdf_caught_in_index_and_history(self) -> None:
+        self.commit("notes.txt", b"%PDF-1.7\nprivate scanned letter\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("document (PDF, Office or RTF) detected", result.stderr)
+        self.git("rm", "-q", "notes.txt")
+        self.git("commit", "-q", "-m", "remove")
+        self.assertEqual(self.run_check().returncode, 0)
+        result = self.run_check("--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Already in git history", result.stderr)
+
+    def test_disguised_cab_and_image_caught(self) -> None:
+        self.commit("notes.txt", b"MSCF\0\0\0\0" + b"\0" * 100)
+        self.commit("photo.txt", b"\x89PNG\r\n\x1a\n" + b"\0" * 100)
+        self.commit("docs/images/diagram.png", b"\x89PNG\r\n\x1a\n" + b"\0" * 100)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("archive detected", result.stderr)
+        self.assertIn("image detected", result.stderr)
+        self.assertNotIn("diagram.png", result.stderr)
 
     def test_archive_content_detected_under_innocent_name(self) -> None:
         self.commit("notes.txt", b"PK\x03\x04" + b"\0" * 100)
