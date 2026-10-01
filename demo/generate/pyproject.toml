@@ -36,6 +36,7 @@ select = ["B", "C4", "E", "F", "I", "N", "RUF", "S", "SIM", "UP", "W"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+files = ["."]
 
 [[tool.mypy.overrides]]
 module = ["reportlab.*"]
