@@ -38,6 +38,9 @@ class ExpressionTest(unittest.TestCase):
             "MIT OR GPL-3.0-only",
             "Zlib",
             "0BSD",
+            "Apache-2.0 WITH LLVM-exception",
+            "apache-2.0 with llvm-exception",
+            "(Apache-2.0 WITH LLVM-exception) AND MIT",
         ):
             with self.subTest(expression=expression):
                 self.assertTrue(licences.expression_allowed(expression))
@@ -54,6 +57,13 @@ class ExpressionTest(unittest.TestCase):
             "LicenseRef-Proprietary",
             "MIT AND GPL-3.0-only",
             "GPL-3.0-only WITH Classpath-exception-2.0",
+            "GPL-3.0-only WITH LLVM-exception",
+            # An exception is only accepted if it is on the list, whatever the base licence is.
+            "MIT WITH GPL-3.0-only",
+            "MIT WITH LicenseRef-Proprietary",
+            "MIT WITH nonsense",
+            "MIT WITH Classpath-exception-2.0",
+            "MIT OR Apache-2.0 WITH nonsense",
             "UNKNOWN",
             "Public Domain",
         ):
@@ -61,7 +71,20 @@ class ExpressionTest(unittest.TestCase):
                 self.assertFalse(licences.expression_allowed(expression))
 
     def test_malformed_expressions_are_rejected(self) -> None:
-        for expression in ("", "MIT OR", "MIT AND", "(MIT", "MIT)", "OR MIT", "MIT MIT", "()"):
+        for expression in (
+            "",
+            "MIT OR",
+            "MIT AND",
+            "(MIT",
+            "MIT)",
+            "OR MIT",
+            "MIT MIT",
+            "()",
+            "MIT WITH",
+            "MIT WITH AND MIT",
+            "MIT WITH (",
+            "MIT WITH LLVM-exception WITH LLVM-exception",
+        ):
             with self.subTest(expression=expression):
                 self.assertFalse(licences.expression_allowed(expression))
 
