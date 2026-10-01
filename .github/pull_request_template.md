@@ -6,6 +6,10 @@
 
 <!-- The reason for the change, so a reviewer without chat history can follow it. -->
 
+## Review focus
+
+<!-- Where the risky parts of the change are and what the reviewer should check most carefully. -->
+
 ## Before / After
 
 **Before:**
