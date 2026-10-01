@@ -52,6 +52,29 @@ DATABASE_SUFFIXES = (
     ".sqlite3-shm",
     ".sqlite3-wal",
 )
+ARCHIVE_SUFFIXES = (
+    ".7z",
+    ".bz2",
+    ".cab",
+    ".gz",
+    ".iso",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".xz",
+    ".zip",
+    ".zst",
+)
+ARCHIVE_MAGIC = (
+    b"PK\x03\x04",  # zip, and so docx, xlsx, pptx and epub
+    b"PK\x05\x06",  # empty zip
+    b"\x1f\x8b",  # gzip
+    b"7z\xbc\xaf\x27\x1c",
+    b"Rar!\x1a\x07",
+    b"\xfd7zXZ\x00",
+    b"\x28\xb5\x2f\xfd",  # zstandard
+)
+BZIP2_MAGIC = b"BZh"
 KEY_SUFFIXES = (
     ".gpg",
     ".jks",
@@ -151,6 +174,10 @@ def path_problems(path: str) -> list[str]:
         name.startswith(SSH_KEY_PREFIXES) and not name.endswith(".pub")
     ):
         problems.append("private key or certificate")
+    if name.endswith(ARCHIVE_SUFFIXES) and not fixture:
+        problems.append(
+            "archive that may contain private documents (outside tests/**/fixtures/, demo/corpus/)"
+        )
     if name.endswith(MODEL_SUFFIXES):
         problems.append("model weights (downloaded at install time, never committed)")
     if name.endswith(".log"):
@@ -184,10 +211,19 @@ def size_problem(path: str, size: int) -> str | None:
     return None
 
 
-def content_problem(head: bytes) -> str | None:
-    """A reason if the first bytes show a database, whatever the file is called."""
+def is_archive(head: bytes) -> bool:
+    """True if the first bytes are the signature of a common archive format."""
+    if head.startswith(ARCHIVE_MAGIC):
+        return True
+    return head.startswith(BZIP2_MAGIC) and head[3:4].isdigit() and head[4:10] == b"1AY&SY"
+
+
+def content_problem(head: bytes, archives_allowed: bool = False) -> str | None:
+    """A reason if the first bytes show a database or archive, whatever the file is called."""
     if head.startswith(SQLITE_HEADER):
         return "SQLite database detected from file content"
+    if not archives_allowed and is_archive(head):
+        return "archive detected from file content"
     return None
 
 
@@ -203,7 +239,7 @@ def reasons_for(path: str, size: int | None, head: bytes) -> list[str]:
     if problem:
         reasons.append(problem)
     if not any(reason.startswith("database") for reason in reasons):
-        problem = content_problem(head)
+        problem = content_problem(head, archives_allowed=is_fixture_path(path))
         if problem:
             reasons.append(problem)
     return reasons
