@@ -216,6 +216,11 @@ def check(root: Path) -> list[str]:
         match = INDEX_ROW.match(line)
         if match:
             listed[match.group(2)] = match.group(3)
+            if not match.group(2).startswith(f"{match.group(1)}-"):
+                problems.append(
+                    f"index: row [{match.group(1)}]({match.group(2)}) shows a number that does "
+                    "not match the linked file"
+                )
     for name, status in statuses.items():
         if name not in listed:
             problems.append(f"index: {name} is not listed in docs/decisions/README.md")

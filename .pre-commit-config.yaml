@@ -29,4 +29,4 @@ repos:
         entry: python scripts/check_adrs.py
         language: system
         pass_filenames: false
-        files: ^(docs/decisions/|scripts/check_adrs\.py$)
+        files: ^(docs/decisions/|docs/spikes/|scripts/check_adrs\.py$)

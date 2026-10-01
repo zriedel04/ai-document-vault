@@ -153,6 +153,13 @@ class CheckAdrsTest(unittest.TestCase):
         self.assertIn(f"{second} is not listed", problems)
         self.assertIn("'Proposed' in the index but 'Accepted' in the file", problems)
 
+    def test_index_row_number_must_match_the_linked_file(self) -> None:
+        name = self.write_adr(1)
+        rows = ["| ADR | Decision | Status |", "| --- | --- | --- |"]
+        rows.append(f"| [9999]({name}) | Example | Accepted |")
+        (self.folder / "README.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        self.assertIn(f"row [9999]({name}) shows a number that does not match", self.problems())
+
     def test_numbers_must_not_have_gaps(self) -> None:
         name = self.write_adr(2)
         self.write_index({name: "Accepted"})
