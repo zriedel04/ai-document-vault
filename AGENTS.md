@@ -25,7 +25,7 @@ A local-first personal document library that acts as external memory for AI: imp
 2. Tests, linting, type checking, security checks and CI must pass.
 3. The PR description covers what changed, why, architectural decisions, files and components affected, and how it was tested, so a reviewer needs no chat history.
 4. The owner has OpenAI Codex independently review the PR before merge. Reviews run automatically or when someone comments `@codex review` on the PR.
-5. Review findings may be returned for correction. Each finding is evaluated on its merits: legitimate ones are fixed, disagreement is explained. Suggestions are never accepted automatically.
+5. Review findings are evaluated on their merits and sorted into four categories (see `CLAUDE.md`): valid and fixed now; valid but the proposed fix is changed; valid but outside the PR's scope, which becomes a follow-up issue; not valid, with an explanation. Suggestions are never accepted automatically. One Codex pass is addressed at a time, and the owner decides whether another is needed. There is no automatic review loop.
 6. The owner merges, and only after explicitly approving. Claude Code never merges.
 7. After a major phase, Codex may audit the whole phase against `docs/architecture.md` and the ADRs.
 
