@@ -158,7 +158,7 @@ questions:
   question: When is the Calculus II final exam?
   category: lookup
   answerable: true
-  answer: Tuesday, December 8, 2026 at 9:00 AM.
+  answer: Tuesday, December 8 at 9:00 AM.
   sources:
   - path: courses/math241/syllabus.pdf
     page: 2
@@ -204,10 +204,6 @@ questions:
     page: null
     quote: Our teammate Sam's laptop screen broke today and the repair shop says the repair will take
       five business days. Sam holds the latest draft of our requirements specification.
-  alternatives:
-  - path: notes/project-journal.md
-    page: null
-    quote: Sam's laptop screen broke. The repair shop quoted five business days.
 - id: q020
   question: Did the extension request follow the syllabus rule about timing?
   category: multi_doc
@@ -240,10 +236,6 @@ questions:
   - path: emails/advisor-reply.txt
     page: null
     quote: Please add a short note on the first page of the specification that says the deadline was extended.
-  alternatives:
-  - path: project/requirements-v2.docx
-    page: null
-    quote: The deadline for this assignment was extended to October 12, 2026 by the instructor.
 - id: q023
   question: Which course components are not yet in the grades file?
   category: multi_doc
@@ -348,10 +340,6 @@ questions:
   - path: project/requirements-v2.docx
     page: null
     quote: Payments, video calls, in-app chat and a native mobile application are out of scope.
-  alternatives:
-  - path: notes/project-journal.md
-    page: null
-    quote: We removed in-app chat from the first release because it would take too long to build.
   distractors:
   - project/requirements-v1.docx
 - id: q031
@@ -382,10 +370,6 @@ questions:
   - path: emails/advisor-reply.txt
     page: null
     quote: Your team may submit Assignment 2 by Monday, October 12 at 11:59 PM with no late penalty.
-  alternatives:
-  - path: project/requirements-v2.docx
-    page: null
-    quote: The deadline for this assignment was extended to October 12, 2026 by the instructor.
   distractors:
   - courses/cse485/syllabus.pdf
   - courses/cse485/assignment-2-requirements-spec.pdf
@@ -398,10 +382,6 @@ questions:
   - path: project/requirements-v2.docx
     page: null
     quote: Version 2.0 (submitted), October 11, 2026.
-  alternatives:
-  - path: notes/project-journal.md
-    page: null
-    quote: Submitted version 2 of the requirements.
   distractors:
   - project/requirements-v1.docx
 - id: q034

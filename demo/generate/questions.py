@@ -250,7 +250,7 @@ _RAW: list[_Row] = [
     _q(
         "lookup",
         "When is the Calculus II final exam?",
-        "Tuesday, December 8, 2026 at 9:00 AM.",
+        "Tuesday, December 8 at 9:00 AM.",
         (s(MATH_SYLLABUS, "The final exam is on Tuesday, December 8, 2026 at 9:00 AM.", 2),),
         alternatives=(
             s(STUDY, "Tuesday, December 8 at 9:00 AM: Calculus II final"),
@@ -288,9 +288,6 @@ _RAW: list[_Row] = [
                 "Our teammate Sam's laptop screen broke today and the repair shop says the repair will take five business days. Sam holds the latest draft of our requirements specification.",
             ),
         ),
-        alternatives=(
-            s(JOURNAL, "Sam's laptop screen broke. The repair shop quoted five business days."),
-        ),
     ),
     _q(
         "multi_doc",
@@ -321,12 +318,6 @@ _RAW: list[_Row] = [
             s(
                 MAIL_REPLY,
                 "Please add a short note on the first page of the specification that says the deadline was extended.",
-            ),
-        ),
-        alternatives=(
-            s(
-                REQ_V2,
-                "The deadline for this assignment was extended to October 12, 2026 by the instructor.",
             ),
         ),
     ),
@@ -413,12 +404,6 @@ _RAW: list[_Row] = [
             ),
         ),
         (REQ_V1,),
-        alternatives=(
-            s(
-                JOURNAL,
-                "We removed in-app chat from the first release because it would take too long to build.",
-            ),
-        ),
     ),
     _q(
         "version",
@@ -448,12 +433,6 @@ _RAW: list[_Row] = [
             ),
         ),
         (SYLLABUS, ASSIGN2),
-        alternatives=(
-            s(
-                REQ_V2,
-                "The deadline for this assignment was extended to October 12, 2026 by the instructor.",
-            ),
-        ),
     ),
     _q(
         "version",
@@ -461,7 +440,6 @@ _RAW: list[_Row] = [
         "October 11, 2026.",
         (s(REQ_V2, "Version 2.0 (submitted), October 11, 2026."),),
         (REQ_V1,),
-        alternatives=(s(JOURNAL, "Submitted version 2 of the requirements."),),
     ),
     # --- ocr: only in scans and pictures ----------------------------------------------------
     _q(

@@ -32,7 +32,7 @@ edit it by hand. Each entry looks like this:
 | `category` | `lookup`, `multi_doc`, `version`, `ocr`, `numeric`, `paraphrase` or `not_in_vault` |
 | `answerable` | `false` for `not_in_vault`: nothing in the corpus answers it, and the right behaviour is to say so |
 | `sources` | The evidence the answer needs, all of it. `quote` is verbatim text of that page, so a retrieved passage can be matched against it. A `multi_doc` question needs at least two documents; every other answerable question needs exactly one |
-| `alternatives` | Passages in other documents that give the same answer. Citing one of them is as good as citing a source; none is required |
+| `alternatives` | Passages in other documents that give the same answer. Citing one of them is as good as citing a source, so each must give the whole expected answer on its own (every number, time and date); none is required |
 | `distractors` | Documents that must not be cited as the answer (for example the superseded version) |
 
 Exact duplicates in `demo/corpus/manifest.json` (`exact_duplicate_of`) are interchangeable: a

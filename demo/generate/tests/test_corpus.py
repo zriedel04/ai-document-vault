@@ -36,6 +36,11 @@ def norm(text: str) -> str:
     return " ".join(text.split())
 
 
+def numbers(text: str) -> set[str]:
+    """Every number in ``text``: dates, years, counts and times such as ``11:59``."""
+    return set(re.findall(r"\d+(?::\d+)?", text))
+
+
 def data(doc: Document) -> bytes:
     return FILES[f"demo/corpus/{doc.path}"]
 
@@ -249,6 +254,20 @@ class EvalSetTests(unittest.TestCase):
                 self.assertNotIn(alt.path, needed, q.id)
             if q.alternatives:
                 self.assertNotEqual(q.category, "multi_doc", f"{q.id}: every source is needed")
+
+    def test_an_alternative_carries_every_number_of_the_expected_answer(self) -> None:
+        # An alternative is as good as a source, so it must answer the question on its own. This
+        # catches a missing time, date, year or count; a missing fact in words is left to review.
+        for q in QUESTIONS:
+            for alt in q.alternatives:
+                missing = numbers(q.answer) - numbers(alt.quote)
+                self.assertFalse(missing, f"{q.id}: {alt.path} lacks {sorted(missing)}")
+
+    def test_the_number_rule_notices_a_missing_time(self) -> None:
+        answer = "Monday, October 12, 2026 at 11:59 PM."
+        incomplete = "The deadline was extended to October 12, 2026."
+        self.assertEqual(numbers(answer) - numbers(incomplete), {"11:59"})
+        self.assertEqual(numbers(answer) - numbers("Monday, October 12, 2026 at 11:59 PM"), set())
 
     def test_version_questions_name_the_outdated_document(self) -> None:
         for q in QUESTIONS:
