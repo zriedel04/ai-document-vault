@@ -9,11 +9,20 @@ looks harmless (a single word of document text looks like an identifier).
   at run time (anything else is written as ``invalid_event``), but a string that happens to match
   it would pass, and mypy does not enforce ``LiteralString``, so never build an event name from
   data; reviewers check that every call site passes a literal.
-- A field value is written only if it is a number, a boolean, ``None``, an enum member (a name
-  fixed in code) or an :class:`Identifier`, which the caller creates explicitly with
-  :func:`identifier` from an id the application generated (``doc_9f3a1c``, a content hash, a
-  UUID). Any other value, including every plain ``str``, is replaced by ``[redacted]``.
+- A field value is written only if it is a boolean, ``None``, an enum member (a name fixed in
+  code), a :class:`Metric` or an :class:`Identifier`. The caller creates the last two explicitly:
+  :func:`metric` for a count, size or duration the application computed, :func:`identifier` for
+  an id the application generated (``doc_9f3a1c``, a content hash, a UUID). Any other value,
+  including every plain ``str``, ``int`` and ``float``, is replaced by ``[redacted]``: a number
+  parsed out of a document (an amount, a date, an ID card number) is document content too.
 - A field name must be ``lower_snake_case``; anything else is replaced by ``invalid_field_N``.
+- The logger name is written only if it is the name of an imported module (what
+  ``logging.getLogger(__name__)`` gives), ``root`` or a trusted third-party logger. A name built
+  from other data, such as a file name, is written as ``unknown_logger``.
+- Formatting never raises. Python prints the raw message and arguments of a record when a handler
+  fails (``logging.raiseExceptions``), so a malformed record (a reserved field that is not a
+  mapping, an odd logger name) must not be able to make the formatter fail. If anything goes wrong
+  the line is ``format_error``.
 - An exception is logged as its type and the place it was raised, never its message, which could
   quote the content that failed to parse.
 
@@ -27,12 +36,13 @@ looks harmless (a single word of document text looks like an identifier).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import sys
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from enum import Enum
 from typing import Final, LiteralString
@@ -62,6 +72,36 @@ class Identifier(str):
         return super().__new__(cls, value)
 
 
+class Metric:
+    """A number the application computed (a count, a size, a duration), marked as safe to log.
+
+    Create it with :func:`metric`. A plain ``int`` or ``float`` is never logged: the type alone
+    cannot tell a document count from a number taken out of a document.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: int | float) -> None:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            msg = "a metric is a finite int or float"
+            raise ValueError(msg)
+        self.value = value
+
+
+def metric(value: int | float) -> Metric:
+    """Mark ``value`` as a number that is safe to log. Raises ValueError for anything else.
+
+    Only call this on numbers the application computed itself: a number of chunks, bytes read or
+    milliseconds elapsed. Never pass a number that was read out of a document. Reviewers must
+    treat every call as a place document content could enter.
+    """
+    return Metric(value)
+
+
 def identifier(value: str) -> Identifier:
     """Mark ``value`` as an id that is safe to log. Raises ValueError for anything else.
 
@@ -72,7 +112,7 @@ def identifier(value: str) -> Identifier:
     return Identifier(value)
 
 
-type FieldValue = int | float | bool | Identifier | Enum | None
+type FieldValue = Metric | bool | Identifier | Enum | None
 
 
 def _safe(value: object) -> str:
@@ -81,10 +121,15 @@ def _safe(value: object) -> str:
         return "None"
     if isinstance(value, bool):
         return str(bool(value))
-    if isinstance(value, int):
-        return str(int(value))
-    if isinstance(value, float):
-        return repr(float(value))
+    if isinstance(value, Metric):
+        number = value.value  # re-checked: the attribute can be reassigned after construction
+        if (
+            isinstance(number, int | float)
+            and not isinstance(number, bool)
+            and math.isfinite(number)
+        ):
+            return repr(float(number)) if isinstance(number, float) else str(int(number))
+        return REDACTED
     if isinstance(value, Identifier) and IDENTIFIER.fullmatch(str(value)):
         return str.__str__(value)
     if isinstance(value, Enum) and FIELD_NAME.match(name := value.name.lower()):
@@ -99,15 +144,30 @@ class SafeFormatter(logging.Formatter):
         super().__init__(datefmt="%Y-%m-%dT%H:%M:%S")
 
     def format(self, record: logging.LogRecord) -> str:
-        own = record.name == APP_LOGGER or record.name.startswith(f"{APP_LOGGER}.")
+        try:
+            return self._format(record)
+        except Exception:  # nothing may escape: Python prints the raw record when a handler fails
+            return f"{self.formatTime(record, self.datefmt)} {record.levelname} format_error"
+
+    def _format(self, record: logging.LogRecord) -> str:
+        name = record.name
+        own = name == APP_LOGGER or name.startswith(f"{APP_LOGGER}.")
         if own:
             message = self._event(record)
-        elif record.name in TRUSTED_LOGGERS:
+        elif name in TRUSTED_LOGGERS:
             message = record.getMessage()
         else:
             message = "message_omitted"
-        parts = [self.formatTime(record, self.datefmt), record.levelname, record.name, message]
-        fields: dict[str, object] = getattr(record, FIELDS_ATTR, {})
+        parts = [
+            self.formatTime(record, self.datefmt),
+            record.levelname,
+            _logger_name(name),
+            message,
+        ]
+        fields = getattr(record, FIELDS_ATTR, {})
+        if not isinstance(fields, Mapping):
+            parts.append("invalid_fields=True")
+            fields = {}
         for position, (key, value) in enumerate(fields.items()):
             name = (
                 key
@@ -128,6 +188,13 @@ class SafeFormatter(logging.Formatter):
         if isinstance(message, str) and not record.args and EVENT_NAME.match(message):
             return message
         return "invalid_event"
+
+
+def _logger_name(name: str) -> str:
+    """The logger name, if it is a module name or a trusted logger; never data-derived text."""
+    if name == "root" or name in TRUSTED_LOGGERS or name in sys.modules:
+        return name
+    return "unknown_logger"
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -175,7 +242,7 @@ def timed(logger: logging.Logger, event: LiteralString, **fields: FieldValue) ->
         ok = False
         raise
     finally:
-        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        duration_ms = metric(round((time.perf_counter() - started) * 1000, 1))
         _emit(
             logger,
             event,
