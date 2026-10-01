@@ -24,6 +24,7 @@ from PIL import Image
 import build
 from model import Document
 from questions import build_questions
+from render import Pen, image_layout, scan_layout
 
 DOCS = {d.path: d for d in build.all_documents()}
 FILES = build.build_outputs()
@@ -40,6 +41,10 @@ def data(doc: Document) -> bytes:
 
 
 class CorpusTests(unittest.TestCase):
+    def test_corpus_size_matches_the_plan(self) -> None:
+        # docs/architecture.md section 21: about 40-60 documents.
+        self.assertTrue(40 <= len(DOCS) <= 60, len(DOCS))
+
     def test_every_format_in_the_plan_is_present(self) -> None:
         kinds = {d.kind for d in DOCS.values()}
         self.assertEqual(kinds, {"pdf_text", "pdf_scan", "docx", "txt", "md", "csv", "png", "jpg"})
@@ -124,6 +129,41 @@ class CorpusTests(unittest.TestCase):
                     self.assertGreater(image.height, 200, doc.path)
                 self.assertLess(len(data(doc)), 500_000, doc.path)
 
+    def test_drawn_text_never_overlaps_or_leaves_its_picture(self) -> None:
+        pens: list[tuple[str, Pen]] = []
+        for doc in DOCS.values():
+            if doc.kind in ("png", "jpg"):
+                pens.append((doc.path, image_layout(doc)))
+            if doc.kind == "pdf_scan":
+                pens += [
+                    (f"{doc.path} page {n}", scan_layout(page))
+                    for n, page in enumerate(doc.lines, 1)
+                ]
+        self.assertGreater(len(pens), 10)
+        for where, pen in pens:
+            width, height = pen.image.size
+            for placed in pen.placed:
+                left, top, right, bottom = placed.box
+                self.assertTrue(
+                    left >= 0 and top >= 0 and right <= width and bottom <= height,
+                    f"{where}: {placed.text!r} runs off the picture",
+                )
+                if placed.within:
+                    w_left, w_top, w_right, w_bottom = placed.within
+                    self.assertTrue(
+                        left >= w_left and right <= w_right and top >= w_top and bottom <= w_bottom,
+                        f"{where}: {placed.text!r} leaves its box",
+                    )
+            for i, one in enumerate(pen.placed):
+                for other in pen.placed[i + 1 :]:
+                    apart = (
+                        one.box[2] <= other.box[0]
+                        or other.box[2] <= one.box[0]
+                        or one.box[3] <= other.box[1]
+                        or other.box[3] <= one.box[1]
+                    )
+                    self.assertTrue(apart, f"{where}: {one.text!r} overlaps {other.text!r}")
+
     def test_files_stay_under_the_repository_size_limit(self) -> None:
         for path, content in FILES.items():
             self.assertLess(len(content), 1_000_000, path)
@@ -167,7 +207,7 @@ class EvalSetTests(unittest.TestCase):
 
     def test_every_source_quote_is_in_the_document(self) -> None:
         for q in QUESTIONS:
-            for src in q.sources:
+            for src in (*q.sources, *q.alternatives):
                 doc = DOCS[src.path]
                 texts = doc.page_texts()
                 if doc.paginated:
@@ -191,8 +231,24 @@ class EvalSetTests(unittest.TestCase):
         for q in QUESTIONS:
             for path in q.distractors:
                 self.assertIn(path, DOCS, q.id)
-            cited = {s.path for s in q.sources}
+            cited = {s.path for s in (*q.sources, *q.alternatives)}
             self.assertFalse(cited & set(q.distractors), q.id)
+
+    def test_multi_doc_questions_need_several_documents_and_the_rest_need_one(self) -> None:
+        for q in QUESTIONS:
+            needed = {s.path for s in q.sources}
+            if q.category == "multi_doc":
+                self.assertGreaterEqual(len(needed), 2, f"{q.id} is answered by one document")
+            elif q.answerable:
+                self.assertEqual(len(needed), 1, f"{q.id} needs {len(needed)} documents")
+
+    def test_alternatives_come_from_other_documents(self) -> None:
+        for q in QUESTIONS:
+            needed = {s.path for s in q.sources}
+            for alt in q.alternatives:
+                self.assertNotIn(alt.path, needed, q.id)
+            if q.alternatives:
+                self.assertNotEqual(q.category, "multi_doc", f"{q.id}: every source is needed")
 
     def test_version_questions_name_the_outdated_document(self) -> None:
         for q in QUESTIONS:

@@ -22,27 +22,25 @@ uv run python -m unittest discover -s tests -v
 
 ## What the corpus covers
 
-33 documents in every MVP format: text PDFs (one exact duplicate), scanned-style PDFs (an image
-only, no text layer), DOCX (two versions of a requirements specification and an exact duplicate of
-the second), TXT, Markdown, CSV, PNG screenshots and JPG receipts. It also holds the traps the
-retrieval system must handle: exact duplicates, a near-duplicate with two edited words, two
-versions that disagree on numbers, and facts that exist only inside a picture. `manifest.json`
-lists every file with its format, size, SHA-256, page count and whether OCR is needed.
-
-The plan calls for 40 to 60 documents; this first set has 33 because every document here is tied to
-at least one eval question. More can be added to the `content_*.py` files without changing the
-tooling.
+44 documents in every MVP format: text PDFs, scanned-style PDFs (an image only, no text layer),
+DOCX (two versions of a requirements specification, a proposal and a design review), TXT, Markdown,
+CSV, PNG screenshots and JPG receipts. It also holds the traps the retrieval system must handle:
+exact duplicates (a PDF, a DOCX and a JPG), a near-duplicate with two edited words, two versions that
+disagree on numbers, facts that exist only inside a picture, and other courses whose syllabi look
+like the CSE 485 one but say different things. Twelve documents need OCR. `manifest.json` lists every
+file with its format, size, SHA-256, page count and whether OCR is needed. The size follows the plan
+(about 40 to 60 documents).
 
 ## How it is built
 
 | File | Role |
 | --- | --- |
 | `model.py` | `Document` and `Block`: the ground-truth text of each document |
-| `content_courses.py`, `content_project.py`, `content_media.py` | The fictional content |
+| `content_courses.py`, `content_project.py`, `content_media.py`, `content_extra.py` | The fictional content |
 | `render.py` | Turns a `Document` into bytes (PDF, scanned PDF, DOCX, PNG, JPG) |
 | `questions.py` | The eval questions, each with sources and verbatim quotes |
 | `build.py` | Writes or checks the corpus, manifest and eval set |
-| `tests/test_corpus.py` | Validation: every cited document, page and quote exists |
+| `tests/test_corpus.py` | Validation: every cited document, page and quote exists; no drawn text overlaps or runs off its picture |
 
 The content is written once as ground truth. The renderer draws it, so a quote in an eval question
 can be checked against the same text that was drawn into the PDF or picture.

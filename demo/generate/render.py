@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import random
 import zipfile
+from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -85,16 +86,20 @@ def render_pdf_scan(doc: Document) -> bytes:
 
 
 def _scan_page(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
-    page = Image.new("L", (_SCAN_W, _SCAN_H), 246)
-    draw = ImageDraw.Draw(page)
-    title_font = ImageFont.load_default(size=34)
-    body_font = ImageFont.load_default(size=28)
+    return _scan_effects(scan_layout(lines).image, rng, max_degrees=1.2)
+
+
+def scan_layout(lines: tuple[str, ...]) -> Pen:
+    """Draw the lines of one scanned page, before the scanner effects."""
+    pen = Pen(Image.new("L", (_SCAN_W, _SCAN_H), 246))
+    title_font = _font(34)
+    body_font = _font(28)
     y = 150
     for i, line in enumerate(lines):
         font = title_font if i < 2 and line.isupper() else body_font
-        draw.text((130, y), line, fill=28, font=font)
+        pen.text((130, y), line, 28, font)
         y += 62 if font is title_font else 50
-    return _scan_effects(page, rng, max_degrees=1.2)
+    return pen
 
 
 def _scan_effects(page: Image.Image, rng: random.Random, max_degrees: float) -> Image.Image:
@@ -211,17 +216,47 @@ def render_docx(doc: Document) -> bytes:
 
 # --- screenshots and receipts ---------------------------------------------------------------------
 
+Box = tuple[float, float, float, float]  # left, top, right, bottom
+
+
+@dataclass(frozen=True)
+class Placed:
+    """A piece of text as drawn: where it landed, and the box it must stay inside, if any."""
+
+    text: str
+    box: Box
+    within: Box | None
+
+
+class Pen:
+    """Draws text on an image and records where every piece landed, so tests can prove that
+    nothing overlaps, runs off the picture or leaves its box (OCR ground truth must be legible)."""
+
+    def __init__(self, image: Image.Image) -> None:
+        self.image = image
+        self.draw = ImageDraw.Draw(image)
+        self.placed: list[Placed] = []
+
+    def text(
+        self,
+        xy: tuple[float, float],
+        text: str,
+        fill: int | tuple[int, int, int],
+        font: ImageFont.FreeTypeFont,
+        within: Box | None = None,
+    ) -> None:
+        self.draw.text(xy, text, fill=fill, font=font)
+        self.placed.append(Placed(text, self.draw.textbbox(xy, text, font=font), within))
+
+    def width(self, text: str, font: ImageFont.FreeTypeFont) -> float:
+        return float(self.draw.textlength(text, font=font))
+
 
 def render_image(doc: Document) -> bytes:
-    lines = doc.lines[0]
-    drawers = {
-        "terminal": _terminal,
-        "kanban": _kanban,
-        "calendar": _calendar,
-        "chat": _chat,
-        "receipt": _receipt,
-    }
-    image = drawers[doc.layout](lines, random.Random(doc.seed))
+    pen = image_layout(doc)
+    image = pen.image
+    if doc.layout == "receipt":
+        image = _photo_of(image, random.Random(doc.seed))
     buf = io.BytesIO()
     if doc.kind == "jpg":
         image.convert("RGB").save(buf, "JPEG", quality=80, optimize=False, progressive=False)
@@ -230,19 +265,29 @@ def render_image(doc: Document) -> bytes:
     return buf.getvalue()
 
 
+def image_layout(doc: Document) -> Pen:
+    """Draw a screenshot or receipt, before any photo effects."""
+    drawers = {
+        "terminal": _terminal,
+        "kanban": _kanban,
+        "calendar": _calendar,
+        "chat": _chat,
+        "receipt": _receipt,
+    }
+    return drawers[doc.layout](doc.lines[0])
+
+
 def _font(size: int) -> ImageFont.FreeTypeFont:
     font = ImageFont.load_default(size=size)
     assert isinstance(font, ImageFont.FreeTypeFont)  # noqa: S101 - the bundled font is scalable
     return font
 
 
-def _terminal(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
-    del rng
+def _terminal(lines: tuple[str, ...]) -> Pen:
     font = _font(24)
-    image = Image.new("RGB", (1100, 90 + 40 * len(lines)), (24, 26, 32))
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, 1100, 44), fill=(52, 56, 66))
-    draw.text((16, 8), "Terminal", fill=(200, 204, 214), font=_font(22))
+    pen = Pen(Image.new("RGB", (1100, 90 + 40 * len(lines)), (24, 26, 32)))
+    pen.draw.rectangle((0, 0, 1100, 44), fill=(52, 56, 66))
+    pen.text((16, 8), "Terminal", (200, 204, 214), _font(22))
     for i, line in enumerate(lines):
         if line.startswith("ERROR") or "failed" in line.lower() or line.startswith("Module"):
             colour = (255, 120, 110)
@@ -250,12 +295,11 @@ def _terminal(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
             colour = (130, 230, 150)
         else:
             colour = (225, 228, 235)
-        draw.text((24, 66 + 40 * i), line, fill=colour, font=font)
-    return image
+        pen.text((24, 66 + 40 * i), line, colour, font)
+    return pen
 
 
-def _kanban(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
-    del rng
+def _kanban(lines: tuple[str, ...]) -> Pen:
     title, *rest = lines
     columns: list[tuple[str, list[str]]] = []
     for line in rest:
@@ -265,82 +309,84 @@ def _kanban(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
             columns[-1][1].append(line)
     width, col_w = 1230, 380
     height = 170 + 110 * max(len(cards) for _, cards in columns)
-    image = Image.new("RGB", (width, height), (240, 242, 246))
-    draw = ImageDraw.Draw(image)
-    draw.text((30, 24), title, fill=(30, 40, 60), font=_font(34))
+    pen = Pen(Image.new("RGB", (width, height), (240, 242, 246)))
+    pen.text((30, 24), title, (30, 40, 60), _font(34))
     for c, (heading, cards) in enumerate(columns):
         x = 30 + c * (col_w + 15)
-        draw.rounded_rectangle((x, 90, x + col_w, height - 20), 12, fill=(222, 226, 234))
-        draw.text((x + 18, 104), heading, fill=(60, 70, 90), font=_font(24))
+        column = (x, 90, x + col_w, height - 20)
+        pen.draw.rounded_rectangle(column, 12, fill=(222, 226, 234))
+        pen.text((x + 18, 104), heading, (60, 70, 90), _font(24), within=column)
         for r, card in enumerate(cards):
             top = 150 + r * 110
-            draw.rounded_rectangle((x + 14, top, x + col_w - 14, top + 90), 8, fill=(255, 255, 255))
-            wrapped = _wrap(draw, card, _font(22), col_w - 60)
-            for k, row in enumerate(wrapped):
-                draw.text((x + 28, top + 14 + 30 * k), row, fill=(30, 36, 50), font=_font(22))
-    return image
+            box = (x + 14, top, x + col_w - 14, top + 90)
+            pen.draw.rounded_rectangle(box, 8, fill=(255, 255, 255))
+            # 14 px of padding on both sides of the text inside the card
+            for k, row in enumerate(_wrap(pen, card, _font(22), col_w - 28 - 28)):
+                pen.text((x + 28, top + 14 + 30 * k), row, (30, 36, 50), _font(22), within=box)
+    return pen
 
 
-def _calendar(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
-    del rng
+def _calendar(lines: tuple[str, ...]) -> Pen:
     title, *events = lines
-    image = Image.new("RGB", (1100, 150 + 90 * len(events)), (255, 255, 255))
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, 1100, 90), fill=(40, 90, 160))
-    draw.text((30, 24), title, fill=(255, 255, 255), font=_font(36))
+    pen = Pen(Image.new("RGB", (1100, 150 + 90 * len(events)), (255, 255, 255)))
+    pen.draw.rectangle((0, 0, 1100, 90), fill=(40, 90, 160))
+    pen.text((30, 24), title, (255, 255, 255), _font(36))
     for i, event in enumerate(events):
         top = 110 + 90 * i
-        draw.rounded_rectangle((30, top, 1070, top + 70), 10, fill=(226, 238, 252))
-        draw.text((50, top + 18), event, fill=(20, 30, 50), font=_font(28))
-    return image
+        box = (30, top, 1070, top + 70)
+        pen.draw.rounded_rectangle(box, 10, fill=(226, 238, 252))
+        pen.text((50, top + 18), event, (20, 30, 50), _font(28), within=box)
+    return pen
 
 
-def _chat(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
-    del rng
+def _chat(lines: tuple[str, ...]) -> Pen:
     date, *messages = lines
-    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     font = _font(26)
-    wrapped = [_wrap(probe, m, font, 640) for m in messages]
+    bubble_w, padding = 640, 20
+    probe = Pen(Image.new("RGB", (1, 1)))
+    wrapped = [_wrap(probe, m, font, bubble_w - 2 * padding) for m in messages]
     height = 120 + sum(40 * len(w) + 50 for w in wrapped)
-    image = Image.new("RGB", (1000, height), (236, 238, 243))
-    draw = ImageDraw.Draw(image)
-    draw.text((400, 24), date, fill=(110, 116, 130), font=_font(24))
+    pen = Pen(Image.new("RGB", (1000, height), (236, 238, 243)))
+    pen.text((400, 24), date, (110, 116, 130), _font(24))
     y = 80
     for message, rows in zip(messages, wrapped, strict=True):
         mine = message.startswith("Alex:")
         box_h = 40 * len(rows) + 24
-        x0, x1 = (330, 970) if mine else (30, 670)
-        draw.rounded_rectangle(
-            (x0, y, x1, y + box_h), 16, fill=(70, 130, 230) if mine else (255, 255, 255)
-        )
+        x0 = 330 if mine else 30
+        box = (x0, y, x0 + bubble_w, y + box_h)
+        pen.draw.rounded_rectangle(box, 16, fill=(70, 130, 230) if mine else (255, 255, 255))
         for k, row in enumerate(rows):
-            draw.text(
-                (x0 + 20, y + 14 + 40 * k),
-                row,
-                fill=(255, 255, 255) if mine else (25, 30, 45),
-                font=font,
-            )
+            colour = (255, 255, 255) if mine else (25, 30, 45)
+            pen.text((x0 + padding, y + 14 + 40 * k), row, colour, font, within=box)
         y += box_h + 26
-    return image
+    return pen
 
 
-def _receipt(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
+def _receipt(lines: tuple[str, ...]) -> Pen:
     font = _font(28)
-    width, height = 620, 130 + 48 * len(lines)
-    paper = Image.new("L", (width, height), 250)
-    draw = ImageDraw.Draw(paper)
-    for i, line in enumerate(lines):
-        y = 50 + 48 * i
-        if "\t" in line:
-            left, right = line.split("\t")
-            draw.text((30, y), left, fill=30, font=font)
-            draw.text(
-                (width - 30 - draw.textlength(right, font=font), y), right, fill=30, font=font
-            )
-        else:
-            draw.text((30, y), line, fill=30, font=font)
-    # Put the receipt on a darker table, slightly rotated, with noise, like a phone photo.
-    table = Image.new("L", (width + 160, height + 160), 120)
+    width, margin, gap, row_h = 780, 30, 24, 48
+    probe = Pen(Image.new("L", (1, 1)))
+    # Lay the rows out first: a long item name is wrapped so that it never reaches the price.
+    rows: list[tuple[list[str], str | None]] = []
+    for line in lines:
+        left, _, amount = line.partition("\t")
+        room = width - 2 * margin - (probe.width(amount, font) + gap if amount else 0)
+        rows.append((_wrap(probe, left, font, room), amount or None))
+    height = 100 + row_h * sum(len(parts) for parts, _ in rows)
+    pen = Pen(Image.new("L", (width, height), 250))
+    y = 50
+    for parts, right in rows:
+        for k, part in enumerate(parts):
+            pen.text((margin, y + row_h * k), part, 30, font)
+        if right is not None:
+            pen.text((width - margin - pen.width(right, font), y), right, 30, font)
+        y += row_h * len(parts)
+    return pen
+
+
+def _photo_of(paper: Image.Image, rng: random.Random) -> Image.Image:
+    """Put the receipt on a darker table, slightly rotated, with noise, like a phone photo."""
+    table = Image.new("L", (paper.width + 160, paper.height + 160), 120)
     paper = paper.rotate(
         rng.uniform(-2.0, 2.0), resample=Image.Resampling.BICUBIC, expand=True, fillcolor=120
     )
@@ -348,14 +394,12 @@ def _receipt(lines: tuple[str, ...], rng: random.Random) -> Image.Image:
     return _scan_effects(table, rng, max_degrees=0.0)
 
 
-def _wrap(
-    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: float
-) -> list[str]:
+def _wrap(pen: Pen, text: str, font: ImageFont.FreeTypeFont, max_width: float) -> list[str]:
     rows: list[str] = []
     current = ""
     for word in text.split(" "):
         trial = f"{current} {word}".strip()
-        if current and draw.textlength(trial, font=font) > max_width:
+        if current and pen.width(trial, font) > max_width:
             rows.append(current)
             current = word
         else:

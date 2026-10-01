@@ -51,6 +51,9 @@ BOOKS = "receipts/bookstore-receipt.jpg"
 COFFEE = "receipts/coffee-receipt.jpg"
 REPAIR = "receipts/laptop-repair-receipt.jpg"
 PRINTING = "receipts/printing-receipt.jpg"
+MATH_SYLLABUS = "courses/math241/syllabus.pdf"
+OS_SYLLABUS = "courses/cs350/syllabus.pdf"
+DEMO_DAY = "emails/class-announcement-demo-day.txt"
 
 
 @dataclass(frozen=True)
@@ -66,7 +69,10 @@ class Question:
     question: str
     category: Category
     answer: str
-    sources: tuple[Source, ...] = ()
+    sources: tuple[Source, ...] = ()  # every passage the answer needs
+    # Other passages that also give the answer: citing one of them is as good as citing a source
+    # (the same fact in a second document). They are never required.
+    alternatives: tuple[Source, ...] = ()
     distractors: tuple[str, ...] = ()  # documents that look relevant but are outdated or wrong
     tags: tuple[str, ...] = field(default=())
 
@@ -79,16 +85,30 @@ def s(path: str, quote: str, page: int | None = None) -> Source:
     return Source(path, quote, page)
 
 
-_RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
+_Row = tuple[Category, str, str, tuple[Source, ...], tuple[str, ...], tuple[Source, ...]]
+
+
+def _q(
+    category: Category,
+    question: str,
+    answer: str,
+    sources: tuple[Source, ...],
+    distractors: tuple[str, ...] = (),
+    alternatives: tuple[Source, ...] = (),
+) -> _Row:
+    return category, question, answer, sources, distractors, alternatives
+
+
+_RAW: list[_Row] = [
     # --- lookup: course documents -----------------------------------------------------------
-    (
+    _q(
         "lookup",
         "Who teaches CSE 485 and what is their email address?",
         "Dr. Priya Raman, priya.raman@lit.example.",
         (s(SYLLABUS, "Instructor: Dr. Priya Raman, priya.raman@lit.example.", 1),),
         (),
     ),
-    (
+    _q(
         "lookup",
         "When and where does the capstone class meet?",
         "Tuesdays and Thursdays from 2:00 PM to 3:15 PM in Room 214 of Harbor Hall.",
@@ -101,9 +121,9 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "lookup",
-        "When are the instructor's office hours?",
+        "When are Dr. Raman's office hours?",
         "Wednesdays from 10:00 AM to 12:00 PM in Room 318 of Harbor Hall.",
         (
             s(
@@ -114,7 +134,7 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "lookup",
         "Who is the teaching assistant and when can I reach them?",
         "Marcus Bell, on Fridays from 1:00 PM to 3:00 PM, online.",
@@ -127,16 +147,16 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "lookup",
         "What share of the final grade does the final report make up?",
         "25 percent.",
         (s(SYLLABUS, "Final report: 25 percent", 2),),
         (),
     ),
-    (
+    _q(
         "lookup",
-        "What is the penalty for handing work in late?",
+        "What is the penalty for handing work in late in CSE 485?",
         "10 percent per day for up to five days; after five days the work is not accepted.",
         (
             s(
@@ -147,24 +167,21 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "lookup",
-        "Is there a final exam in the course?",
+        "Is there a final exam in CSE 485?",
         "No, there is no final exam.",
         (s(SYLLABUS, "There is no final exam in this course.", 3),),
         (),
     ),
-    (
+    _q(
         "lookup",
         "When is the design review?",
         "Friday, October 30, 2026.",
-        (
-            s(SYLLABUS, "Design review: Friday, October 30, 2026", 3),
-            s(REVIEW, "Design review held on Friday, October 30, 2026."),
-        ),
-        (),
+        (s(SYLLABUS, "Design review: Friday, October 30, 2026", 3),),
+        alternatives=(s(REVIEW, "Design review held on Friday, October 30, 2026."),),
     ),
-    (
+    _q(
         "lookup",
         "How many functional and non-functional requirements must the specification contain at minimum?",
         "At least 12 functional requirements and at least 5 non-functional requirements.",
@@ -177,14 +194,14 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "lookup",
         "In what format and where do I submit the project proposal?",
         "As a single PDF file through the course portal.",
         (s(ASSIGN1, "Submit the proposal as a single PDF file through the course portal.", 2),),
         (),
     ),
-    (
+    _q(
         "lookup",
         "How long can the project proposal be, and what happens if it is longer?",
         "No more than two pages; each extra page loses 5 points.",
@@ -194,35 +211,21 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "lookup",
         "In MoSCoW prioritisation, what does 'could have' mean?",
         "Nice to have if time allows.",
         (s(LECTURE4, "Could have: nice to have if time allows", 3),),
         (),
     ),
-    (
-        "lookup",
-        "What are the qualities of a good requirement?",
-        "It is unambiguous, testable, necessary and feasible.",
-        (s(LECTURE4, "A good requirement is unambiguous, testable, necessary and feasible.", 2),),
-        (),
-    ),
-    (
+    _q(
         "lookup",
         "Which database did Jordan choose for the prototype?",
         "SQLite.",
         (s(STANDUP_0915, "Jordan: chose SQLite for the prototype."),),
         (),
     ),
-    (
-        "lookup",
-        "What happens if the team vote on a disagreement is tied?",
-        "The team asks Dr. Raman.",
-        (s(CONTRACT, "If the vote is tied, the team asks Dr. Raman."),),
-        (),
-    ),
-    (
+    _q(
         "lookup",
         "How many items does a list endpoint return by default and what is the most a client can ask for?",
         "20 by default and at most 100 per page.",
@@ -234,26 +237,49 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
-        "lookup",
-        "What does the API return when a group does not exist?",
-        "404.",
-        (s(API, "A request for a group that does not exist returns 404."),),
-        (),
-    ),
-    (
+    _q(
         "lookup",
         "When is the Operating Systems final?",
         "Wednesday, December 9 at 1:00 PM.",
-        (
-            s(STUDY, "Wednesday, December 9 at 1:00 PM: Operating Systems final"),
+        (s(STUDY, "Wednesday, December 9 at 1:00 PM: Operating Systems final"),),
+        alternatives=(
             s(CALENDAR, "Wed Dec 9: Operating Systems final at 1:00 PM"),
+            s(OS_SYLLABUS, "The final exam is on Wednesday, December 9, 2026 at 1:00 PM.", 2),
         ),
-        (),
+    ),
+    _q(
+        "lookup",
+        "When is the Calculus II final exam?",
+        "Tuesday, December 8, 2026 at 9:00 AM.",
+        (s(MATH_SYLLABUS, "The final exam is on Tuesday, December 8, 2026 at 9:00 AM.", 2),),
+        alternatives=(
+            s(STUDY, "Tuesday, December 8 at 9:00 AM: Calculus II final"),
+            s(CALENDAR, "Tue Dec 8: Calculus II final at 9:00 AM"),
+        ),
+    ),
+    _q(
+        "lookup",
+        "How long is each team's prototype demo and how is the time split?",
+        "12 minutes: 8 to present and 4 for questions.",
+        (
+            s(
+                DEMO_DAY,
+                "Each team has 12 minutes for its prototype demo on Friday, November 20: 8 minutes to present and 4 minutes for questions.",
+            ),
+        ),
+    ),
+    _q(
+        "multi_doc",
+        "Which comes first, the Calculus II final or the Operating Systems final?",
+        "The Calculus II final (Tuesday, December 8 at 9:00 AM), one day before the Operating Systems final (Wednesday, December 9 at 1:00 PM).",
+        (
+            s(MATH_SYLLABUS, "The final exam is on Tuesday, December 8, 2026 at 9:00 AM.", 2),
+            s(OS_SYLLABUS, "The final exam is on Wednesday, December 9, 2026 at 1:00 PM.", 2),
+        ),
     ),
     # --- multi_doc and reasoning ------------------------------------------------------------
-    (
-        "multi_doc",
+    _q(
+        "lookup",
         "Why did Alex ask the instructor for more time on Assignment 2?",
         "Sam's laptop screen broke, the repair would take five business days, and Sam held the latest draft.",
         (
@@ -261,11 +287,12 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
                 MAIL_ASK,
                 "Our teammate Sam's laptop screen broke today and the repair shop says the repair will take five business days. Sam holds the latest draft of our requirements specification.",
             ),
+        ),
+        alternatives=(
             s(JOURNAL, "Sam's laptop screen broke. The repair shop quoted five business days."),
         ),
-        (),
     ),
-    (
+    _q(
         "multi_doc",
         "Did the extension request follow the syllabus rule about timing?",
         "Yes. The syllabus asks for requests at least 48 hours before the deadline and this one was sent six days before it.",
@@ -279,15 +306,15 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
-        "multi_doc",
+    _q(
+        "lookup",
         "Does the approved extension apply to the other assignments too?",
         "No, it applies to Assignment 2 only.",
         (s(MAIL_REPLY, "This applies to Assignment 2 only."),),
         (),
     ),
-    (
-        "multi_doc",
+    _q(
+        "lookup",
         "What did the instructor ask the team to put on the first page of the specification after the extension?",
         "A short note saying that the deadline was extended.",
         (
@@ -295,14 +322,15 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
                 MAIL_REPLY,
                 "Please add a short note on the first page of the specification that says the deadline was extended.",
             ),
+        ),
+        alternatives=(
             s(
                 REQ_V2,
                 "The deadline for this assignment was extended to October 12, 2026 by the instructor.",
             ),
         ),
-        (),
     ),
-    (
+    _q(
         "multi_doc",
         "Which course components are not yet in the grades file?",
         "The final report (25 percent) and participation (10 percent).",
@@ -313,8 +341,8 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
-        "multi_doc",
+    _q(
+        "lookup",
         "What was the design review score and what did the reviewer ask the team to add?",
         "92 out of 100; an index on the course code column for the group search query.",
         (
@@ -324,9 +352,8 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
                 "The group search query needs an index on the course code column before the demo.",
             ),
         ),
-        (),
     ),
-    (
+    _q(
         "multi_doc",
         "How did the decision about in-app chat develop over time?",
         "It was an open decision on September 22 and again at the October 2 meeting, and chat was removed from the first release in version 2 of the requirements on October 11.",
@@ -343,40 +370,39 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (REQ_V1,),
     ),
-    (
+    _q(
         "multi_doc",
-        "Which teammate's computer broke and what did the repair cost in total?",
-        "Sam Patel's laptop; the repair cost $187.92.",
+        "How much did it cost to repair the laptop screen that broke on October 3?",
+        "$187.92 (Sam Patel's repair, Quick Fix Computers). The journal dates the breakage and the receipt gives the bill.",
         (
             s(JOURNAL, "Sam's laptop screen broke."),
             s(REPAIR, "Customer: Sam Patel"),
             s(REPAIR, "Total $187.92"),
         ),
-        (),
     ),
     # --- version conflicts ------------------------------------------------------------------
-    (
+    _q(
         "version",
         "What is the maximum number of members in a study group in the current requirements?",
         "10 members (version 2; version 1 said 8).",
         (s(REQ_V2, "NFR-3: A study group shall have a maximum of 10 members."),),
         (REQ_V1,),
     ),
-    (
+    _q(
         "version",
         "How quickly must search results load according to the submitted specification?",
         "Within 2 seconds (version 1 said 3 seconds).",
         (s(REQ_V2, "NFR-1: Search results shall load within 2 seconds."),),
         (REQ_V1,),
     ),
-    (
+    _q(
         "version",
         "How many concurrent users must the system support?",
         "500 (version 2). Version 1 and the project journal mention 200.",
         (s(REQ_V2, "NFR-2: The system shall support 500 concurrent users."),),
         (REQ_V1, JOURNAL),
     ),
-    (
+    _q(
         "version",
         "Is in-app chat part of the first release?",
         "No. It was in version 1 but version 2 lists it as out of scope.",
@@ -385,14 +411,16 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
                 REQ_V2,
                 "Payments, video calls, in-app chat and a native mobile application are out of scope.",
             ),
+        ),
+        (REQ_V1,),
+        alternatives=(
             s(
                 JOURNAL,
                 "We removed in-app chat from the first release because it would take too long to build.",
             ),
         ),
-        (REQ_V1,),
     ),
-    (
+    _q(
         "version",
         "Which requirements were added between version 1 and version 2 of the specification?",
         "Exporting a meeting as an iCalendar file, leaving a group, removing a member, reporting inappropriate content, importing a course list from CSV (FR-8 to FR-12) and WCAG 2.1 AA contrast (NFR-6).",
@@ -409,7 +437,7 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (REQ_V1,),
     ),
-    (
+    _q(
         "version",
         "When is Assignment 2 due for Team Northwind?",
         "Monday, October 12, 2026 at 11:59 PM, after the approved extension (the syllabus says October 9).",
@@ -418,25 +446,25 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
                 MAIL_REPLY,
                 "Your team may submit Assignment 2 by Monday, October 12 at 11:59 PM with no late penalty.",
             ),
+        ),
+        (SYLLABUS, ASSIGN2),
+        alternatives=(
             s(
                 REQ_V2,
                 "The deadline for this assignment was extended to October 12, 2026 by the instructor.",
             ),
         ),
-        (SYLLABUS, ASSIGN2),
     ),
-    (
+    _q(
         "version",
         "When was version 2 of the requirements submitted?",
         "October 11, 2026.",
-        (
-            s(REQ_V2, "Version 2.0 (submitted), October 11, 2026."),
-            s(JOURNAL, "Submitted version 2 of the requirements."),
-        ),
+        (s(REQ_V2, "Version 2.0 (submitted), October 11, 2026."),),
         (REQ_V1,),
+        alternatives=(s(JOURNAL, "Submitted version 2 of the requirements."),),
     ),
     # --- ocr: only in scans and pictures ----------------------------------------------------
-    (
+    _q(
         "ocr",
         "What conditions did the advisor attach to approving the team's project?",
         "A team of three is approved, the scope is limited to a web application, and any change of scope needs written approval.",
@@ -447,14 +475,14 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "ocr",
         "How many groups will Jordan use to test search speed?",
         "1000 groups.",
         (s(MEETING, "- Jordan will test search with 1000 groups", 2),),
         (),
     ),
-    (
+    _q(
         "ocr",
         "When and where was the next team meeting after October 2 held?",
         "Thursday, October 8 at 4:30 PM in library study room 3.",
@@ -464,28 +492,28 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "ocr",
         "What was Alex's action item at the October 2 meeting?",
         "Send requirements version 2 to the team by October 8.",
         (s(MEETING, "- Alex: send requirements version 2 to the team by October 8", 1),),
         (),
     ),
-    (
+    _q(
         "ocr",
         "Which npm module could the build not find?",
         "express-session.",
         (s(BUILD_ERROR, "Module not found: Error: Can't resolve 'express-session'"),),
         (),
     ),
-    (
+    _q(
         "ocr",
         "Which command did Alex run to fix the build error?",
         "npm install express-session",
         (s(BUILD_ERROR, "alex@laptop:~/studybuddy$ npm install express-session"),),
         (),
     ),
-    (
+    _q(
         "ocr",
         "Which tasks are in progress on the sprint board and who owns them?",
         "Group page layout (Sam) and the join request endpoint (Jordan).",
@@ -495,7 +523,7 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "ocr",
         "What did Dr. Raman ask the team to fix before the final report?",
         "The search speed; Jordan is adding an index.",
@@ -509,7 +537,7 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         (),
     ),
     # --- numeric: receipts and tables -------------------------------------------------------
-    (
+    _q(
         "numeric",
         "How much did the textbook cost at the bookstore including tax?",
         "$97.15 ($89.95 plus $7.20 tax).",
@@ -519,9 +547,9 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
-        "numeric",
-        "Does the price on the bookstore receipt match the price in the syllabus?",
+    _q(
+        "multi_doc",
+        "Does the price on the bookstore receipt match the price in the CSE 485 syllabus?",
         "Yes, both give 89.95 dollars before tax.",
         (
             s(SYLLABUS, "The bookstore lists it at 89.95 dollars.", 3),
@@ -529,22 +557,22 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "numeric",
         "What was the laptop repair bill before tax?",
         "$174.00 ($129.00 for the screen plus $45.00 labor).",
         (s(REPAIR, "Subtotal $174.00"),),
         (),
     ),
-    (
+    _q(
         "numeric",
         "What is the total of the team's project budget?",
         "$82.90.",
         (s(BUDGET, "Total,82.90"),),
         (),
     ),
-    (
-        "numeric",
+    _q(
+        "multi_doc",
         "Does the poster printing receipt agree with the project budget?",
         "Yes, both show $7.50.",
         (
@@ -553,14 +581,14 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "numeric",
         "How many hours in total did Jordan log over the six weeks?",
         "41 hours.",
         (s(HOURS, "total,36,41,27"),),
         (),
     ),
-    (
+    _q(
         "numeric",
         "In which week did Sam log the fewest hours?",
         "Week 5, with 2 hours.",
@@ -568,7 +596,7 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         (),
     ),
     # --- paraphrase: few shared words -------------------------------------------------------
-    (
+    _q(
         "paraphrase",
         "Who got the team's laptop fixed at a shop?",
         "Sam Patel, at Quick Fix Computers.",
@@ -578,9 +606,9 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "paraphrase",
-        "What is the rule if I turn work in a week after the deadline without asking?",
+        "What is the CSE 485 rule if I turn work in a week after the deadline without asking?",
         "It is not accepted, because late work is only accepted for up to five days.",
         (
             s(
@@ -591,7 +619,7 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         ),
         (),
     ),
-    (
+    _q(
         "paraphrase",
         "Which framework was Jordan leaning toward at the start?",
         "Flask.",
@@ -599,63 +627,63 @@ _RAW: list[tuple[Category, str, str, tuple[Source, ...], tuple[str, ...]]] = [
         (),
     ),
     # --- not in the vault -------------------------------------------------------------------
-    (
+    _q(
         "not_in_vault",
         "What grade did the team get on the final report?",
         "Nothing in the vault says; the final report is due December 4 and has no score.",
         (),
         (GRADES,),
     ),
-    (
+    _q(
         "not_in_vault",
         "What is Dr. Raman's phone number?",
         "Not in the vault; only an email address is given.",
         (),
         (),
     ),
-    (
+    _q(
         "not_in_vault",
         "What is Jordan Lee's email address?",
         "Not in the vault.",
         (),
         (),
     ),
-    (
+    _q(
         "not_in_vault",
         "When is the Operating Systems midterm exam?",
         "Not in the vault; only the final exam date is given.",
         (),
         (STUDY,),
     ),
-    (
+    _q(
         "not_in_vault",
         "What is the web address of the team's code repository?",
         "Not in the vault.",
         (),
         (),
     ),
-    (
+    _q(
         "not_in_vault",
         "How many students are enrolled in CSE 485?",
         "Not in the vault.",
         (),
         (SYLLABUS,),
     ),
-    (
+    _q(
         "not_in_vault",
         "In which room is the Calculus II final?",
         "Not in the vault; only the date and time are given.",
         (),
         (STUDY, CALENDAR),
     ),
-    (
+    _q(
         "not_in_vault",
         "How much did the team spend on domain registration for next year?",
         "Not in the vault; the budget only lists this year's domain name cost.",
         (),
         (BUDGET,),
     ),
-    (
+    _q(
         "not_in_vault",
         "What did Sam say at the November 20 demo?",
         "Not in the vault.",
@@ -673,7 +701,10 @@ def build_questions() -> list[Question]:
             category=category,
             answer=answer,
             sources=sources,
+            alternatives=alternatives,
             distractors=distractors,
         )
-        for i, (category, question, answer, sources, distractors) in enumerate(_RAW, start=1)
+        for i, (category, question, answer, sources, distractors, alternatives) in enumerate(
+            _RAW, start=1
+        )
     ]

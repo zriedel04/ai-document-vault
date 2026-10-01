@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 import content_courses
+import content_extra
 import content_media
 import content_project
 from model import Document
@@ -38,7 +39,12 @@ QUESTIONS_HEADER = """\
 
 
 def all_documents() -> list[Document]:
-    docs = [*content_courses.DOCS, *content_project.DOCS, *content_media.DOCS]
+    docs = [
+        *content_courses.DOCS,
+        *content_project.DOCS,
+        *content_media.DOCS,
+        *content_extra.DOCS,
+    ]
     paths = [d.path for d in docs]
     if len(paths) != len(set(paths)):
         raise ValueError("duplicate document path in the corpus definition")
@@ -87,6 +93,10 @@ def question_entry(q: Question) -> dict[str, object]:
         "answer": q.answer,
         "sources": [{"path": src.path, "page": src.page, "quote": src.quote} for src in q.sources],
     }
+    if q.alternatives:
+        entry["alternatives"] = [
+            {"path": src.path, "page": src.page, "quote": src.quote} for src in q.alternatives
+        ]
     if q.distractors:
         entry["distractors"] = list(q.distractors)
     return entry
