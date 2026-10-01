@@ -86,6 +86,8 @@ class PathRulesTest(unittest.TestCase):
     def test_archives_only_in_fixture_folders(self) -> None:
         for path in ("notes.zip", "a/b.7z", "x/backup.tar.gz", "scans.rar", "disk.iso"):
             self.assertBlocked(path, "archive")
+        for path in ("exports-from-vault.bak", "db/dump.old", "a.sql.dump"):
+            self.assertBlocked(path, "backup or dump")
         self.assertAllowed("tests/fixtures/corrupt.zip")
         self.assertAllowed("demo/corpus/bundle.zip")
 
@@ -109,6 +111,87 @@ class PathRulesTest(unittest.TestCase):
             "docs/models.md",
         ):
             self.assertAllowed(path)
+
+
+ZIP = b"PK\x03\x04" + b"\0" * 28
+OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 24
+BMP = b"BM" + b"\0" * 12 + (40).to_bytes(4, "little") + b"\0" * 20
+TAR = b"\0" * 257 + b"ustar\x0000" + b"\0" * 20
+PALM_BOOK = b"\0" * 60 + b"BOOKMOBI" + b"\0" * 20
+HEIF = b"\0\0\0\x18ftyp"
+SIGNATURE_SAMPLES = {
+    ".7z": b"7z\xbc\xaf\x27\x1c" + b"\0" * 20,
+    ".avif": HEIF + b"avif" + b"\0" * 20,
+    ".azw": PALM_BOOK,
+    ".azw3": PALM_BOOK,
+    ".bmp": BMP,
+    ".bz2": b"BZh91AY&SY" + b"\0" * 20,
+    ".cab": b"MSCF\0\0\0\0" + b"\0" * 20,
+    ".djvu": b"AT&TFORM" + b"\0" * 20,
+    ".doc": OLE,
+    ".docm": ZIP,
+    ".docx": ZIP,
+    ".dotx": ZIP,
+    ".epub": ZIP,
+    ".gif": b"GIF89a" + b"\0" * 20,
+    ".gz": b"\x1f\x8b\x08" + b"\0" * 20,
+    ".heic": HEIF + b"heic" + b"\0" * 20,
+    ".jpeg": b"\xff\xd8\xff\xe0" + b"\0" * 20,
+    ".jpg": b"\xff\xd8\xff\xe0" + b"\0" * 20,
+    ".mobi": PALM_BOOK,
+    ".msg": OLE,
+    ".numbers": ZIP,
+    ".odp": ZIP,
+    ".ods": ZIP,
+    ".odt": ZIP,
+    ".pages": ZIP,
+    ".pdf": b"%PDF-1.7\n" + b"\0" * 20,
+    ".png": b"\x89PNG\r\n\x1a\n" + b"\0" * 20,
+    ".potx": ZIP,
+    ".ppt": OLE,
+    ".pptx": ZIP,
+    ".rar": b"Rar!\x1a\x07\x00" + b"\0" * 20,
+    ".rtf": b"{\\rtf1\\ansi",
+    ".tar": TAR,
+    ".tgz": b"\x1f\x8b\x08" + b"\0" * 20,
+    ".tif": b"II*\x00" + b"\0" * 20,
+    ".tiff": b"MM\x00*" + b"\0" * 20,
+    ".webp": b"RIFF\0\0\0\0WEBPVP8 ",
+    ".xls": OLE,
+    ".xlsm": ZIP,
+    ".xlsx": ZIP,
+    ".xps": ZIP,
+    ".xz": b"\xfd7zXZ\x00" + b"\0" * 20,
+    ".zip": ZIP,
+    ".zst": b"\x28\xb5\x2f\xfd" + b"\0" * 20,
+}
+TEXT_OR_DEEP_SIGNATURE = frozenset({".csv", ".eml", ".iso", ".tsv"})
+"""Formats with no signature in the first bytes: plain text, or an offset past what is read."""
+
+
+class ContentSignatureTest(unittest.TestCase):
+    def test_every_blocked_suffix_has_a_signature_check(self) -> None:
+        suffixes = {
+            *safety.DOCUMENT_SUFFIXES,
+            *safety.IMAGE_SUFFIXES,
+            *safety.ARCHIVE_SUFFIXES,
+        }
+        self.assertEqual(suffixes - set(SIGNATURE_SAMPLES), TEXT_OR_DEEP_SIGNATURE)
+
+    def test_samples_are_detected_under_any_name(self) -> None:
+        for suffix, sample in SIGNATURE_SAMPLES.items():
+            self.assertIsNotNone(safety.content_problem(sample), suffix)
+            reasons = safety.reasons_for("notes/innocent.txt", len(sample), sample)
+            self.assertTrue(reasons, suffix)
+
+    def test_samples_are_allowed_in_fixture_folders(self) -> None:
+        for suffix, sample in SIGNATURE_SAMPLES.items():
+            reasons = safety.reasons_for("tests/fixtures/x.txt", len(sample), sample)
+            self.assertEqual(reasons, [], suffix)
+
+    def test_plain_text_is_not_mistaken_for_a_signature(self) -> None:
+        for text in (b"BM is a prefix", b"%PDF is mentioned", b"MSCF is a word", b"PK ranking"):
+            self.assertIsNone(safety.content_problem(text), text)
 
 
 class SizeRulesTest(unittest.TestCase):
@@ -242,6 +325,25 @@ class GitIntegrationTest(unittest.TestCase):
         self.assertIn("archive detected", result.stderr)
         self.assertIn("image detected", result.stderr)
         self.assertNotIn("diagram.png", result.stderr)
+
+    def test_disguised_tar_bmp_and_backup_caught_in_index_and_history(self) -> None:
+        self.commit("notes.txt", TAR)
+        self.commit("scan.txt", BMP)
+        self.commit("exports-from-vault.bak", b"text taken from a private document\n")
+        for arguments in ((), ("--history",)):
+            result = self.run_check(*arguments)
+            self.assertEqual(result.returncode, 1)
+            for expected in ("notes.txt", "scan.txt", "exports-from-vault.bak"):
+                self.assertIn(expected, result.stderr)
+        for name in ("notes.txt", "scan.txt", "exports-from-vault.bak"):
+            self.git("rm", "-q", name)
+        self.git("commit", "-q", "-m", "remove")
+        self.assertEqual(self.run_check().returncode, 0)
+        result = self.run_check("--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Already in git history", result.stderr)
+        for expected in ("archive detected", "image detected", "backup or dump file"):
+            self.assertIn(expected, result.stderr)
 
     def test_archive_content_detected_under_innocent_name(self) -> None:
         self.commit("notes.txt", b"PK\x03\x04" + b"\0" * 100)
