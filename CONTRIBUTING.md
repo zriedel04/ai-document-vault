@@ -32,6 +32,8 @@ py -m pip install --user pre-commit
 pre-commit install
 ```
 
+Backend work needs Python 3.12 and [uv](https://docs.astral.sh/uv/). From `backend/`, `uv sync` installs the locked dependencies, and the commands in [`backend/README.md`](backend/README.md) run the tests, Ruff, mypy and the licence check. CI runs the same checks. Commit `backend/uv.lock` with any dependency change, and add a dependency only if its licence passes `scripts/check_python_licenses.py` (see Licences below).
+
 ## Workflow
 
 1. Pick or open an issue.
@@ -49,6 +51,8 @@ Docs, ADRs, tests, `AGENTS.md` and `CLAUDE.md` are updated in the same PR as the
 Allowed: MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0, Python-2.0, Unlicense, 0BSD, Zlib, CC0-1.0.
 Case by case, with a note in the PR: LGPL, MPL, and custom model licences.
 Not allowed: GPL, AGPL, SSPL, non-commercial licences.
+
+`scripts/check_python_licenses.py` enforces this for Python packages in CI. It fails on a disallowed licence and on a package whose licence it cannot read. A package accepted case by case is listed in its `REVIEWED` table with the licence it was reviewed under and the reason, and the exception is dropped if that licence changes. The runtime-only check runs with `--strict`, which ignores `REVIEWED`, so an exception can only cover development tools that are not shipped (today: `pathspec`, MPL-2.0, through mypy).
 
 A written licence audit is done before the repository is made public.
 

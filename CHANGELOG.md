@@ -6,4 +6,5 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Backend skeleton in `backend/`: FastAPI app factory with `GET /api/health`, TOML settings with environment overrides, logging that never records document content, pytest, Ruff, mypy, a Python licence check and `pip-audit` in CI.
 - Repository foundation: ignore rules, repository safety check, pre-commit hooks, CI, templates and contributor docs.
