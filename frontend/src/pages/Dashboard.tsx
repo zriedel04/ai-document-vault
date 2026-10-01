@@ -1,5 +1,6 @@
 import { Card, Stack, Text, Title } from "@mantine/core";
 
+import { useHealthState } from "../api/health-context";
 import type { HealthState } from "../api/useHealth";
 
 function describe(health: HealthState): string {
@@ -13,7 +14,8 @@ function describe(health: HealthState): string {
   }
 }
 
-export function Dashboard({ health }: { health: HealthState }) {
+export function Dashboard() {
+  const health = useHealthState();
   return (
     <Stack>
       <Title order={2}>Dashboard</Title>

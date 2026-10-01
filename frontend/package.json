@@ -19,10 +19,10 @@
     "@mantine/core": "9.6.3",
     "@mantine/hooks": "9.6.3",
     "@tabler/icons-react": "3.48.0",
+    "@tanstack/react-router": "1.170.41",
     "openapi-fetch": "0.17.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "react-router-dom": "7.18.4"
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

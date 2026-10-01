@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
-// Mantine reads these browser APIs, which jsdom does not provide.
+// Mantine and the router use these browser APIs, which jsdom does not provide.
 Object.defineProperty(window, "matchMedia", {
   writable: true,
   value: (query: string) => ({
@@ -17,6 +17,9 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: vi.fn(),
   }),
 });
+
+// The router scrolls to the top after a navigation.
+window.scrollTo = vi.fn();
 
 class ResizeObserverStub {
   observe() {}
