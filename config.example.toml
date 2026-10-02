@@ -2,7 +2,8 @@
 # Later sections (processing, ai, pricing) arrive with their phases.
 
 [vault]
-# Must be outside this repository.
+# An absolute folder outside every Git repository (the app refuses to start otherwise).
+# The database, the documents and the API token (the file local-token) live here.
 path = 'D:\AIVault'
 
 [server]

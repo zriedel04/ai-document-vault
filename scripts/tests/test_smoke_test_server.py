@@ -31,7 +31,7 @@ class Handler(BaseHTTPRequestHandler):
             if "api-falls-back-to-app" in self.faults:
                 self.reply(200, "text/html", INDEX)
             else:
-                self.reply(404, "application/json", b'{"detail": "Not Found"}')
+                self.reply(401, "application/json", b'{"detail": "Unauthorized"}')
         elif "." in self.path:
             self.reply(404, "text/plain", b"missing")
         elif "no-frontend" in self.faults:
@@ -86,7 +86,11 @@ class SmokeTest(unittest.TestCase):
         with serve("api-falls-back-to-app") as url:
             code, err = run(url)
         self.assertEqual(code, 1)
-        self.assertIn("/api/does-not-exist: expected 404", err)
+        self.assertIn("/api/does-not-exist: expected 401 without a token", err)
+
+    def test_fails_when_an_api_path_does_not_ask_for_the_token(self) -> None:
+        with serve("api-falls-back-to-app") as url:
+            self.assertIn("/api/session: expected 401 without a token", run(url)[1])
 
     def test_only_http_urls_are_accepted(self) -> None:
         self.assertEqual(run("https://127.0.0.1:1")[0], 2)

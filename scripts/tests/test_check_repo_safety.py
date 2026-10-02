@@ -36,6 +36,11 @@ class PathRulesTest(unittest.TestCase):
         for path in (".env.example", "config.example.toml", "config.demo.toml"):
             self.assertAllowed(path)
 
+    def test_the_local_api_token(self) -> None:
+        for path in ("local-token", "vault/local-token", "Local-Token", "a/b/LOCAL-TOKEN"):
+            self.assertBlocked(path, "access token")
+        self.assertAllowed("docs/local-tokens.md")
+
     def test_keys(self) -> None:
         for path in (
             "server.pem",

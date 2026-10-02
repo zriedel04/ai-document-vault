@@ -19,6 +19,24 @@
         ],
         "title": "Health",
         "type": "object"
+      },
+      "Me": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "Me",
+        "type": "object"
       }
     }
   },
@@ -47,6 +65,28 @@
         "summary": "Health",
         "tags": [
           "health"
+        ]
+      }
+    },
+    "/api/session": {
+      "get": {
+        "description": "Who is making this request. Needs the token, so it also tells the app whether it has one.",
+        "operationId": "read_session_api_session_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Session",
+        "tags": [
+          "session"
         ]
       }
     }

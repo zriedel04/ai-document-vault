@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vault import main as main_module
@@ -9,6 +10,18 @@ from vault.core.config import Settings
 from vault.main import create_app
 from vault.openapi import main as openapi_main
 from vault.openapi import schema_text
+
+LOCAL = "http://localhost"
+
+
+def local_client(app: FastAPI) -> TestClient:
+    """A client the security middleware lets through, so these tests reach the web layer."""
+    return TestClient(
+        app,
+        base_url=LOCAL,
+        headers={"Authorization": f"Bearer {app.state.token}", "Origin": LOCAL},
+    )
+
 
 INDEX_HTML = "<!doctype html><html><body><div id='root'></div></body></html>"
 
@@ -26,7 +39,7 @@ def dist(tmp_path: Path) -> Path:
 @pytest.fixture
 def client(dist: Path) -> TestClient:
     settings = Settings.model_validate({"frontend": {"dist": str(dist)}})
-    return TestClient(create_app(settings))
+    return local_client(create_app(settings))
 
 
 def test_root_serves_the_built_frontend(client: TestClient) -> None:
@@ -124,7 +137,7 @@ def test_an_index_that_is_a_symlink_outside_dist_is_never_served(
     except (OSError, NotImplementedError):
         pytest.skip("symlinks are not available")
     settings = Settings.model_validate({"frontend": {"dist": str(dist)}})
-    client = TestClient(create_app(settings))  # refuses to serve the frontend at all
+    client = local_client(create_app(settings))  # refuses to serve the frontend at all
     for path in ("/", "/documents"):
         response = client.get(path)
         assert response.status_code == 404
@@ -153,7 +166,7 @@ def test_only_get_is_served_for_the_frontend(client: TestClient) -> None:
 
 def test_no_frontend_routes_without_a_build(tmp_path: Path) -> None:
     settings = Settings.model_validate({"frontend": {"dist": str(tmp_path / "missing")}})
-    client = TestClient(create_app(settings))
+    client = local_client(create_app(settings))
     assert client.get("/").status_code == 404
     assert client.get("/api/health").status_code == 200
 
@@ -162,13 +175,13 @@ def test_default_dist_location_is_used_when_unset(
     dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(main_module, "DEFAULT_FRONTEND_DIST", dist)
-    assert TestClient(create_app(Settings())).get("/").text == INDEX_HTML
+    assert local_client(create_app(Settings())).get("/").text == INDEX_HTML
 
 
 def test_the_schema_export_leaves_the_frontend_out(dist: Path) -> None:
     settings = Settings.model_validate({"frontend": {"dist": str(dist)}})
     app = create_app(settings, serve_frontend=False)
-    assert TestClient(app).get("/").status_code == 404
+    assert local_client(app).get("/").status_code == 404
 
 
 def test_schema_export_is_stable_and_describes_health(tmp_path: Path) -> None:
@@ -201,7 +214,7 @@ def test_a_trailing_slash_on_a_real_api_route_redirects_like_the_api_alone(
 ) -> None:
     # Without the frontend installed, Starlette redirects a real route's slash variant. The
     # frontend catch-alls must not change that.
-    plain = TestClient(create_app(Settings()))
+    plain = local_client(create_app(Settings()))
     expected = plain.get(path, follow_redirects=False)
     assert expected.status_code == 307
     response = client.get(path, follow_redirects=False)

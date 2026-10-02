@@ -24,6 +24,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Session
+         * @description Who is making this request. Needs the token, so it also tells the app whether it has one.
+         */
+        get: operations["read_session_api_session_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -37,6 +57,13 @@ export interface components {
             status: "ok";
             /** Version */
             version: string;
+        };
+        /** Me */
+        Me: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
         };
     };
     responses: never;
@@ -63,6 +90,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Health"];
+                };
+            };
+        };
+    };
+    read_session_api_session_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Me"];
                 };
             };
         };
