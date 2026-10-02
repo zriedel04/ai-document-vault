@@ -181,6 +181,63 @@ class MergeTest(unittest.TestCase):
         two.add("b", n=2)
         self.assertEqual([row.candidate for row in r.merge([one, two]).rows], ["a", "b"])
 
+    def gpu_environment(self) -> r.Environment:
+        return r.Environment(
+            "Windows-11",
+            "3.12.1",
+            "cpu",
+            8,
+            16.0,
+            "NVIDIA RTX",
+            {"numpy": "2.0", "torch": "2.8+cu128"},
+        )
+
+    def test_a_candidate_keeps_the_environment_it_was_measured_in(self) -> None:
+        cpu, gpu = make(), make()
+        gpu.environment = self.gpu_environment()
+        cpu.add("model-cpu", n=1)
+        gpu.add("model-cuda", n=2)
+        merged = r.merge([cpu, gpu])
+        self.assertIsNone(merged.rows[0].environment)  # same as the report's
+        self.assertEqual(merged.rows[1].environment, self.gpu_environment())
+        # the order of the reports does not change which environment a row is measured in
+        reverse = r.merge([gpu, cpu])
+        self.assertEqual(reverse.environment, self.gpu_environment())
+        self.assertEqual(reverse.rows[1].environment, environment())
+
+    def test_the_markdown_shows_each_environment_once_and_names_the_candidates(self) -> None:
+        cpu, gpu = make(), make()
+        gpu.environment = self.gpu_environment()
+        cpu.add("model-cpu", n=1)
+        gpu.add("model-cuda", n=2)
+        text = r.merge([cpu, gpu]).to_markdown()
+        self.assertIn("Environment of model-cpu:", text)
+        self.assertIn("Environment of model-cuda:", text)
+        self.assertIn("- GPU: none reported", text)
+        self.assertIn("- GPU: NVIDIA RTX", text)
+        self.assertIn("torch: 2.8+cu128", text)
+
+    def test_a_report_with_one_environment_reads_as_before(self) -> None:
+        one, two = make(), make()
+        one.add("a", n=1)
+        two.add("b", n=2)
+        merged = r.merge([one, two])
+        self.assertTrue(all(row.environment is None for row in merged.rows))
+        self.assertNotIn("Environment of", merged.to_markdown())
+
+    def test_a_row_environment_survives_the_json_round_trip_and_is_checked(self) -> None:
+        cpu, gpu = make(), make()
+        gpu.environment = self.gpu_environment()
+        cpu.add("model-cpu", n=1)
+        gpu.add("model-cuda", n=2)
+        merged = r.merge([cpu, gpu])
+        again = r.Report.from_json(merged.to_json(), KNOWN)
+        self.assertEqual([row.environment for row in again.rows], [None, self.gpu_environment()])
+        data = merged.to_json()
+        data["rows"][1]["environment"]["cpu"] = PRIVATE_TEXT + "<b>"  # type: ignore[index]
+        with self.assertRaises(ValueError):
+            r.Report.from_json(data, KNOWN)
+
     def test_different_spikes_are_not_merged(self) -> None:
         other = r.Report("ocr", "T", "Q?", "How.", environment())
         with self.assertRaises(ValueError):

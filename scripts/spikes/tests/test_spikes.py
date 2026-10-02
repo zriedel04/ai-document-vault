@@ -249,8 +249,9 @@ class EmbeddingTest(unittest.TestCase):
             .metrics
         )
         self.assertEqual(metrics["recall_at_10"], 0.0)
-        self.assertEqual(metrics["hit_at_1"], 0.0)
         self.assertEqual(metrics["sources_not_in_any_chunk"], 1)
+        # Hit@1 asks only whether the top chunk comes from the right document, and here it does.
+        self.assertEqual(metrics["hit_at_1"], 1.0)
 
     def test_a_warm_up_call_is_made_before_timing(self) -> None:
         embedder = FakeEmbedder()

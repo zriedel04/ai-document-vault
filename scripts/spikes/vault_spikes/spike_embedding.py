@@ -34,8 +34,9 @@ METHOD = (
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
     "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
     "required passages found, MRR@10 the reciprocal rank of the first chunk holding an acceptable "
-    "passage, Hit@1 whether the top chunk does. Required passages that no chunk holds at all are "
-    "counted separately. Questions whose "
+    "passage. Hit@1 is scored by document and only for the questions whose evidence lies in one "
+    "document: whether the top chunk comes from a document that holds it. Required passages that "
+    "no chunk holds at all are counted separately. Questions whose "
     "documents the script cannot read (scans, pictures) are left out and counted. Private sample "
     "documents are never read by this spike."
 )
@@ -130,8 +131,10 @@ def run_embedding_spike(
         metrics |= {
             "recall_at_10": scores.recall_at_10,
             "mrr_at_10": scores.mrr_at_10,
-            "hit_at_1": scores.hit_at_1,
+            "hit_at_1_questions": scores.hit_at_1_questions,
         }
+        if scores.hit_at_1 is not None:
+            metrics["hit_at_1"] = scores.hit_at_1
     if (peak := peak_memory_mib()) is not None:
         metrics["peak_memory_mib"] = peak
     report.add(embedder.name, **metrics)

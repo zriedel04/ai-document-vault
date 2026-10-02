@@ -191,13 +191,33 @@ class ReadingTest(unittest.TestCase):
         with self.assertRaises(c.SpikeInputError):
             c.safe_file(self.root, "a/link.txt")
 
-    def test_a_huge_docx_part_is_refused(self) -> None:
+    def docx_document(self, name: str) -> c.Document:
+        return c.Document(f"a/{name}", "docx", None, False, None)
+
+    def test_a_huge_docx_part_is_skipped(self) -> None:
         path = self.root / "a" / "big.docx"
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("word/document.xml", b"a" * (c.MAX_FILE_BYTES + 1))
-        doc = c.Document("a/big.docx", "docx", None, False, None)
-        with self.assertRaises(c.SpikeInputError):
-            c.read_pages(path, doc)
+        self.assertIsNone(c.read_pages(path, self.docx_document("big.docx")))
+
+    def test_a_docx_that_cannot_be_read_is_skipped_not_fatal(self) -> None:
+        corrupt = self.root / "a" / "corrupt.docx"
+        corrupt.write_bytes(b"not a zip file at all")
+        no_body = self.root / "a" / "nobody.docx"
+        with zipfile.ZipFile(no_body, "w") as archive:
+            archive.writestr("word/other.xml", "<x/>")
+        for name in ("corrupt.docx", "nobody.docx"):
+            with self.subTest(name):
+                self.assertIsNone(c.read_pages(self.root / "a" / name, self.docx_document(name)))
+
+    def test_one_unreadable_document_does_not_stop_the_corpus(self) -> None:
+        (self.root / "a" / "syllabus.txt").write_text("fine " * 10, encoding="utf-8")
+        (self.root / "a" / "notes.docx").write_bytes(b"corrupt")
+        corpus = c.build_corpus(self.root, self.documents, lambda _path: None)
+        self.assertIn("a/syllabus.txt", corpus.readable)
+        self.assertNotIn("a/notes.docx", corpus.readable)
+        self.assertNotIn("a/book.pdf", corpus.readable)  # the reader gave up on it
+        self.assertEqual(corpus.skipped, 3)  # scan, book.pdf and notes.docx
 
 
 class SplitTest(unittest.TestCase):
@@ -248,49 +268,47 @@ ORIG = src("orig", "the passage that answers it")
 class RetrievalScoreTest(unittest.TestCase):
     CANON: ClassVar[dict[str, str]] = {"copy": "orig"}
 
-    def score(self, q: c.Question, ranked: list[c.Chunk]) -> tuple[float, float, float]:
+    def score(self, q: c.Question, ranked: list[c.Chunk]) -> tuple[float, float]:
         return rv.score_question(q, ranked, self.CANON)
 
     def test_a_hit_at_rank_one(self) -> None:
         self.assertEqual(
             self.score(question((ORIG,)), [chunk("orig", f"see {HIT} here"), chunk("x")]),
-            (1.0, 1.0, 1.0),
+            (1.0, 1.0),
         )
 
     def test_rank_decides_the_reciprocal_rank(self) -> None:
         ranked = [chunk("x"), chunk("y"), chunk("orig", HIT)]
-        self.assertEqual(self.score(question((ORIG,)), ranked), (1.0, 1 / 3, 0.0))
+        self.assertEqual(self.score(question((ORIG,)), ranked), (1.0, 1 / 3))
 
     def test_a_miss_and_the_cut_off(self) -> None:
-        self.assertEqual(self.score(question((ORIG,)), [chunk("x"), chunk("y")]), (0.0, 0.0, 0.0))
+        self.assertEqual(self.score(question((ORIG,)), [chunk("x"), chunk("y")]), (0.0, 0.0))
         ranked = [chunk(f"x{i}") for i in range(10)] + [chunk("orig", HIT)]
-        self.assertEqual(self.score(question((ORIG,)), ranked), (0.0, 0.0, 0.0))
+        self.assertEqual(self.score(question((ORIG,)), ranked), (0.0, 0.0))
 
     def test_the_right_document_but_another_passage_scores_nothing(self) -> None:
         # The top ten can all come from the right document and still miss the passage.
         ranked = [chunk("orig", f"an unrelated paragraph number {i}") for i in range(10)]
-        self.assertEqual(self.score(question((ORIG,)), ranked), (0.0, 0.0, 0.0))
+        self.assertEqual(self.score(question((ORIG,)), ranked), (0.0, 0.0))
 
     def test_the_passage_in_the_wrong_document_scores_nothing(self) -> None:
-        self.assertEqual(self.score(question((ORIG,)), [chunk("other", HIT)]), (0.0, 0.0, 0.0))
+        self.assertEqual(self.score(question((ORIG,)), [chunk("other", HIT)]), (0.0, 0.0))
 
     def test_whitespace_and_line_breaks_in_the_quote_or_chunk_are_ignored(self) -> None:
         q = question((src("orig", "the passage\nthat   answers\tit"),))
-        self.assertEqual(self.score(q, [chunk("orig", f"x  {HIT}\n y")]), (1.0, 1.0, 1.0))
+        self.assertEqual(self.score(q, [chunk("orig", f"x  {HIT}\n y")]), (1.0, 1.0))
 
     def test_exact_duplicates_are_interchangeable(self) -> None:
-        self.assertEqual(self.score(question((ORIG,)), [chunk("copy", HIT)]), (1.0, 1.0, 1.0))
+        self.assertEqual(self.score(question((ORIG,)), [chunk("copy", HIT)]), (1.0, 1.0))
 
     def test_an_alternative_counts_for_a_single_passage_question(self) -> None:
         q = question((ORIG,), (src("alt", "another way to say it"),))
-        self.assertEqual(
-            self.score(q, [chunk("alt", "here is another way to say it")]), (1.0, 1.0, 1.0)
-        )
+        self.assertEqual(self.score(q, [chunk("alt", "here is another way to say it")]), (1.0, 1.0))
 
     def test_a_multi_passage_question_needs_every_source(self) -> None:
         a, b = src("a", "first passage"), src("b", "second passage")
         q = question((a, b), (src("alt", "alternative passage"),))
-        recall, rr, _ = self.score(q, [chunk("a", "first passage"), chunk("x")])
+        recall, rr = self.score(q, [chunk("a", "first passage"), chunk("x")])
         self.assertEqual((recall, rr), (0.5, 1.0))
         both = [chunk("a", "first passage"), chunk("b", "second passage")]
         self.assertEqual(self.score(q, both)[0], 1.0)
@@ -311,6 +329,48 @@ class RetrievalScoreTest(unittest.TestCase):
     def test_a_short_quote_must_be_whole(self) -> None:
         q = question((src("a", "Total $187.92"),))
         self.assertEqual(self.score(q, [chunk("a", "Total only")])[0], 0.0)
+
+    def test_hit_at_1_is_by_document_not_by_passage(self) -> None:
+        # The top chunk comes from the right document but not from the quoted passage: Recall and
+        # MRR score a miss, Hit@1 (find the document) a hit.
+        q = question((ORIG,))
+        scores = rv.score_all([q], {"q": [chunk("orig", "an unrelated paragraph")]}, self.CANON)
+        self.assertEqual((scores.recall_at_10, scores.mrr_at_10, scores.hit_at_1), (0.0, 0.0, 1.0))
+
+    def test_hit_at_1_is_wrong_when_the_top_chunk_is_from_another_document(self) -> None:
+        q = question((ORIG,))
+        scores = rv.score_all([q], {"q": [chunk("x", HIT), chunk("orig", HIT)]}, self.CANON)
+        self.assertEqual((scores.hit_at_1, scores.mrr_at_10), (0.0, 0.5))
+
+    def test_hit_at_1_accepts_a_duplicate_and_an_alternative_document(self) -> None:
+        self.assertEqual(
+            rv.score_all([question((ORIG,))], {"q": [chunk("copy")]}, self.CANON).hit_at_1, 1.0
+        )
+        alt = question((ORIG,), (src("alt", "another way"),))
+        self.assertEqual(rv.score_all([alt], {"q": [chunk("alt")]}, self.CANON).hit_at_1, 1.0)
+
+    def test_hit_at_1_covers_only_questions_whose_evidence_is_in_one_document(self) -> None:
+        single = c.Question("s", "t", "lookup", True, (src("a", "alpha"),), ())
+        several_passages = c.Question(
+            "p", "t", "x", True, (src("a", "alpha"), src("a", "beta")), ()
+        )
+        several_documents = c.Question("m", "t", "multi_doc", True, (src("a"), src("b")), ())
+        ranked = {q.id: [chunk("a")] for q in (single, several_passages, several_documents)}
+        ranked["s"] = [chunk("zzz")]  # the single-document question is the one that misses
+        scores = rv.score_all([single, several_passages, several_documents], ranked, {})
+        # Hit@1 averages the two questions that have one document to find; "m" does not count.
+        self.assertEqual(
+            (scores.hit_at_1, scores.hit_at_1_questions, scores.questions), (0.5, 2, 3)
+        )
+
+    def test_hit_at_1_is_none_when_no_question_has_one_document(self) -> None:
+        q = c.Question("m", "t", "multi_doc", True, (src("a"), src("b")), ())
+        scores = rv.score_all([q], {"m": [chunk("a")]}, {})
+        self.assertIsNone(scores.hit_at_1)
+        self.assertEqual(scores.hit_at_1_questions, 0)
+
+    def test_an_empty_ranking_is_a_miss(self) -> None:
+        self.assertEqual(rv.score_all([question((ORIG,))], {"q": []}, {}).hit_at_1, 0.0)
 
     def test_averages_skip_questions_without_a_ranking(self) -> None:
         q1 = c.Question("q1", "t", "lookup", True, (src("a", "alpha"),), ())

@@ -141,6 +141,25 @@ class TesseractTest(unittest.TestCase):
             self.assertEqual(engine.version(), "tesseract 5.5.0")
 
 
+class CorpusPdfReaderTest(unittest.TestCase):
+    def test_an_unreadable_pdf_is_none_so_the_corpus_skips_it(self) -> None:
+        for message in ("incorrect password", "Data format error", "something else"):
+            fake = mock.MagicMock()
+            fake.PdfDocument.side_effect = RuntimeError(message)
+            with (
+                self.subTest(message),
+                mock.patch.dict(sys.modules, {"pypdfium2": fake}),
+            ):
+                self.assertIsNone(adapters.pdf_pages_for_corpus(Path("x.pdf")))
+
+    def test_a_missing_library_still_stops_the_run(self) -> None:
+        with (
+            mock.patch.dict(sys.modules, {"pypdfium2": None}),
+            self.assertRaises(adapters.MissingDependencyError),
+        ):
+            adapters.pdf_pages_for_corpus(Path("x.pdf"))
+
+
 class ExtractionErrorTest(unittest.TestCase):
     def test_carries_only_the_outcome(self) -> None:
         error = ExtractionError(Outcome.CORRUPT)

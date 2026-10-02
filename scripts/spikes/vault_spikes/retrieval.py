@@ -1,4 +1,4 @@
-"""Score retrieved chunks against the eval questions by passage (Recall@10, MRR, Hit@1)."""
+"""Score retrieved chunks: Recall@10 and MRR by passage, Hit@1 by document."""
 
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ class Scores:
     questions: int
     recall_at_10: float
     mrr_at_10: float
-    hit_at_1: float
+    hit_at_1: float | None
+    hit_at_1_questions: int
 
 
 def _normalise(text: str) -> str:
@@ -48,13 +49,38 @@ def covers(chunk: Chunk, source: Source, canonical: Mapping[str, str]) -> bool:
     return " ".join(words[:half]) in text or " ".join(words[-half:]) in text
 
 
+def finds_a_document(question: Question, canonical: Mapping[str, str]) -> bool:
+    """Is this a "find the document" question: its evidence all lies in one document?
+
+    Hit@1 is defined at document level for these only (``docs/architecture.md``, retrieval
+    evaluation). Questions that need several documents or several versions of one have no single
+    document to find, so the top chunk cannot be right or wrong about it. The test is the evidence,
+    not the category label, so a private eval set with other category names is scored the same way.
+    """
+    return len({canonical.get(s.path, s.path) for s in question.sources}) == 1
+
+
+def document_hit(
+    question: Question, ranked: Sequence[Chunk], canonical: Mapping[str, str]
+) -> float:
+    """1.0 if the top chunk comes from a document that holds the question's evidence, else 0.0.
+
+    Which passage of that document the chunk holds does not matter here; that is Recall@10 and
+    MRR. A document that holds only an alternative passage counts, as it does for the other scores.
+    """
+    if not ranked:
+        return 0.0
+    right = {canonical.get(s.path, s.path) for s in (*question.sources, *question.alternatives)}
+    return 1.0 if canonical.get(ranked[0].doc_path, ranked[0].doc_path) in right else 0.0
+
+
 def score_question(
     question: Question,
     ranked: Sequence[Chunk],
     canonical: Mapping[str, str],
     k: int = K,
-) -> tuple[float, float, float]:
-    """(recall, reciprocal rank, hit@1) for one question, judged by passage.
+) -> tuple[float, float]:
+    """(recall, reciprocal rank) for one question, judged by passage.
 
     ``ranked`` is the retrieved chunks, best first. Recall is the share of the required passages
     that some chunk of the top ``k`` holds; for a question with one required passage, finding an
@@ -78,7 +104,7 @@ def score_question(
         ),
         None,
     )
-    return recall, (1 / rank if rank else 0.0), (1.0 if rank == 1 else 0.0)
+    return recall, (1 / rank if rank else 0.0)
 
 
 def score_all(
@@ -87,16 +113,25 @@ def score_all(
     canonical: Mapping[str, str],
     k: int = K,
 ) -> Scores:
-    """Average the per-question scores over the questions that have a ranking."""
-    results = [score_question(q, ranked[q.id], canonical, k) for q in questions if q.id in ranked]
+    """Average the per-question scores over the questions that have a ranking.
+
+    Recall and MRR cover every such question. Hit@1 covers only the find-the-document questions
+    and is None when there are none, so it is left out of the report instead of reading as 0.
+    """
+    have = [q for q in questions if q.id in ranked]
+    results = [score_question(q, ranked[q.id], canonical, k) for q in have]
     if not results:
         msg = "no question could be scored"
         raise ValueError(msg)
+    hits = [
+        document_hit(q, ranked[q.id], canonical) for q in have if finds_a_document(q, canonical)
+    ]
     return Scores(
         len(results),
         mean([r[0] for r in results]),
         mean([r[1] for r in results]),
-        mean([r[2] for r in results]),
+        mean(hits) if hits else None,
+        len(hits),
     )
 
 

@@ -293,6 +293,13 @@ class PypdfiumPlumberExtractor:
         return PdfText(text.pages, headings)
 
 
-def pdf_pages_for_corpus(path: Path) -> list[str]:
-    """Page texts for the embedding spike's corpus reader (text PDFs only)."""
-    return Pypdfium2Extractor().extract(path).pages
+def pdf_pages_for_corpus(path: Path) -> list[str] | None:
+    """Page texts for the embedding spike's corpus reader (text PDFs only).
+
+    None for a PDF that is encrypted, corrupt or otherwise unreadable, so the corpus skips and
+    counts it. A missing library is not that: ``MissingDependencyError`` still stops the run.
+    """
+    try:
+        return Pypdfium2Extractor().extract(path).pages
+    except ExtractionError:
+        return None

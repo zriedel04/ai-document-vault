@@ -197,14 +197,16 @@ def _docx_pages(path: Path) -> list[str]:
     return ["\n".join(paragraphs)]
 
 
-PdfPages = Callable[[Path], list[str]]
+PdfPages = Callable[[Path], list[str] | None]
 
 
 def read_pages(path: Path, doc: Document, pdf_pages: PdfPages | None = None) -> list[str] | None:
     """The text of each page, or None if this script cannot read it (it is skipped and counted).
 
-    Text files and DOCX are read directly. PDFs need ``pdf_pages`` (pypdfium2 on the PC); pictures
-    and scans need OCR, which is not what the embedding spike measures.
+    Text files and DOCX are read directly. PDFs need ``pdf_pages`` (pypdfium2 on the PC), which
+    returns None for a PDF it cannot read; pictures and scans need OCR, which is not what the
+    embedding spike measures. A DOCX that is corrupt, lacks its body, is too large or cannot be
+    opened is skipped like any other unreadable file, so one bad input cannot stop the run.
     """
     if doc.needs_ocr or path.stat().st_size > MAX_FILE_BYTES:
         return None
@@ -212,7 +214,10 @@ def read_pages(path: Path, doc: Document, pdf_pages: PdfPages | None = None) -> 
     if suffix in TEXT_SUFFIXES:
         return [path.read_text(encoding="utf-8", errors="replace")]
     if suffix == ".docx":
-        return _docx_pages(path)
+        try:
+            return _docx_pages(path)
+        except (zipfile.BadZipFile, KeyError, OSError, SpikeInputError):
+            return None
     if suffix == ".pdf" and pdf_pages is not None:
         return pdf_pages(path)
     return None

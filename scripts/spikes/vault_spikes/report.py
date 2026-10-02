@@ -173,8 +173,33 @@ def collect_environment(packages: tuple[str, ...] = (), gpu: str | None = None) 
 
 @dataclass
 class Row:
+    """One candidate's numbers. ``environment`` is set only when it differs from the report's.
+
+    The embedding workflow runs the CPU candidates, then swaps the CPU-only torch build for a CUDA
+    one for the GPU run, so one merged report can honestly hold two environments.
+    """
+
     candidate: str
     metrics: dict[str, Number] = field(default_factory=dict)
+    environment: Environment | None = None
+
+
+def _row_json(row: Row) -> dict[str, object]:
+    data: dict[str, object] = {"candidate": row.candidate, "metrics": row.metrics}
+    if row.environment is not None:
+        data["environment"] = row.environment.to_json()
+    return data
+
+
+def _environment_lines(env: Environment) -> list[str]:
+    lines = [
+        f"- System: {env.system}",
+        f"- Python: {env.python}",
+        f"- CPU: {env.cpu} ({env.cpu_count} logical cores)",
+        f"- RAM: {env.ram_gib} GiB",
+        f"- GPU: {env.gpu or 'none reported'}",
+    ]
+    return lines + [f"- {name}: {version}" for name, version in sorted(env.packages.items())]
 
 
 @dataclass
@@ -219,7 +244,7 @@ class Report:
             "question": self.question,
             "method": self.method,
             "environment": self.environment.to_json(),
-            "rows": [{"candidate": r.candidate, "metrics": r.metrics} for r in self.rows],
+            "rows": [_row_json(r) for r in self.rows],
         }
 
     @classmethod
@@ -247,10 +272,11 @@ class Report:
         )
         for row in cast("list[dict[str, object]]", data["rows"]):
             report.add(str(row["candidate"]), **cast("dict[str, Number]", row["metrics"]))
+            if (own := row.get("environment")) is not None:
+                report.rows[-1].environment = Environment.from_json(cast("dict[str, object]", own))
         return report
 
     def to_markdown(self) -> str:
-        env = self.environment
         lines = [
             f"# Spike: {self.title}",
             "",
@@ -262,13 +288,20 @@ class Report:
             "",
             "## Environment",
             "",
-            f"- System: {env.system}",
-            f"- Python: {env.python}",
-            f"- CPU: {env.cpu} ({env.cpu_count} logical cores)",
-            f"- RAM: {env.ram_gib} GiB",
-            f"- GPU: {env.gpu or 'none reported'}",
         ]
-        lines += [f"- {name}: {version}" for name, version in sorted(env.packages.items())]
+        own: list[tuple[str, Environment]] = []
+        shared: list[str] = []
+        for row in self.rows:
+            if row.environment is not None and row.environment != self.environment:
+                own.append((row.candidate, row.environment))
+            else:
+                shared.append(row.candidate)
+        if own:
+            lines += [f"Environment of {', '.join(shared) or 'the other candidates'}:", ""]
+        lines += _environment_lines(self.environment)
+        for candidate, env in own:
+            lines += ["", f"Environment of {candidate}:", ""]
+            lines += _environment_lines(env)
         lines += ["", "## Method", "", self.method, "", "## Results", ""]
         metric_names = sorted({name for row in self.rows for name in row.metrics})
         lines.append("| Candidate | " + " | ".join(metric_names) + " |")
@@ -309,5 +342,9 @@ def merge(reports: list[Report]) -> Report:
             raise ValueError(msg)
     merged = Report(first.spike, first.title, first.question, first.method, first.environment)
     for report in reports:
-        merged.rows.extend(report.rows)
+        for row in report.rows:
+            own = row.environment or (
+                report.environment if report.environment != first.environment else None
+            )
+            merged.rows.append(Row(row.candidate, dict(row.metrics), own))
     return merged
