@@ -35,6 +35,24 @@ def _need(module: str, extra: str) -> None:
         raise MissingDependencyError(msg) from None
 
 
+def require_cuda() -> None:
+    """Stop with a clear message if CUDA was asked for but this torch cannot use it.
+
+    The torch wheels that PyPI serves for Windows are CPU-only, so a plain ``uv sync`` gives a
+    working install that would otherwise fail deep inside the model loader.
+    """
+    _need("torch", "embedding")
+    import torch
+
+    if not torch.cuda.is_available():
+        msg = (
+            "device cuda was requested but this torch cannot use the GPU. Install the CUDA build "
+            "of torch (the command is on pytorch.org, Get Started), then run with "
+            "`uv run --no-sync` so uv does not put the CPU build back"
+        )
+        raise MissingDependencyError(msg)
+
+
 # --- embeddings -----------------------------------------------------------------------------
 
 EMBEDDING_MODELS = {
@@ -60,6 +78,8 @@ class SentenceTransformerEmbedder:
 
     def load(self) -> None:
         _need("sentence_transformers", "embedding")
+        if self.device == "cuda":
+            require_cuda()
         from sentence_transformers import SentenceTransformer
 
         self.model = SentenceTransformer(self.model_id, device=self.device)

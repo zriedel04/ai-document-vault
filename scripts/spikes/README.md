@@ -8,15 +8,19 @@ Nothing here has been benchmarked yet. The numbers will come from the owner's PC
 
 Metrics only: counts, rates, timings, scores. A report cannot hold document text: `Report.add` accepts only numbers and booleans, and names are checked against strict patterns. Console output is built from the same report, so extracted and OCR text, file names and paths are never printed or stored. Reports are written to `spike-results/` (git-ignored) and the owner decides which numbers go into `docs/spikes/NN-topic.md`.
 
-## Set up (Windows PowerShell, Python 3.12 and uv)
+## Set up (Windows PowerShell)
+
+Install [uv](https://docs.astral.sh/uv/) if `uv --version` is not found (`winget install --id astral-sh.uv`), then open a new terminal. The scripts need Python 3.12; uv downloads it by itself, so a newer Python on the PC (3.13 or 3.14) is not used and does not need to be removed.
 
 ```powershell
 cd scripts\spikes
-uv sync --extra vec --extra pdf          # add --extra embedding and --extra ocr for those spikes
-uv run python -m vault_spikes check      # what is installed, and whether sqlite-vec loads
+uv sync --python 3.12 --extra vec --extra pdf   # add --extra embedding and --extra ocr for those spikes
+uv run python -m vault_spikes check             # what is installed, and whether sqlite-vec loads
 ```
 
 There is no lock file in the repository: the versions that were actually installed are recorded in each report's Environment section. The heavy libraries are extras so that CI never installs them.
+
+**GPU for the embedding spike.** The `torch` that PyPI serves for Windows is CPU-only, so `--device cuda` stops with a message until the CUDA build is installed. Install it with the command from pytorch.org (Get Started, Windows, Pip, CUDA), then run every later command with `uv run --no-sync` so uv does not put the CPU build back. Run the `--device cpu` measurements first, because they need none of this.
 
 ## Commands
 

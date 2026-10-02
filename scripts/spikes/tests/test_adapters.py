@@ -143,3 +143,55 @@ class ExtractionErrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequireCudaTest(unittest.TestCase):
+    def fake_torch(self, available: bool) -> mock.MagicMock:
+        torch = mock.MagicMock()
+        torch.cuda.is_available.return_value = available
+        return torch
+
+    def test_a_cpu_only_torch_is_explained(self) -> None:
+        with (
+            mock.patch.dict(sys.modules, {"torch": self.fake_torch(False)}),
+            self.assertRaises(adapters.MissingDependencyError) as caught,
+        ):
+            adapters.require_cuda()
+        self.assertIn("pytorch.org", str(caught.exception))
+        self.assertIn("--no-sync", str(caught.exception))
+
+    def test_a_cuda_torch_passes(self) -> None:
+        with mock.patch.dict(sys.modules, {"torch": self.fake_torch(True)}):
+            adapters.require_cuda()
+
+    def test_a_missing_torch_names_the_extra(self) -> None:
+        with (
+            mock.patch.dict(sys.modules, {"torch": None}),
+            self.assertRaises(adapters.MissingDependencyError) as caught,
+        ):
+            adapters.require_cuda()
+        self.assertIn("--extra embedding", str(caught.exception))
+
+    def test_the_cpu_embedder_does_not_ask_for_cuda(self) -> None:
+        # load() on the CPU path must not call require_cuda (it would fail on a CPU-only torch).
+        embedder = adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cpu")
+        fake_st = mock.MagicMock()
+        with (
+            mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}),
+            mock.patch.object(adapters, "require_cuda") as require,
+        ):
+            embedder.load()
+        require.assert_not_called()
+
+    def test_the_cuda_embedder_checks_the_gpu_before_loading_the_model(self) -> None:
+        embedder = adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cuda")
+        fake_st = mock.MagicMock()
+        with (
+            mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}),
+            mock.patch.object(
+                adapters, "require_cuda", side_effect=adapters.MissingDependencyError
+            ),
+            self.assertRaises(adapters.MissingDependencyError),
+        ):
+            embedder.load()
+        fake_st.SentenceTransformer.assert_not_called()
