@@ -480,8 +480,8 @@ _RAW: list[_Row] = [
     ),
     _q(
         "ocr",
-        "When and where was the next team meeting after October 2 held?",
-        "Thursday, October 8 at 4:30 PM in library study room 3.",
+        "When and where is the next team meeting planned after the one on October 2?",
+        "Planned for Thursday, October 8 at 4:30 PM in library study room 3.",
         (
             s(MEETING, "Next meeting: Thursday, October 8 at 4:30 PM", 2),
             s(MEETING, "Place: library study room 3", 2),

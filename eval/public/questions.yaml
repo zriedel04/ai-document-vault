@@ -421,10 +421,10 @@ questions:
     page: 2
     quote: '- Jordan will test search with 1000 groups'
 - id: q036
-  question: When and where was the next team meeting after October 2 held?
+  question: When and where is the next team meeting planned after the one on October 2?
   category: ocr
   answerable: true
-  answer: Thursday, October 8 at 4:30 PM in library study room 3.
+  answer: Planned for Thursday, October 8 at 4:30 PM in library study room 3.
   sources:
   - path: scans/team-meeting-notes-scan.pdf
     page: 2
