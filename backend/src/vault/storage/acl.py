@@ -45,22 +45,25 @@ ACE = re.compile(r"\(([^()]*)\)")
 POWERSHELL_TIMEOUT_SECONDS: Final = 60
 
 # The folder arrives in an environment variable, never in the script text, so no path can be
-# read as PowerShell code.
+# read as PowerShell code. The scripts use .NET directly instead of Get-Acl and Set-Acl: those
+# live in a module that Windows PowerShell cannot load when it was started from PowerShell 7
+# (its PSModulePath points at the wrong copy).
 READ_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
-    "(Get-Acl -LiteralPath $env:VAULT_FOLDER).GetSecurityDescriptorSddlForm('Access')"
+    "(New-Object System.IO.DirectoryInfo($env:VAULT_FOLDER)).GetAccessControl()"
+    ".GetSecurityDescriptorSddlForm('Access')"
 )
 MAKE_PRIVATE_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
-    "$path=$env:VAULT_FOLDER;"
+    "$folder=New-Object System.IO.DirectoryInfo($env:VAULT_FOLDER);"
     "$user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;"
-    "$acl=Get-Acl -LiteralPath $path;"
+    "$acl=$folder.GetAccessControl();"
     "$acl.SetAccessRuleProtection($true,$false);"
     "foreach($rule in @($acl.Access)){[void]$acl.RemoveAccessRule($rule)};"
     "$grant=New-Object System.Security.AccessControl.FileSystemAccessRule("
     "$user,'FullControl','ContainerInherit,ObjectInherit','None','Allow');"
     "$acl.AddAccessRule($grant);"
-    "Set-Acl -LiteralPath $path -AclObject $acl"
+    "$folder.SetAccessControl($acl)"
 )
 
 
@@ -109,7 +112,8 @@ def _powershell() -> str:  # pragma: no cover - Windows only
 
 def _run(script: str, folder: Path) -> str:  # pragma: no cover - Windows only
     command = [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script]
-    environment = {**os.environ, "VAULT_FOLDER": str(folder)}
+    environment = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+    environment["VAULT_FOLDER"] = str(folder)
     try:
         result = subprocess.run(  # noqa: S603 - fixed program path, fixed script, no user input
             command,
