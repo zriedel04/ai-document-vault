@@ -1,6 +1,10 @@
 import os
+import struct
 import zipfile
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -263,6 +267,140 @@ class TestZipLimits:
             assert verdict.reason is Reason.UNREADABLE_ARCHIVE, name
 
 
+class TestZipDirectoryIsBoundedBeforeItIsOpened:
+    """``zipfile`` reads the whole central directory and builds an object per record before any
+    count can be checked, so these files must be refused without ``zipfile`` ever opening them."""
+
+    @staticmethod
+    def never_opened() -> AbstractContextManager[object]:
+        return mock.patch(
+            "vault.ingest.validate.zipfile.ZipFile", side_effect=AssertionError("opened")
+        )
+
+    @staticmethod
+    def docx(tmp_path: Path, extra: int = 0) -> Path:
+        names = ("[Content_Types].xml", "word/document.xml", *(f"p/{i}.xml" for i in range(extra)))
+        return make_docx(tmp_path / "a.docx", names=names)
+
+    def test_too_many_entries_are_refused_without_opening_the_archive(self, tmp_path: Path) -> None:
+        path = self.docx(tmp_path, extra=50)
+        with self.never_opened():
+            assert validate_file(path, Limits(max_zip_entries=10)).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_directory_over_the_byte_limit_is_refused_without_opening_the_archive(
+        self, tmp_path: Path
+    ) -> None:
+        path = self.docx(tmp_path)
+        with self.never_opened():
+            verdict = validate_file(path, Limits(max_zip_directory_bytes=100))
+        assert verdict.reason is Reason.UNSAFE_ARCHIVE
+        assert validate_file(path).ok  # the default allows an ordinary document
+
+    def test_the_real_entry_count_is_checked_too_if_the_claim_understates_it(
+        self, tmp_path: Path
+    ) -> None:
+        # The end record says 2 entries, the directory holds 50: the claim passes, the count not.
+        path = self.docx(tmp_path, extra=48)
+        data = bytearray(path.read_bytes())
+        end = len(data) - ZIP_END
+        data[end + 8 : end + 12] = struct.pack("<HH", 2, 2)
+        path.write_bytes(bytes(data))
+        assert validate_file(path, Limits(max_zip_entries=10)).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_file_that_claims_millions_of_entries_in_a_small_file(self, tmp_path: Path) -> None:
+        # The end record says 4 million entries and a 190 MiB directory in a 1 KiB file.
+        record = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 190 << 20, 0, 0)
+        path = write(tmp_path, "a.docx", b"PK\x03\x04" + b"\x00" * 1000 + record)
+        with self.never_opened():
+            assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_zip64_claims_are_read_too(self, tmp_path: Path) -> None:
+        # A ZIP64 end record carries the real counts when the plain record says 0xFFFF.
+        body = b"PK\x03\x04" + b"\x00" * 1000
+        wide = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, 5, 5, 10**9, 0)
+        locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, len(body), 1)
+        plain = struct.pack(
+            "<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+        )
+        path = write(tmp_path, "a.docx", body + wide + locator + plain)
+        with self.never_opened():
+            assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_zip64_archive_within_the_limits_is_still_opened(self, tmp_path: Path) -> None:
+        path = self.docx(tmp_path)
+        data = path.read_bytes()
+        end = len(data) - ZIP_END
+        _, _, _, _, entries, directory, offset, _ = struct.unpack("<4s4H2LH", data[end:])
+        wide = struct.pack(
+            "<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, entries, entries, directory, offset
+        )
+        locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, end, 1)
+        plain = struct.pack(
+            "<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+        )
+        path.write_bytes(data[:end] + wide + locator + plain)
+        assert validate_file(path).ok
+
+    def test_the_record_judged_is_the_one_zipfile_would_use(self, tmp_path: Path) -> None:
+        # A hostile end record whose directory size field contains the bytes of another end-record
+        # signature: searching for the last signature would judge the wrong record.
+        size_field = int.from_bytes(b"PK\x05\x06", "little")  # about 101 million
+        record = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 1, 1, size_field, 0, 0)
+        path = write(tmp_path, "a.docx", b"PK\x03\x04" + b"\x00" * 1000 + record)
+        with self.never_opened():
+            assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_signature_hidden_in_the_comment_is_not_the_record(self, tmp_path: Path) -> None:
+        # With a comment, zipfile takes the last signature in the final 64 KiB. A comment that
+        # holds a fake record is the record it uses, and it is judged like any other.
+        real = self.docx(tmp_path).read_bytes()
+        fake = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 1, 1, 190 << 20, 0, 0)
+        comment = b"x" * 5 + fake + b"y" * 5
+        data = bytearray(real)
+        data[-2:] = len(comment).to_bytes(2, "little")
+        path = write(tmp_path, "b.docx", bytes(data) + comment)
+        with self.never_opened():
+            assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_file_with_no_end_record_is_unreadable(self, tmp_path: Path) -> None:
+        for name, data in {
+            "short.docx": b"PK\x03\x04" + b"\x00" * 10,
+            "none.docx": b"PK\x03\x04" + b"\x00" * 5000,
+            "cut-record.docx": b"PK\x03\x04" + b"\x00" * 100 + b"PK\x05\x06" + b"\x00" * 4,
+        }.items():
+            with self.never_opened():
+                assert validate_file(write(tmp_path, name, data)).reason is (
+                    Reason.UNREADABLE_ARCHIVE
+                ), name
+
+    def test_reading_the_end_record_reads_only_the_end_of_the_file(self, tmp_path: Path) -> None:
+        # A multi-megabyte directory claim is judged from at most 64 KiB plus the record.
+        record = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 5, 5, 100, 0, 0)
+        path = write(tmp_path, "a.docx", b"PK\x03\x04" + b"\x00" * 300_000 + record)
+        reads: list[int] = []
+        real_open = Path.open
+
+        def counting(self: Path, *args: object, **kwargs: object) -> object:
+            stream = real_open(self, *args, **kwargs)  # type: ignore[call-overload]
+            if self.name == "a.docx":
+                original: Callable[[int], bytes] = stream.read
+
+                def read(size: int = -1) -> bytes:
+                    data = original(size)
+                    reads.append(len(data))
+                    return data
+
+                stream.read = read
+            return stream
+
+        with mock.patch.object(Path, "open", counting):
+            validate_file(path)
+        assert max(reads) <= 70_000
+
+
+ZIP_END = 22
+
+
 class TestSniff:
     def test_each_signature(self) -> None:
         assert sniff(PDF) is Kind.PDF
@@ -302,6 +440,63 @@ class TestSniff:
         assert validate_file(path).ok
         path = write(tmp_path, "b.txt", b"x" * (HEAD_BYTES - 10) + b"\x00" * 1000)
         assert validate_file(path).reason is Reason.CONTENT_MISMATCH  # the NULs start inside it
+
+
+class TestTextWithAByteOrderMark:
+    """A byte order mark says how to decode what follows; it does not say that what follows is
+    text, so the head is decoded and judged like text without a mark."""
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"\xef\xbb\xbfMZ\x00\x00\x00" + b"\x00" * 40,  # a program behind a UTF-8 mark
+            b"\xef\xbb\xbf" + EXE,
+            b"\xef\xbb\xbf\xff\xfe\xfd" + TEXT,  # not valid UTF-8
+            b"\xef\xbb\xbf" + b"x" * 90 + b"\x01" * 10,  # mostly control characters
+            b"\xff\xfe" + EXE,  # UTF-16 mark, and a program behind it
+            b"\xfe\xff" + EXE,
+            b"\xff\xfe\x00\xd8x\x00",  # a lone surrogate
+            b"\xff\xfe\x00\x00" + b"\xff\xff\xff\xff",  # a UTF-32 mark and no valid character
+            b"\xff\xfe" + "text".encode("utf-16-le") + b"\x00\x00",  # a NUL character
+        ],
+    )
+    def test_binary_behind_a_mark_is_binary(self, tmp_path: Path, data: bytes) -> None:
+        assert sniff(data) is Kind.BINARY
+        verdict = validate_file(write(tmp_path, "a.txt", data))
+        assert verdict.reason is Reason.CONTENT_MISMATCH
+        assert verdict.detected is Kind.BINARY
+
+    @pytest.mark.parametrize(
+        ("encoding", "mark"),
+        [
+            ("utf-8", b"\xef\xbb\xbf"),
+            ("utf-16-le", b"\xff\xfe"),
+            ("utf-16-be", b"\xfe\xff"),
+            ("utf-32-le", b"\xff\xfe\x00\x00"),
+            ("utf-32-be", b"\x00\x00\xfe\xff"),
+        ],
+    )
+    def test_real_text_in_each_marked_encoding_is_text(
+        self, tmp_path: Path, encoding: str, mark: bytes
+    ) -> None:
+        data = mark + TEXT.decode().encode(encoding)
+        assert sniff(data) is Kind.TEXT
+        assert validate_file(write(tmp_path, "a.txt", data)).ok
+
+    def test_a_mark_alone_is_an_empty_text(self) -> None:
+        for mark in (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff"):
+            assert sniff(mark) is Kind.TEXT
+
+    def test_a_head_cut_in_the_middle_of_a_character_is_not_an_error(self) -> None:
+        for encoding, mark in (("utf-8", b"\xef\xbb\xbf"), ("utf-16-le", b"\xff\xfe")):
+            whole = ("é履" * 10).encode(encoding)
+            for cut in (len(whole) - 1, len(whole) - 2):
+                assert sniff(mark + whole[:cut]) is Kind.TEXT, (encoding, cut)
+
+    def test_the_decoded_test_is_the_same_as_for_unmarked_text(self) -> None:
+        few = b"x" * 100 + b"\x01\x02"
+        assert sniff(b"\xef\xbb\xbf" + few) is Kind.TEXT  # about 2 percent, as without a mark
+        assert sniff(few) is Kind.TEXT
 
 
 class TestVerdictsAreSafeToShow:
