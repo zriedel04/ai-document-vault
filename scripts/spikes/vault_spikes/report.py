@@ -18,7 +18,7 @@ import os
 import platform
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import metadata
 from pathlib import Path
 from typing import Final, NamedTuple, cast
@@ -115,6 +115,11 @@ class Environment:
             gpu=cast("str | None", data["gpu"]),
             packages=cast("dict[str, str]", data["packages"]),
         )
+
+
+def with_package(env: Environment, name: str, version: str) -> Environment:
+    """The environment with one more package version, checked like all the others."""
+    return replace(env, packages={**env.packages, name: version})
 
 
 def total_ram_gib() -> float | None:

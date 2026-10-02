@@ -13,11 +13,12 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
 from vault_spikes.corpus import SpikeInputError, build_corpus, load_manifest, load_questions
-from vault_spikes.report import Report, SpikeText, merge
+from vault_spikes.report import Report, SpikeText, merge, with_package
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
 from vault_spikes.spike_pdf import run_pdf_spike
@@ -101,6 +102,15 @@ def parser() -> argparse.ArgumentParser:
     return main
 
 
+def is_public_dataset(corpus: Path, questions: Path) -> bool:
+    """True only if both are the repository's own public synthetic files, whatever they are
+    called. A copy elsewhere counts as the owner's own data, which is the safe way to be wrong."""
+    return (
+        corpus.resolve() == (REPO_ROOT / "demo" / "corpus").resolve()
+        and questions.resolve() == (REPO_ROOT / "eval" / "public" / "questions.yaml").resolve()
+    )
+
+
 def available() -> dict[str, bool]:
     facts = {name: importlib.util.find_spec(name) is not None for name in OPTIONAL}
     facts["tesseract_on_path"] = shutil.which("tesseract") is not None
@@ -181,11 +191,13 @@ def run(args: argparse.Namespace) -> int:
             load_questions(args.questions),
         )
         report = run_embedding_spike(
-            embedder, inputs, batch_size=args.batch_size, vault_chunks=args.vault_chunks
+            embedder,
+            inputs,
+            batch_size=args.batch_size,
+            vault_chunks=args.vault_chunks,
+            public_dataset=is_public_dataset(args.corpus, args.questions),
         )
-        report.environment = type(report.environment)(
-            **{**report.environment.__dict__, "gpu": adapters.gpu_name()}
-        )
+        report.environment = replace(report.environment, gpu=adapters.gpu_name())
         show(report, report.write(args.out, stem=f"embedding-{embedder.name}"))
         return 0
 
@@ -197,7 +209,8 @@ def run(args: argparse.Namespace) -> int:
         )
         report = run_ocr_spike(engine, find_labelled_images(args.images, args.references))
         if isinstance(engine, adapters.TesseractEngine):
-            report.environment.packages["tesseract"] = engine.version()
+            # Rebuilt through the constructor, so the version is checked like any other.
+            report.environment = with_package(report.environment, "tesseract", engine.version())
         show(report, report.write(args.out, stem=f"ocr-{engine.name}"))
         return 0
 

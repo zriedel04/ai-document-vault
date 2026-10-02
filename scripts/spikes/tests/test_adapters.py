@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from vault_spikes import adapters
+from vault_spikes.report import PACKAGE_VERSION
 from vault_spikes.spike_pdf import HEADING_MAX_WORDS, ExtractionError, Outcome
 
 
@@ -134,11 +135,25 @@ class TesseractTest(unittest.TestCase):
         self.assertTrue(kwargs["check"])
         self.assertIn("timeout", kwargs)
 
-    def test_the_version_is_the_first_line(self) -> None:
+    def version_of(self, stdout: str = "", stderr: str = "") -> str:
         engine = adapters.TesseractEngine("tess")
-        done = mock.Mock(stdout="tesseract 5.5.0\n leptonica-1.84\n", stderr="")
+        done = mock.Mock(stdout=stdout, stderr=stderr)
         with mock.patch("subprocess.run", return_value=done):
-            self.assertEqual(engine.version(), "tesseract 5.5.0")
+            return engine.version()
+
+    def test_the_version_is_the_number_in_the_first_line(self) -> None:
+        self.assertEqual(self.version_of("tesseract 5.5.0\n leptonica-1.84\n"), "5.5.0")
+        self.assertEqual(self.version_of(stderr="tesseract v5.3.3.20231005\n"), "5.3.3.20231005")
+        self.assertEqual(self.version_of("tesseract 4.1\n"), "4.1")
+
+    def test_a_first_line_without_a_version_is_unknown_not_text(self) -> None:
+        for stdout in ("", "\n", "tesseract\n", "leptonica-1 something\n"):
+            with self.subTest(stdout=stdout):
+                self.assertEqual(self.version_of(stdout), "unknown")
+
+    def test_what_it_returns_is_always_a_valid_package_version(self) -> None:
+        for stdout in ("tesseract 5.5.0\n", "tesseract v5.3.3.20231005\n", "x\n", ""):
+            self.assertTrue(PACKAGE_VERSION.fullmatch(self.version_of(stdout)), stdout)
 
 
 class CorpusPdfReaderTest(unittest.TestCase):

@@ -68,6 +68,60 @@ class CliTest(unittest.TestCase):
             self.assertNotIn(PRIVATE_TEXT, text)
         self.assertEqual(json.loads(written)["rows"][0]["metrics"]["cer_mean"], 0.0)
 
+    def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
+        # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and
+        # merge, which reads reports from disk, could not combine the two engines.
+        version_line = mock.Mock(stdout="tesseract 5.5.0\n leptonica-1.84\n", stderr="")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = root / "images"
+            images.mkdir()
+            (images / "a.png").write_text("alpha", encoding="utf-8")
+            (images / "a.txt").write_text("alpha", encoding="utf-8")
+            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+                code, _, err = run(
+                    "ocr", "--engine", "rapidocr", "--images", str(images), "--out", str(root)
+                )
+            self.assertEqual(code, 0, err)
+            ocr_output = mock.Mock(stdout=b"alpha", stderr=b"")
+
+            def fake_run(command: list[str], **_: object) -> mock.Mock:
+                return version_line if "--version" in command else ocr_output
+
+            with (
+                mock.patch("shutil.which", return_value="tess"),
+                mock.patch("subprocess.run", side_effect=fake_run),
+            ):
+                code, _, err = run(
+                    "ocr", "--engine", "tesseract", "--images", str(images), "--out", str(root)
+                )
+            self.assertEqual(code, 0, err)
+            stored = json.loads((root / "ocr-tesseract.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["environment"]["packages"]["tesseract"], "5.5.0")
+            code, _, err = run(
+                "merge",
+                str(root / "ocr-fake-rapid.json"),
+                str(root / "ocr-tesseract.json"),
+                "--out",
+                str(root / "merged"),
+            )
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "ocr.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(merged["rows"]), 2)
+
+    def test_only_the_repositorys_own_files_are_called_the_public_dataset(self) -> None:
+        corpus = cli.REPO_ROOT / "demo" / "corpus"
+        questions = cli.REPO_ROOT / "eval" / "public" / "questions.yaml"
+        self.assertTrue(cli.is_public_dataset(corpus, questions))
+        self.assertTrue(cli.is_public_dataset(corpus / ".." / "corpus", questions))
+        with tempfile.TemporaryDirectory() as folder:
+            elsewhere = Path(folder)
+            self.assertFalse(cli.is_public_dataset(elsewhere, questions))
+            self.assertFalse(cli.is_public_dataset(corpus, elsewhere / "questions.yaml"))
+            # A copy that merely has the same names is the owner's data until proven otherwise.
+            (elsewhere / "demo" / "corpus").mkdir(parents=True)
+            self.assertFalse(cli.is_public_dataset(elsewhere / "demo" / "corpus", questions))
+
     def test_merge_combines_candidate_reports(self) -> None:
         env = Environment("w", "3.12", "c", 1, 1.0, None, {})
         with tempfile.TemporaryDirectory() as folder:

@@ -253,6 +253,24 @@ class EmbeddingTest(unittest.TestCase):
         # Hit@1 asks only whether the top chunk comes from the right document, and here it does.
         self.assertEqual(metrics["hit_at_1"], 1.0)
 
+    def test_the_report_says_whether_the_public_dataset_was_used(self) -> None:
+        for public in (True, False):
+            with self.subTest(public=public):
+                report = emb.run_embedding_spike(
+                    FakeEmbedder(),
+                    corpus_inputs(),
+                    public_dataset=public,
+                    environment=ENV,
+                    clock=Clock(),
+                )
+                self.assertIs(report.rows[0].metrics["public_dataset"], public)
+
+    def test_the_default_is_the_public_dataset_label(self) -> None:
+        report = emb.run_embedding_spike(
+            FakeEmbedder(), corpus_inputs(), environment=ENV, clock=Clock()
+        )
+        self.assertIs(report.rows[0].metrics["public_dataset"], True)
+
     def test_a_warm_up_call_is_made_before_timing(self) -> None:
         embedder = FakeEmbedder()
         emb.run_embedding_spike(
@@ -509,6 +527,25 @@ class PdfTest(unittest.TestCase):
         self.assertEqual(metrics["heading_precision"], round(2 / 3, 4))
         self.assertEqual(metrics["heading_recall"], round(2 / 3, 4))
         self.assertEqual(metrics["heading_f1"], round(2 / 3, 4))
+
+    def test_a_false_heading_repeated_on_every_page_counts_every_time(self) -> None:
+        # A running header found on 20 pages is 20 false positives, not one, and the one real
+        # heading found once is still just one true positive.
+        metrics = self.heading_run(["Introduction"] + ["ACME CONFIDENTIAL"] * 20, "Introduction")
+        self.assertEqual(metrics["heading_false_positives"], 20)
+        self.assertEqual(metrics["heading_precision"], round(1 / 21, 4))
+        self.assertEqual(metrics["heading_recall"], 1.0)
+
+    def test_a_heading_found_more_often_than_it_is_expected_does_not_score_twice(self) -> None:
+        metrics = self.heading_run(["One", "One", "One"], "One")
+        self.assertEqual(metrics["heading_false_positives"], 2)
+        self.assertEqual(metrics["heading_precision"], round(1 / 3, 4))
+        self.assertEqual(metrics["heading_recall"], 1.0)
+
+    def test_a_heading_expected_twice_and_found_once_is_half_found(self) -> None:
+        metrics = self.heading_run(["Summary"], "Summary\nSummary")
+        self.assertEqual(metrics["heading_precision"], 1.0)
+        self.assertEqual(metrics["heading_recall"], 0.5)
 
     def test_the_same_count_of_candidates_can_be_all_wrong(self) -> None:
         # Counting candidates cannot tell this from a perfect run; accuracy can.

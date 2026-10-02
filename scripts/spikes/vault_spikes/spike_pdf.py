@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -33,8 +34,9 @@ METHOD = (
     "page's median font size and that have at most 12 words. Word error rate compares the "
     "extracted text with a reference text file of the same name (`NAME.txt`) where one exists. "
     "Heading accuracy compares the detected headings with a file of the expected ones "
-    "(`NAME.headings.txt`, one heading per line, case and spacing ignored): precision is the "
-    "share of detected headings that are expected, recall the share of expected headings that "
+    "(`NAME.headings.txt`, one heading per line, case and spacing ignored; a heading is counted "
+    "once per occurrence, so a false running header found on 20 pages is 20 errors): precision is "
+    "the share of detected headings that are expected, recall the share of expected headings that "
     "were detected, both summed over all files that have such a file; an empty file says the PDF "
     "has no headings, so every heading found in it is a false one. Extracted text and "
     "headings are compared in memory and never stored; files and references stay outside the "
@@ -83,9 +85,10 @@ def normalise_heading(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def heading_set(text: str) -> set[str]:
-    """The expected headings of a reference file: one per line, blank lines ignored."""
-    return {line for line in (normalise_heading(raw) for raw in text.splitlines()) if line}
+def heading_counts(text: str) -> Counter[str]:
+    """The expected headings of a reference file: one per line, blank lines ignored. A heading
+    that occurs on several pages is listed once per occurrence."""
+    return Counter(line for line in (normalise_heading(raw) for raw in text.splitlines()) if line)
 
 
 def run_pdf_spike(
@@ -137,14 +140,16 @@ def run_pdf_spike(
         reference_dir = references_dir or pdf.parent
         heading_file = reference_dir / f"{pdf.stem}{HEADINGS_SUFFIX}"
         if extractor.detects_headings and heading_file.is_file():
-            expected = heading_set(heading_file.read_text(encoding="utf-8"))
-            detected = {normalise_heading(h) for h in result.headings} - {""}
+            expected = heading_counts(heading_file.read_text(encoding="utf-8"))
+            detected = Counter(h for h in map(normalise_heading, result.headings) if h)
             # An empty file is a label too: this PDF has no headings, so every heading found in
             # it is a false one and must lower the precision.
             files_with_heading_reference += 1
-            heading_hits += len(expected & detected)
-            heading_detected += len(detected)
-            heading_expected += len(expected)
+            # One-to-one: a heading detected on 20 pages is 20 detections, and only as many of them
+            # are right as the reference lists occurrences (a false running header is 20 errors).
+            heading_hits += (expected & detected).total()
+            heading_detected += detected.total()
+            heading_expected += expected.total()
         reference = reference_dir / f"{pdf.stem}.txt"
         if reference.is_file():
             with contextlib.suppress(ValueError):  # an empty reference is not scored

@@ -253,6 +253,18 @@ class EnvironmentTest(unittest.TestCase):
             self.assertIsNotNone(ram)
         self.assertTrue(ram is None or 0.25 < ram < 100_000)
 
+    def test_adding_a_package_goes_through_the_same_check_as_any_other(self) -> None:
+        env = make().environment
+        added = r.with_package(env, "tesseract", "5.5.0")
+        self.assertEqual(added.packages["tesseract"], "5.5.0")
+        self.assertNotIn("tesseract", env.packages)  # the original is untouched
+        self.assertEqual(r.Environment.from_json(added.to_json()), added)
+        for version in ("tesseract 5.5.0", "5.5.0\n", "see the document", "", "5.5.0 "):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                r.with_package(env, "tesseract", version)
+        with self.assertRaises(ValueError):
+            r.with_package(env, "patient record", "1.0")
+
     def test_collects_versions_and_marks_missing_packages(self) -> None:
         env = r.collect_environment(("pyyaml", "no-such-package-xyz"), gpu="GPU 1")
         self.assertEqual(env.packages["no-such-package-xyz"], "not installed")

@@ -8,6 +8,7 @@ vault_spikes check`` reports what is installed before any measurement starts.
 
 from __future__ import annotations
 
+import re
 import shutil
 import statistics
 import subprocess
@@ -21,6 +22,8 @@ from vault_spikes.spike_pdf import (
     Outcome,
     PdfText,
 )
+
+VERSION_NUMBER = re.compile(r"\d+(?:\.\d+)+")
 
 
 class MissingDependencyError(RuntimeError):
@@ -185,12 +188,15 @@ class TesseractEngine:
         self.executable = found
 
     def version(self) -> str:
-        """The first line of ``tesseract --version``."""
+        """The version number in the first line of ``tesseract --version`` (``5.5.0`` from
+        ``tesseract 5.5.0``), or ``unknown``. A report holds a bare version, not the whole line."""
         self.load()
         done = subprocess.run(  # noqa: S603 - a fixed program and argument list, no shell
             [str(self.executable), "--version"], capture_output=True, text=True, check=True
         )
-        return (done.stdout or done.stderr).splitlines()[0]
+        lines = (done.stdout or done.stderr).splitlines()
+        found = VERSION_NUMBER.search(lines[0]) if lines else None
+        return found.group(0) if found else "unknown"
 
     def recognise(self, image: Path) -> str:
         if self.executable is None:

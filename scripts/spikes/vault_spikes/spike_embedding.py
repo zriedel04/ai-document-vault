@@ -22,13 +22,13 @@ TITLE = "Embedding models on this PC"
 QUESTION = (
     "How fast does each candidate embedding model run on this PC (CPU and GPU if present), how "
     "much memory does it need, how long would a vault of the stated size take, and how well does "
-    "it retrieve on the public eval questions? Feeds ADR 0013."
+    "it retrieve on the eval questions? Feeds ADR 0013."
 )
 METHOD = (
     "`python -m vault_spikes embedding --candidate NAME --device DEVICE`, one candidate per "
     "process so the peak memory is that candidate's. The model is downloaded beforehand with "
     "`fetch-model` and loaded only from the local cache, so the load time never includes a "
-    "download. The public corpus (`demo/corpus/`) is cut "
+    "download. The corpus is cut "
     "into chunks of at most 800 characters; throughput is chunks embedded per second in batches. "
     "Each answerable public question is embedded and its top 10 chunks are ranked by cosine "
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
@@ -37,8 +37,10 @@ METHOD = (
     "passage. Hit@1 is scored by document and only for the questions whose evidence lies in one "
     "document: whether the top chunk comes from a document that holds it. Required passages that "
     "no chunk holds at all are counted separately. Questions whose "
-    "documents the script cannot read (scans, pictures) are left out and counted. Private sample "
-    "documents are never read by this spike."
+    "documents the script cannot read (scans, pictures) are left out and counted. The "
+    "`public_dataset` metric is true only when the corpus and the questions are the repository's "
+    "public synthetic ones (`demo/corpus/`, `eval/public/`); otherwise they are the owner's own "
+    "files, kept outside the repository, and only numbers about them are reported."
 )
 PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
 
@@ -68,6 +70,7 @@ def run_embedding_spike(
     *,
     batch_size: int = 16,
     vault_chunks: int = 100_000,
+    public_dataset: bool = True,
     environment: Environment | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> Report:
@@ -126,6 +129,7 @@ def run_embedding_spike(
         "questions_left_out": len([q for q in inputs.questions if q.answerable])
         - (scores.questions if scores else 0),
         "sources_not_in_any_chunk": sources_missing_from(scored, corpus.chunks, canonical),
+        "public_dataset": public_dataset,
     }
     if scores:
         metrics |= {
