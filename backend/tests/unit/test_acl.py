@@ -143,19 +143,49 @@ class TestSddlIsPrivate:
 
 class TestParseAccessList:
     def test_the_user_and_the_list_are_split(self) -> None:
-        assert parse_access_list(f"{OWNER}\r\n{PRIVATE}\r\n") == AccessList(OWNER, PRIVATE)
+        output = f"{OWNER}\r\nO:{OWNER}\r\n{PRIVATE}\r\n"
+        assert parse_access_list(output) == AccessList(OWNER, OWNER, PRIVATE)
+
+    def test_the_built_in_administrator_is_reported_by_its_alias(self) -> None:
+        parsed = parse_access_list(f"{OWNER}\nO:LA\n{PRIVATE}\n")
+        assert parsed.user_alias == "LA"
 
     @pytest.mark.parametrize(
         "output",
-        ["", f"{OWNER}\n", PRIVATE, f"{PRIVATE}\n{OWNER}", f"{OWNER}\n{PRIVATE}\nextra", "x\ny"],
+        [
+            "",
+            f"{OWNER}\n",
+            PRIVATE,
+            f"{OWNER}\n{PRIVATE}",  # no owner line
+            f"{OWNER}\nO:{OWNER}\n{PRIVATE}\nextra",
+            f"{PRIVATE}\nO:{OWNER}\n{OWNER}",
+            f"{OWNER}\nO:WD\n{PRIVATE}",  # Everyone is not an alias for one user
+            f"{OWNER}\nO:BA\n{PRIVATE}",
+            f"{OWNER}\nO:{OTHER_USER}\n{PRIVATE}",  # not the same account
+            f"{OWNER}\nowner LA\n{PRIVATE}",
+            "x\ny\nz",
+        ],
     )
     def test_anything_else_is_an_error(self, output: str) -> None:
         with pytest.raises(VaultAccessError, match="does not understand"):
             parse_access_list(output)
 
     def test_is_private_uses_the_reported_user(self) -> None:
-        assert is_private(AccessList(OWNER, PRIVATE))
-        assert not is_private(AccessList(OTHER_USER, PRIVATE))
+        assert is_private(AccessList(OWNER, OWNER, PRIVATE))
+        assert not is_private(AccessList(OTHER_USER, OTHER_USER, PRIVATE))
+
+    def test_the_built_in_administrator_alias_in_the_list_is_the_user(self) -> None:
+        sddl = "O:BAG:SYD:PAI(A;OICI;FA;;;LA)"  # what the Windows runner reports for its account
+        assert is_private(AccessList(OWNER, "LA", sddl))
+
+    def test_the_alias_is_the_user_only_when_it_was_reported_for_the_user(self) -> None:
+        sddl = "O:BAG:SYD:PAI(A;OICI;FA;;;LA)"
+        assert not is_private(AccessList(OWNER, OWNER, sddl))  # another account's alias
+        assert not sddl_is_private(sddl, OWNER)
+
+    @pytest.mark.parametrize("alias", ["WD", "BU", "AU", "IU", "AN"])
+    def test_a_broad_group_is_never_taken_for_the_user(self, alias: str) -> None:
+        assert not sddl_is_private(f"O:BAG:SYD:PAI(A;OICI;FA;;;{alias})", OWNER, alias)
 
 
 class FakeFolder:
@@ -167,7 +197,7 @@ class FakeFolder:
         self.hardened: list[Path] = []
 
     def read(self, _folder: Path) -> AccessList:
-        return AccessList(OWNER, self.sddl)
+        return AccessList(OWNER, OWNER, self.sddl)
 
     def harden(self, folder: Path) -> None:
         self.hardened.append(folder)

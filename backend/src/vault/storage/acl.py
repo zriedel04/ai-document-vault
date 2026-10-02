@@ -34,6 +34,8 @@ PERMITTED_PRINCIPALS: Final = frozenset(
 ALLOW_TYPES: Final = frozenset({"A", "OA", "XA", "ZA"})
 DENY_TYPES: Final = frozenset({"D", "OD", "XD"})
 SID = re.compile(r"S-1-\d+(?:-\d+)+")
+# The only abbreviations SDDL has for a single user account: the built-in Administrator and Guest.
+USER_ALIASES: Final = frozenset({"LA", "LG"})
 ACE = re.compile(r"\(([^()]*)\)")
 POWERSHELL_TIMEOUT_SECONDS: Final = 60
 
@@ -43,7 +45,12 @@ POWERSHELL_TIMEOUT_SECONDS: Final = 60
 # (its PSModulePath points at the wrong copy).
 READ_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
-    "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
+    "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
+    "$sid;"
+    # The same SID as SDDL writes it: the built-in Administrator account (RID 500) shows up as the
+    # alias "LA", so the access list cannot be compared with the SID alone.
+    "(New-Object System.Security.AccessControl.RawSecurityDescriptor('O:'+$sid))"
+    ".GetSddlForm('Owner');"
     "(New-Object System.IO.DirectoryInfo($env:VAULT_FOLDER)).GetAccessControl()"
     ".GetSecurityDescriptorSddlForm('Access')"
 )
@@ -72,27 +79,43 @@ DACL_BODY = re.compile(r"(?:P|AI|AR)*((?:\([^()]*\))*)")
 
 
 class AccessList(NamedTuple):
-    """What PowerShell reported: the current user's SID and the folder's access list (SDDL)."""
+    """What PowerShell reported: the current user's SID, the way SDDL writes it, and the folder's
+    access list (SDDL)."""
 
     user_sid: str
+    user_alias: str
     sddl: str
 
 
+OWNER_FORM = re.compile(r"O:([A-Z]{2}|S-1-\d+(?:-\d+)+)")
+
+
 def parse_access_list(output: str) -> AccessList:
-    """Split the two lines the read script prints. Anything else is an error, never a guess."""
+    """Split the three lines the read script prints. Anything else is an error, never a guess."""
     lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if len(lines) != 2 or SID.fullmatch(lines[0]) is None:
+    if len(lines) != 3 or SID.fullmatch(lines[0]) is None:
         msg = "PowerShell returned an access list this program does not understand"
         raise VaultAccessError(msg)
-    return AccessList(user_sid=lines[0], sddl=lines[1])
+    owner = OWNER_FORM.fullmatch(lines[1])
+    if owner is None:
+        msg = "PowerShell returned an access list this program does not understand"
+        raise VaultAccessError(msg)
+    alias = owner.group(1)
+    if alias != lines[0] and alias not in USER_ALIASES:
+        msg = "PowerShell returned an access list this program does not understand"
+        raise VaultAccessError(msg)
+    return AccessList(user_sid=lines[0], user_alias=alias, sddl=lines[2])
 
 
 def is_private(access: AccessList) -> bool:
-    return sddl_is_private(access.sddl, access.user_sid)
+    return sddl_is_private(access.sddl, access.user_sid, access.user_alias)
 
 
-def sddl_is_private(sddl: str, user_sid: str) -> bool:
-    """True if every entry that grants access names ``user_sid`` or a permitted principal.
+def sddl_is_private(sddl: str, user_sid: str, user_alias: str | None = None) -> bool:
+    """True if every entry that grants access names the user or a permitted principal.
+
+    The user is ``user_sid`` or, where SDDL abbreviates that SID (the built-in Administrator
+    account is ``LA``), ``user_alias``.
 
     Fails closed. Anything that is not a plain, readable DACL is not private: no ``D:`` part, a
     "no access control" (everyone allowed) list, an entry with fewer than six fields or of a type
@@ -101,6 +124,9 @@ def sddl_is_private(sddl: str, user_sid: str) -> bool:
     """
     if SID.fullmatch(user_sid) is None:
         return False
+    user_names = {user_sid.upper()}
+    if user_alias is not None and user_alias.upper() in USER_ALIASES:
+        user_names.add(user_alias.upper())
     text = sddl.strip()  # PowerShell ends its output with a line break
     start = DACL_START.search(text)
     if start is None:
@@ -121,7 +147,7 @@ def sddl_is_private(sddl: str, user_sid: str) -> bool:
             continue
         if ace_type not in ALLOW_TYPES:
             return False
-        if principal != user_sid.upper() and principal not in PERMITTED_PRINCIPALS:
+        if principal not in user_names and principal not in PERMITTED_PRINCIPALS:
             return False
     return True
 
