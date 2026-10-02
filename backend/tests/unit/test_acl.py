@@ -14,9 +14,17 @@ from pathlib import Path
 import pytest
 
 from vault.storage import acl, layout
-from vault.storage.acl import VaultAccessError, sddl_is_private, secure_vault_folder
+from vault.storage.acl import (
+    AccessList,
+    VaultAccessError,
+    is_private,
+    parse_access_list,
+    sddl_is_private,
+    secure_vault_folder,
+)
 
 OWNER = "S-1-5-21-111-222-333-1001"
+OTHER_USER = "S-1-5-21-111-222-333-1002"
 # What Windows reports for a folder made by ``make_private``: protected, owner only.
 PRIVATE = f"O:BAG:SYD:PAI(A;OICI;FA;;;{OWNER})"
 # What a folder created under C:\ reports: inherited entries for Users and Authenticated Users.
@@ -26,19 +34,23 @@ OPEN = (
 )
 
 
+def private(sddl: str) -> bool:
+    return sddl_is_private(sddl, OWNER)
+
+
 class TestSddlIsPrivate:
     def test_an_owner_only_list_is_private(self) -> None:
-        assert sddl_is_private(PRIVATE)
+        assert private(PRIVATE)
 
     @pytest.mark.parametrize("ending", ["\n", "\r\n", "  \n", ""])
     def test_a_line_break_at_the_end_changes_nothing(self, ending: str) -> None:
-        assert sddl_is_private(PRIVATE + ending)
+        assert private(PRIVATE + ending)
 
     def test_system_and_administrators_are_allowed_to_stay(self) -> None:
-        assert sddl_is_private(f"O:BAG:SYD:PAI(A;OICI;FA;;;{OWNER})(A;OICI;FA;;;SY)(A;;FA;;;BA)")
+        assert private(f"O:BAG:SYD:PAI(A;OICI;FA;;;{OWNER})(A;OICI;FA;;;SY)(A;;FA;;;BA)")
 
     def test_the_default_list_of_a_folder_under_the_drive_root_is_not_private(self) -> None:
-        assert not sddl_is_private(OPEN)
+        assert not private(OPEN)
 
     @pytest.mark.parametrize(
         "principal",
@@ -59,14 +71,14 @@ class TestSddlIsPrivate:
         ],
     )
     def test_any_broad_group_makes_it_not_private(self, principal: str) -> None:
-        assert not sddl_is_private(f"{PRIVATE}(A;OICI;0x1200a9;;;{principal})")
+        assert not private(f"{PRIVATE}(A;OICI;0x1200a9;;;{principal})")
 
     @pytest.mark.parametrize("kind", ["OA", "XA", "ZA"])
     def test_other_allow_kinds_count_too(self, kind: str) -> None:
-        assert not sddl_is_private(f"{PRIVATE}({kind};;FA;;;WD)")
+        assert not private(f"{PRIVATE}({kind};;FA;;;WD)")
 
     def test_a_deny_entry_for_a_broad_group_does_not_count(self) -> None:
-        assert sddl_is_private(f"O:BAG:SYD:P(D;OICI;FA;;;BU)(A;OICI;FA;;;{OWNER})")
+        assert private(f"O:BAG:SYD:P(D;OICI;FA;;;BU)(A;OICI;FA;;;{OWNER})")
 
     @pytest.mark.parametrize(
         "text",
@@ -83,14 +95,67 @@ class TestSddlIsPrivate:
         ],
     )
     def test_anything_it_cannot_read_is_not_private(self, text: str) -> None:
-        assert not sddl_is_private(text)
+        assert not private(text)
+
+    @pytest.mark.parametrize(
+        "principal",
+        [
+            OTHER_USER,  # a second account, granted by name
+            "S-1-5-21-111-222-333-513",  # a domain group
+            "S-1-5-19",  # Local Service
+            "S-1-5-32-547",  # Power Users
+            "LA",
+            "DA",
+            "RC",
+            "S-1-5-80-123-456-789-1011-1213",  # a service account
+        ],
+    )
+    def test_a_trustee_that_is_not_the_owner_or_a_system_principal_is_not_private(
+        self, principal: str
+    ) -> None:
+        assert not private(f"{PRIVATE}(A;OICI;FA;;;{principal})")
+
+    def test_the_owner_is_matched_whatever_the_case(self) -> None:
+        assert private(f"O:BAG:SYD:P(A;OICI;FA;;;{OWNER.lower()})")
+
+    def test_another_owner_is_not_the_owner(self) -> None:
+        assert not sddl_is_private(PRIVATE, OTHER_USER)
+
+    @pytest.mark.parametrize("user_sid", ["", "BA", "S-1-5-21-1\n", " S-1-5-21-1", "bob"])
+    def test_an_unusable_owner_sid_is_never_private(self, user_sid: str) -> None:
+        assert not sddl_is_private(PRIVATE, user_sid)
+
+    @pytest.mark.parametrize("kind", ["AU", "AL", "ML", "XU", "RA", "SP", "??", ""])
+    def test_an_entry_of_an_unknown_kind_in_the_list_is_not_private(self, kind: str) -> None:
+        assert not private(f"{PRIVATE}({kind};;FA;;;{OWNER})")
+
+    @pytest.mark.parametrize("kind", ["D", "OD", "XD"])
+    def test_deny_kinds_are_ignored(self, kind: str) -> None:
+        assert private(f"{PRIVATE}({kind};;FA;;;{OTHER_USER})")
 
     def test_audit_entries_after_the_access_list_are_ignored(self) -> None:
-        assert sddl_is_private(f"{PRIVATE}S:AI(AU;SA;FA;;;WD)")
+        assert private(f"{PRIVATE}S:AI(AU;SA;FA;;;WD)")
 
     def test_the_owner_or_group_are_not_mistaken_for_the_list(self) -> None:
         # Aliases that end in D sit right before ``D:`` in a real SDDL string.
-        assert sddl_is_private(f"O:RDG:EDD:PAI(A;OICI;FA;;;{OWNER})")
+        assert private(f"O:RDG:EDD:PAI(A;OICI;FA;;;{OWNER})")
+
+
+class TestParseAccessList:
+    def test_the_user_and_the_list_are_split(self) -> None:
+        assert parse_access_list(f"{OWNER}\r\n{PRIVATE}\r\n") == AccessList(OWNER, PRIVATE)
+
+    @pytest.mark.parametrize(
+        "output",
+        ["", f"{OWNER}\n", PRIVATE, f"{PRIVATE}\n{OWNER}", f"{OWNER}\n{PRIVATE}\nextra", "x\ny"],
+    )
+    def test_anything_else_is_an_error(self, output: str) -> None:
+        with pytest.raises(VaultAccessError, match="does not understand"):
+            parse_access_list(output)
+
+    def test_is_private_uses_the_reported_user(self) -> None:
+        assert is_private(AccessList(OWNER, PRIVATE))
+        assert not is_private(AccessList(OTHER_USER, PRIVATE))
 
 
 class FakeFolder:
@@ -101,8 +166,8 @@ class FakeFolder:
         self.fix = fix
         self.hardened: list[Path] = []
 
-    def read(self, _folder: Path) -> str:
-        return self.sddl
+    def read(self, _folder: Path) -> AccessList:
+        return AccessList(OWNER, self.sddl)
 
     def harden(self, folder: Path) -> None:
         self.hardened.append(folder)
@@ -146,8 +211,17 @@ class TestSecureVaultFolder:
             self.secure(tmp_path, fake, created=False)
         assert fake.hardened == []
 
+    def test_an_existing_folder_shared_with_a_named_second_account_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "vault.db").write_bytes(b"data")
+        fake = FakeFolder(f"{PRIVATE}(A;OICI;FA;;;{OTHER_USER})")
+        with pytest.raises(VaultAccessError, match="already has files"):
+            self.secure(tmp_path, fake, created=False)
+        assert fake.hardened == []
+
     def test_a_list_that_cannot_be_read_is_not_trusted(self, tmp_path: Path) -> None:
-        def broken(_folder: Path) -> str:
+        def broken(_folder: Path) -> AccessList:
             raise VaultAccessError("no PowerShell")
 
         with pytest.raises(VaultAccessError):
@@ -199,26 +273,32 @@ class TestEnsureVaultOnWindows:
 
 @pytest.mark.skipif(os.name != "nt", reason="uses PowerShell and Windows access lists")
 class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI job only
-    def grant_users(self, folder: Path) -> None:
-        # *S-1-5-32-545 is the Builtin Users group, whatever language Windows is in.
+    def grant(self, folder: Path, sid: str) -> None:
+        # A leading * means "this SID", whatever language Windows is in.
         subprocess.run(  # noqa: S603
-            ["icacls", str(folder), "/grant", "*S-1-5-32-545:(OI)(CI)R"],  # noqa: S607
+            ["icacls", str(folder), "/grant", f"*{sid}:(OI)(CI)R"],  # noqa: S607
             check=True,
             capture_output=True,
         )
 
+    def grant_users(self, folder: Path) -> None:
+        self.grant(folder, "S-1-5-32-545")  # Builtin Users
+
+    def is_private(self, folder: Path) -> bool:
+        return is_private(acl.read_access(folder))
+
     def test_a_new_vault_folder_is_private(self, tmp_path: Path) -> None:
         paths = layout.ensure_vault(tmp_path / "AIVault")
-        assert sddl_is_private(acl.read_sddl(paths.root))
-        assert sddl_is_private(acl.read_sddl(paths.blobs))  # inherited by the subfolders
+        assert self.is_private(paths.root)
+        assert self.is_private(paths.blobs)  # inherited by the subfolders
 
     def test_an_empty_folder_that_lets_users_in_is_hardened(self, tmp_path: Path) -> None:
         folder = tmp_path / "AIVault"
         folder.mkdir()
         self.grant_users(folder)
-        assert not sddl_is_private(acl.read_sddl(folder))
+        assert not self.is_private(folder)
         layout.ensure_vault(folder)
-        assert sddl_is_private(acl.read_sddl(folder))
+        assert self.is_private(folder)
 
     def test_a_folder_with_files_that_lets_users_in_is_refused(self, tmp_path: Path) -> None:
         folder = tmp_path / "AIVault"
@@ -228,4 +308,13 @@ class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI j
         with pytest.raises(layout.VaultPathError, match="already has files"):
             layout.ensure_vault(folder)
         assert not (folder / "blobs").exists()
-        assert not sddl_is_private(acl.read_sddl(folder))
+        assert not self.is_private(folder)
+
+    def test_a_folder_shared_with_one_named_account_is_not_private(self, tmp_path: Path) -> None:
+        # Local Service is no broad group; it stands for any second account named in the list.
+        folder = tmp_path / "AIVault"
+        folder.mkdir()
+        self.grant(folder, "S-1-5-19")
+        assert not self.is_private(folder)
+        layout.ensure_vault(folder)  # empty, so it is hardened
+        assert self.is_private(folder)

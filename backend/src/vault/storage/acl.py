@@ -4,10 +4,14 @@ r"""Keep the vault folder private to the person who owns it, on Windows.
 that lets every signed-in account on the PC read what is inside (and ``D:\`` often does the same).
 The local token in the vault would then let another Windows account call the API. So on Windows
 :func:`secure_vault_folder` removes the inherited entries and grants only the current user, then
-reads the access list back and refuses to go on if anyone broad can still get in.
+reads the access list back and refuses to go on if anyone else can still get in.
 
 The access list is read and written through PowerShell, in the language-independent SDDL form, so
 nothing depends on the language of Windows. Any failure to read it counts as "not private".
+
+The check is an allow-list: every entry that grants access must name the current user or one of a
+few system principals. A list of "bad" groups would miss a second account or a domain group that
+was granted access by name, which is just as able to read the token and the documents.
 """
 
 from __future__ import annotations
@@ -17,30 +21,19 @@ import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
 IS_WINDOWS: Final = os.name == "nt"
 
-# Principals that mean "many accounts": Everyone, Builtin Users and Guests, Authenticated Users,
-# Anonymous, Interactive and Network logons (SDDL aliases first, then the well-known SIDs).
-BROAD_PRINCIPALS: Final = frozenset(
-    {
-        "WD",
-        "BU",
-        "BG",
-        "AU",
-        "AN",
-        "IU",
-        "NU",
-        "S-1-1-0",
-        "S-1-5-32-545",
-        "S-1-5-32-546",
-        "S-1-5-11",
-        "S-1-5-7",
-        "S-1-5-4",
-        "S-1-5-2",
-    }
+# The only trustees besides the current user that an entry granting access may name: SYSTEM,
+# Builtin Administrators (an administrator can take ownership of any folder, so naming the group
+# gives nothing away) and the Creator/Owner placeholders. SDDL aliases first, then the SIDs.
+PERMITTED_PRINCIPALS: Final = frozenset(
+    {"SY", "BA", "CO", "OW", "S-1-5-18", "S-1-5-32-544", "S-1-3-0", "S-1-3-4"}
 )
+ALLOW_TYPES: Final = frozenset({"A", "OA", "XA", "ZA"})
+DENY_TYPES: Final = frozenset({"D", "OD", "XD"})
+SID = re.compile(r"S-1-\d+(?:-\d+)+")
 ACE = re.compile(r"\(([^()]*)\)")
 POWERSHELL_TIMEOUT_SECONDS: Final = 60
 
@@ -50,6 +43,7 @@ POWERSHELL_TIMEOUT_SECONDS: Final = 60
 # (its PSModulePath points at the wrong copy).
 READ_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
+    "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
     "(New-Object System.IO.DirectoryInfo($env:VAULT_FOLDER)).GetAccessControl()"
     ".GetSecurityDescriptorSddlForm('Access')"
 )
@@ -77,13 +71,36 @@ SACL_START = re.compile(r"S:(?=(?:P|AI|AR|NO_ACCESS_CONTROL|\())")
 DACL_BODY = re.compile(r"(?:P|AI|AR)*((?:\([^()]*\))*)")
 
 
-def sddl_is_private(sddl: str) -> bool:
-    """True if the access list gives no allow entry to a broad group. Fails closed.
+class AccessList(NamedTuple):
+    """What PowerShell reported: the current user's SID and the folder's access list (SDDL)."""
 
-    Anything that is not a plain, readable DACL is not private: no ``D:`` part, a "no access
-    control" (everyone allowed) list, an entry with fewer than six fields, or text this reader
-    does not understand. Deny entries are ignored: they can only take access away.
+    user_sid: str
+    sddl: str
+
+
+def parse_access_list(output: str) -> AccessList:
+    """Split the two lines the read script prints. Anything else is an error, never a guess."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 2 or SID.fullmatch(lines[0]) is None:
+        msg = "PowerShell returned an access list this program does not understand"
+        raise VaultAccessError(msg)
+    return AccessList(user_sid=lines[0], sddl=lines[1])
+
+
+def is_private(access: AccessList) -> bool:
+    return sddl_is_private(access.sddl, access.user_sid)
+
+
+def sddl_is_private(sddl: str, user_sid: str) -> bool:
+    """True if every entry that grants access names ``user_sid`` or a permitted principal.
+
+    Fails closed. Anything that is not a plain, readable DACL is not private: no ``D:`` part, a
+    "no access control" (everyone allowed) list, an entry with fewer than six fields or of a type
+    this reader does not know, or text it does not understand. Deny entries are ignored: they can
+    only take access away.
     """
+    if SID.fullmatch(user_sid) is None:
+        return False
     text = sddl.strip()  # PowerShell ends its output with a line break
     start = DACL_START.search(text)
     if start is None:
@@ -99,8 +116,12 @@ def sddl_is_private(sddl: str) -> bool:
         fields = entry.split(";")
         if len(fields) < 6:
             return False
-        ace_type, principal = fields[0], fields[5]
-        if ace_type in {"A", "OA", "XA", "ZA"} and principal.upper() in BROAD_PRINCIPALS:
+        ace_type, principal = fields[0], fields[5].upper()
+        if ace_type in DENY_TYPES:
+            continue
+        if ace_type not in ALLOW_TYPES:
+            return False
+        if principal != user_sid.upper() and principal not in PERMITTED_PRINCIPALS:
             return False
     return True
 
@@ -134,8 +155,8 @@ def _run(script: str, folder: Path) -> str:  # pragma: no cover - Windows only
     return result.stdout
 
 
-def read_sddl(folder: Path) -> str:  # pragma: no cover - Windows only
-    return _run(READ_SCRIPT, folder)
+def read_access(folder: Path) -> AccessList:  # pragma: no cover - Windows only
+    return parse_access_list(_run(READ_SCRIPT, folder))
 
 
 def make_private(folder: Path) -> None:  # pragma: no cover - Windows only
@@ -146,7 +167,7 @@ def secure_vault_folder(
     root: Path,
     *,
     created: bool,
-    read: Callable[[Path], str] = read_sddl,
+    read: Callable[[Path], AccessList] = read_access,
     harden: Callable[[Path], None] = make_private,
 ) -> None:
     """Make ``root`` private to its owner and prove it, or raise :class:`VaultAccessError`.
@@ -155,11 +176,11 @@ def secure_vault_folder(
     folder that already holds files is only checked: changing who can open someone else's folder
     is not this program's decision, so the error tells the owner what to do.
     """
-    if not created and sddl_is_private(read(root)):
+    if not created and is_private(read(root)):
         return
     if created or not any(root.iterdir()):
         harden(root)
-        if sddl_is_private(read(root)):
+        if is_private(read(root)):
             return
         msg = (
             f"the vault folder {root} is still open to other accounts after setting its permissions"
