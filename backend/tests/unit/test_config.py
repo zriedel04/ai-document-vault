@@ -24,6 +24,7 @@ def test_defaults_without_a_file() -> None:
     assert settings.server.port == 8765
     assert settings.logging.level == "INFO"
     assert settings.vault.path is None
+    assert settings.frontend.dist is None
 
 
 def test_toml_file_values(tmp_path: Path) -> None:
@@ -137,3 +138,10 @@ def test_committed_config_files_load(name: str) -> None:
 def test_demo_config_does_not_collide_with_the_default_port() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     assert load_settings(repo_root / "config.demo.toml").server.port != Settings().server.port
+
+
+def test_the_example_config_is_valid() -> None:
+    example = Path(__file__).resolve().parents[3] / "config.example.toml"
+    settings = load_settings(example)
+    assert settings.server.port == 8765
+    assert settings.frontend.dist is None  # the example leaves the default in place
