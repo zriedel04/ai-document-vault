@@ -180,10 +180,14 @@ def secure_vault_folder(
         return
     if created or not any(root.iterdir()):
         harden(root)
-        if is_private(read(root)):
+        after = read(root)
+        if is_private(after):
             return
+        # The access list is SIDs and rights only, never file contents, and tells the owner (or a
+        # bug report) exactly who is still allowed in.
         msg = (
-            f"the vault folder {root} is still open to other accounts after setting its permissions"
+            f"the vault folder {root} is still open to other accounts after setting its "
+            f"permissions (access list: {after.sddl[:300]}; your account: {after.user_sid})"
         )
         raise VaultAccessError(msg)
     msg = (
