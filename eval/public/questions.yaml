@@ -250,7 +250,17 @@ questions:
     quote: 'Participation: 10 percent'
   - path: data/grades.csv
     page: null
-    quote: Peer evaluation,5,96,100
+    quote: 'assessment,weight_percent,score,out_of
+
+      Project proposal,10,88,100
+
+      Requirements specification,15,90,100
+
+      Design review,15,92,100
+
+      Prototype demo,20,95,100
+
+      Peer evaluation,5,96,100'
 - id: q024
   question: What was the design review score and what did the reviewer ask the team to add?
   category: lookup
@@ -287,6 +297,9 @@ questions:
   answerable: true
   answer: $187.92, at Quick Fix Computers.
   sources:
+  - path: receipts/laptop-repair-receipt.jpg
+    page: null
+    quote: QUICK FIX COMPUTERS
   - path: receipts/laptop-repair-receipt.jpg
     page: null
     quote: 'Customer: Sam Patel'

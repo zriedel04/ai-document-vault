@@ -41,6 +41,11 @@ def numbers(text: str) -> set[str]:
     return set(re.findall(r"\d+(?::\d+)?", text))
 
 
+def names(text: str) -> list[str]:
+    """Capitalised words that do not start a sentence: people, places, shops, products."""
+    return re.findall(r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]+\b", text)
+
+
 def data(doc: Document) -> bytes:
     return FILES[f"demo/corpus/{doc.path}"]
 
@@ -326,6 +331,33 @@ class EvalSetTests(unittest.TestCase):
                 missing = numbers(q.answer) - evidence
                 with self.subTest(question=q.id):
                     self.assertFalse(missing, f"no source passage has {sorted(missing)}")
+
+    def test_the_sources_carry_every_name_of_the_expected_answer(self) -> None:
+        # The number rule's counterpart for names: a shop, person or product in the answer needs a
+        # source that says it, or a retriever could find every listed passage and still lack it.
+        for q in QUESTIONS:
+            if q.answerable:
+                evidence = norm(" ".join(src.quote for src in q.sources)).lower()
+                with self.subTest(question=q.id):
+                    self.assertFalse(
+                        [w for w in names(q.answer) if w.lower() not in evidence],
+                        f"{q.id}: a name in the answer is in no source passage",
+                    )
+
+    def test_the_name_rule_notices_a_missing_shop(self) -> None:
+        answer = "$187.92, at Quick Fix Computers."
+        self.assertEqual(names(answer), ["Quick", "Fix", "Computers"])
+        self.assertEqual(names("Sam Patel signed it; the total is $5."), ["Patel"])
+        self.assertEqual(names("Monday, October 12, 2026."), ["October"])
+        self.assertEqual(names("It is not accepted. Late work is not."), [])
+
+    def test_the_question_about_what_is_not_graded_cites_the_whole_grades_table(self) -> None:
+        # A row alone cannot show that other components are absent from the file.
+        question = next(q for q in QUESTIONS if q.question.startswith("Which course components"))
+        table = [src for src in question.sources if src.path == "data/grades.csv"]
+        self.assertEqual(len(table), 1)
+        rows = [r for r in data(DOCS["data/grades.csv"]).decode("utf-8").splitlines() if r]
+        self.assertEqual(norm(table[0].quote), norm(" ".join(rows)))
 
     def test_the_number_rule_notices_a_missing_time(self) -> None:
         answer = "Monday, October 12, 2026 at 11:59 PM."

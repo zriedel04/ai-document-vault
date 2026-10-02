@@ -331,7 +331,16 @@ _RAW: list[_Row] = [
         (
             s(SYLLABUS, "Final report: 25 percent", 2),
             s(SYLLABUS, "Participation: 10 percent", 2),
-            s(GRADES, "Peer evaluation,5,96,100"),
+            # What is missing from a table is only shown by the whole table, not by one row.
+            s(
+                GRADES,
+                "assessment,weight_percent,score,out_of\n"
+                "Project proposal,10,88,100\n"
+                "Requirements specification,15,90,100\n"
+                "Design review,15,92,100\n"
+                "Prototype demo,20,95,100\n"
+                "Peer evaluation,5,96,100",
+            ),
         ),
         (),
     ),
@@ -369,6 +378,7 @@ _RAW: list[_Row] = [
         "How much did Sam Patel's laptop screen repair cost?",
         "$187.92, at Quick Fix Computers.",
         (
+            s(REPAIR, "QUICK FIX COMPUTERS"),
             s(REPAIR, "Customer: Sam Patel"),
             s(REPAIR, "Total $187.92"),
         ),
