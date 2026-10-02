@@ -18,7 +18,7 @@ from pathlib import Path
 
 from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
 from vault_spikes.corpus import SpikeInputError, build_corpus, load_manifest, load_questions
-from vault_spikes.report import Report, SpikeText, merge, with_package
+from vault_spikes.report import Report, SpikeSchema, SpikeText, merge, with_package
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
 from vault_spikes.spike_pdf import run_pdf_spike
@@ -38,7 +38,12 @@ OPTIONAL = {
 
 
 KNOWN = {
-    name: SpikeText(module.TITLE, module.QUESTION, module.METHOD)
+    name: SpikeSchema(
+        SpikeText(module.TITLE, module.QUESTION, module.METHOD),
+        module.CANDIDATES,
+        module.METRICS,
+        frozenset(getattr(module, "REPORT_PACKAGES", module.PACKAGES)),
+    )
     for name, module in (
         ("embedding", spike_embedding),
         ("ocr", spike_ocr),

@@ -50,14 +50,19 @@ def covers(chunk: Chunk, source: Source, canonical: Mapping[str, str]) -> bool:
 
 
 def finds_a_document(question: Question, canonical: Mapping[str, str]) -> bool:
-    """Is this a "find the document" question: its evidence all lies in one document?
+    """Is this a "find the document" question, as the eval file says, with its evidence in one
+    document?
 
     Hit@1 is defined at document level for these only (``docs/architecture.md``, retrieval
-    evaluation). Questions that need several documents or several versions of one have no single
-    document to find, so the top chunk cannot be right or wrong about it. The test is the evidence,
-    not the category label, so a private eval set with other category names is scored the same way.
+    evaluation). An ordinary factual question whose answer happens to sit in one document is not
+    one, so the eval file marks them (``find_document: true``) and the mark is never guessed. The
+    evidence check is kept as well: questions that need several documents have no single document
+    for the top chunk to be right about.
     """
-    return len({canonical.get(s.path, s.path) for s in question.sources}) == 1
+    return (
+        question.find_document
+        and len({canonical.get(s.path, s.path) for s in question.sources}) == 1
+    )
 
 
 def document_hit(

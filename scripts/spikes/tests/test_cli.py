@@ -25,7 +25,7 @@ def run(*argv: str) -> tuple[int, str, str]:
 
 
 class FakeRapid:
-    name = "fake-rapid"
+    name = "rapidocr-ppocrv5"
 
     def load(self) -> None:
         pass
@@ -62,8 +62,8 @@ class CliTest(unittest.TestCase):
                     str(root / "out"),
                 )
             self.assertEqual(code, 0, err)
-            written = (root / "out" / "ocr-fake-rapid.json").read_text(encoding="utf-8")
-            markdown = (root / "out" / "ocr-fake-rapid.md").read_text(encoding="utf-8")
+            written = (root / "out" / "ocr-rapidocr-ppocrv5.json").read_text(encoding="utf-8")
+            markdown = (root / "out" / "ocr-rapidocr-ppocrv5.md").read_text(encoding="utf-8")
         for text in (written, markdown, out, err):
             self.assertNotIn(PRIVATE_TEXT, text)
         self.assertEqual(json.loads(written)["rows"][0]["metrics"]["cer_mean"], 0.0)
@@ -100,7 +100,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(stored["environment"]["packages"]["tesseract"], "5.5.0")
             code, _, err = run(
                 "merge",
-                str(root / "ocr-fake-rapid.json"),
+                str(root / "ocr-rapidocr-ppocrv5.json"),
                 str(root / "ocr-tesseract.json"),
                 "--out",
                 str(root / "merged"),
@@ -127,27 +127,55 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             paths = []
-            for name in ("a", "b"):
-                report = Report("embedding", *KNOWN["embedding"], env)
-                report.add(f"model-{name}", chunks=1)
+            for name in ("qwen3-embedding-0.6b", "embeddinggemma-300m"):
+                report = Report("embedding", *KNOWN["embedding"].text, env)
+                report.add(f"{name}-cpu", chunks=1)
                 paths.append(str(report.write(root, stem=f"embedding-{name}")[0]))
             code, _, err = run("merge", *paths, "--out", str(root / "merged"))
             self.assertEqual(code, 0, err)
             merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
-        self.assertEqual([r["candidate"] for r in merged["rows"]], ["model-a", "model-b"])
+        self.assertEqual(
+            [r["candidate"] for r in merged["rows"]],
+            ["qwen3-embedding-0.6b-cpu", "embeddinggemma-300m-cpu"],
+        )
 
     def test_merge_refuses_a_report_with_text_of_its_own(self) -> None:
         env = Environment("w", "3.12", "c", 1, 1.0, None, {})
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             report = Report("embedding", "Patient diagnosis", "Q?", "How.", env)
-            report.add("model-a", chunks=1)
+            report.add("qwen3-embedding-0.6b-cpu", chunks=1)
             path = str(report.write(root, stem="embedding-a")[0])
             code, out, err = run("merge", path, "--out", str(root / "merged"))
             self.assertFalse((root / "merged").exists())
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertNotIn("Patient", err)
+
+    def test_merge_refuses_names_that_only_look_harmless(self) -> None:
+        text = "patient-diagnosis-confidential"
+        good = Environment("w", "3.12", "c", 1, 1.0, None, {})
+        cases = {
+            "candidate": (good, text, {"chunks": 1}),
+            "metric": (good, "qwen3-embedding-0.6b-cpu", {"medical_record_number": 1}),
+            "package": (
+                Environment("w", "3.12", "c", 1, 1.0, None, {text: "1.0"}),
+                "qwen3-embedding-0.6b-cpu",
+                {"chunks": 1},
+            ),
+        }
+        for kind, (env, candidate, metrics) in cases.items():
+            with tempfile.TemporaryDirectory() as folder, self.subTest(kind):
+                root = Path(folder)
+                report = Report("embedding", *KNOWN["embedding"].text, env)
+                report.add(candidate, **metrics)
+                path = str(report.write(root, stem="embedding-x")[0])
+                code, out, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertFalse((root / "merged").exists())
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn(f"{kind} name", err)
+            self.assertNotIn("patient", err)
+            self.assertNotIn("medical", err)
 
     def test_fetch_model_downloads_through_the_adapter(self) -> None:
         with mock.patch.object(adapters, "fetch_model") as fetch:

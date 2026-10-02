@@ -10,6 +10,7 @@ unit tests use a fake and CI needs neither library.
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -43,6 +44,31 @@ METHOD = (
     "repository unless they are the public synthetic fixtures."
 )
 PACKAGES = ("pypdfium2", "pdfplumber")
+# What a report of this spike may contain (checked when a report is read back for a merge).
+CANDIDATES = re.compile(r"pypdfium2|pypdfium2\+pdfplumber")
+METRICS = frozenset(
+    {
+        "files",
+        "files_ok",
+        "files_encrypted",
+        "files_corrupt",
+        "files_other_error",
+        "pages",
+        "pages_without_text",
+        "heading_candidates",
+        "files_with_heading_candidates",
+        "references_used",
+        "pages_per_second",
+        "wer_mean",
+        "wer_median",
+        "files_with_heading_reference",
+        "heading_false_positives",
+        "heading_recall",
+        "heading_precision",
+        "heading_f1",
+        "peak_memory_mib",
+    }
+)
 HEADINGS_SUFFIX = ".headings.txt"
 HEADING_RATIO = 1.2
 HEADING_MAX_WORDS = 12

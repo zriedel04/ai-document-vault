@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vault_spikes import adapters
+from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf
 from vault_spikes.report import PACKAGE_VERSION
 from vault_spikes.spike_pdf import HEADING_MAX_WORDS, ExtractionError, Outcome
 
@@ -180,6 +180,33 @@ class ExtractionErrorTest(unittest.TestCase):
         error = ExtractionError(Outcome.CORRUPT)
         self.assertEqual(str(error), "corrupt")
         self.assertIs(error.outcome, Outcome.CORRUPT)
+
+
+class ReportSchemaMatchesTheAdaptersTest(unittest.TestCase):
+    """A report may only name candidates the adapters can produce. These tests tie the patterns the
+    spikes publish to the names the adapters really use, so adding a model or an engine without
+    updating the pattern fails here, not as a merge that refuses a good report."""
+
+    def test_every_embedding_model_on_both_devices_is_a_known_candidate(self) -> None:
+        for candidate in adapters.EMBEDDING_MODELS:
+            for device in ("cpu", "cuda"):
+                name = adapters.SentenceTransformerEmbedder(candidate, device).name
+                with self.subTest(name=name):
+                    self.assertTrue(spike_embedding.CANDIDATES.fullmatch(name))
+
+    def test_the_embedding_pattern_allows_nothing_else(self) -> None:
+        for name in ("qwen3-embedding-0.6b", "embeddinggemma-300m-tpu", "x-cpu", "model-cpu\n"):
+            with self.subTest(name=name):
+                self.assertIsNone(spike_embedding.CANDIDATES.fullmatch(name))
+
+    def test_the_ocr_engines_are_known_candidates(self) -> None:
+        for engine in (adapters.RapidOcrEngine, adapters.TesseractEngine):
+            self.assertTrue(spike_ocr.CANDIDATES.fullmatch(engine.name), engine.name)
+        self.assertIn("tesseract", spike_ocr.REPORT_PACKAGES)  # added by the command line
+
+    def test_the_pdf_extractors_are_known_candidates(self) -> None:
+        for extractor in (adapters.Pypdfium2Extractor, adapters.PypdfiumPlumberExtractor):
+            self.assertTrue(spike_pdf.CANDIDATES.fullmatch(extractor.name), extractor.name)
 
 
 if __name__ == "__main__":

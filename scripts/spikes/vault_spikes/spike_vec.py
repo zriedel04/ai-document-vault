@@ -10,6 +10,7 @@ from __future__ import annotations
 import array
 import os
 import random
+import re
 import sqlite3
 import tempfile
 import time
@@ -34,6 +35,22 @@ METHOD = (
     "involved."
 )
 PACKAGES = ("sqlite-vec",)
+# What a report of this spike may contain (checked when a report is read back for a merge).
+CANDIDATES = re.compile(r"extension-loading|exact-search-check|vectors-\d{1,9}")
+METRICS = frozenset(
+    {
+        "can_load_extensions",
+        "vec_loads",
+        "vectors",
+        "same_answer_as_python",
+        "dim",
+        "insert_vectors_per_second",
+        "database_mib",
+        "query_ms_p50",
+        "query_ms_p95",
+        "peak_memory_mib",
+    }
+)
 
 
 class VectorStore(Protocol):

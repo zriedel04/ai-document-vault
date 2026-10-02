@@ -4,10 +4,11 @@ A report is built from names fixed in code (a spike, a candidate, a metric) and 
 title, question and method are fixed text per spike, and the only other strings (the machine and
 package descriptions) are checked against short, strict patterns, so a script cannot put document
 text, a file name or an OCR result into a report by accident: anything else is a TypeError or
-ValueError. A report read back from a JSON file is checked the same way, and its title, question
-and method must equal the fixed text of the spike it names. The Markdown output has the five
-sections that ``scripts/check_adrs.py`` requires of a spike file, with the conclusion left for the
-owner's review.
+ValueError. A report read back from a JSON file is checked the same way, its title, question and
+method must equal the fixed text of the spike it names, and every candidate, metric and package name
+must be one that spike can produce, not merely one of the right shape. The Markdown output has the
+five sections that ``scripts/check_adrs.py`` requires of a spike file, with the conclusion left for
+the owner's review.
 """
 
 from __future__ import annotations
@@ -50,6 +51,18 @@ class SpikeText(NamedTuple):
     title: str
     question: str
     method: str
+
+
+class SpikeSchema(NamedTuple):
+    """Everything a spike's report may contain: its fixed words, the candidate names its rows may
+    have (a pattern over the names the code can produce), the metric names it can emit and the
+    package names its environment can list. A report read from a file may use nothing else, because
+    a name that merely looks harmless (``patient-diagnosis-confidential``) is still free text."""
+
+    text: SpikeText
+    candidates: re.Pattern[str]
+    metrics: frozenset[str]
+    packages: frozenset[str]
 
 
 def machine_text(text: str) -> str:
@@ -115,6 +128,15 @@ class Environment:
             gpu=cast("str | None", data["gpu"]),
             packages=cast("dict[str, str]", data["packages"]),
         )
+
+
+def _known_environment(data: object, schema: SpikeSchema) -> Environment:
+    """An environment read from a file: valid, and listing only packages the spike can list."""
+    env = Environment.from_json(cast("dict[str, object]", data))
+    if not set(env.packages) <= schema.packages:
+        msg = "the report's environment has a package name this spike cannot produce"
+        raise ValueError(msg)
+    return env
 
 
 def with_package(env: Environment, name: str, version: str) -> Environment:
@@ -253,18 +275,21 @@ class Report:
         }
 
     @classmethod
-    def from_json(cls, data: dict[str, object], known: Mapping[str, SpikeText]) -> Report:
+    def from_json(cls, data: dict[str, object], known: Mapping[str, SpikeSchema]) -> Report:
         """Read a report back, applying every check again (a JSON file is input like any other).
 
-        ``known`` holds the fixed words of each spike. A report for another spike, or one whose
-        title, question or method is anything but those words, is refused: free text in a file
-        would otherwise travel into the merged report, which may be written to a tracked folder.
+        ``known`` holds the schema of each spike. A report for another spike, or one whose title,
+        question or method is anything but the spike's words, or one with a candidate, metric or
+        package name the spike cannot produce, is refused: free text in a file would otherwise
+        travel into the merged report, which may be written to a tracked folder. The error says
+        which kind of name was refused, never what it was.
         """
         spike = data["spike"]
         if not isinstance(spike, str) or spike not in known:
             msg = "the report is not from a known spike"
             raise ValueError(msg)
-        fixed = known[spike]
+        schema = known[spike]
+        fixed = schema.text
         if (data["title"], data["question"], data["method"]) != tuple(fixed):
             msg = "the report's title, question or method is not the spike's own text"
             raise ValueError(msg)
@@ -273,12 +298,19 @@ class Report:
             title=fixed.title,
             question=fixed.question,
             method=fixed.method,
-            environment=Environment.from_json(cast("dict[str, object]", data["environment"])),
+            environment=_known_environment(data["environment"], schema),
         )
         for row in cast("list[dict[str, object]]", data["rows"]):
-            report.add(str(row["candidate"]), **cast("dict[str, Number]", row["metrics"]))
+            candidate, metrics = row["candidate"], cast("dict[str, Number]", row["metrics"])
+            if not isinstance(candidate, str) or not schema.candidates.fullmatch(candidate):
+                msg = "the report has a candidate name this spike cannot produce"
+                raise ValueError(msg)
+            if not isinstance(metrics, dict) or not set(metrics) <= schema.metrics:
+                msg = "the report has a metric name this spike cannot produce"
+                raise ValueError(msg)
+            report.add(candidate, **metrics)
             if (own := row.get("environment")) is not None:
-                report.rows[-1].environment = Environment.from_json(cast("dict[str, object]", own))
+                report.rows[-1].environment = _known_environment(own, schema)
         return report
 
     def to_markdown(self) -> str:

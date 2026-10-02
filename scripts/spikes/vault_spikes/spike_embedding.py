@@ -8,6 +8,7 @@ whole spike with a fake and CI never downloads a model.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -34,8 +35,9 @@ METHOD = (
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
     "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
     "required passages found, MRR@10 the reciprocal rank of the first chunk holding an acceptable "
-    "passage. Hit@1 is scored by document and only for the questions whose evidence lies in one "
-    "document: whether the top chunk comes from a document that holds it. Required passages that "
+    "passage. Hit@1 is scored by document and only for the questions the eval file marks as "
+    "find-the-document questions (`find_document: true`, evidence in one document): whether the "
+    "top chunk comes from a document that holds it. Required passages that "
     "no chunk holds at all are counted separately. Questions whose "
     "documents the script cannot read (scans, pictures) are left out and counted. The "
     "`public_dataset` metric is true only when the corpus and the questions are the repository's "
@@ -43,6 +45,28 @@ METHOD = (
     "files, kept outside the repository, and only numbers about them are reported."
 )
 PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
+# What a report of this spike may contain (checked when a report is read back for a merge).
+CANDIDATES = re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-(?:cpu|cuda)")
+METRICS = frozenset(
+    {
+        "dimensions",
+        "load_seconds",
+        "chunks",
+        "mean_chunk_chars",
+        "chunks_per_second",
+        "hours_for_vault_of_chunks",
+        "vault_chunks_assumed",
+        "questions_scored",
+        "questions_left_out",
+        "sources_not_in_any_chunk",
+        "public_dataset",
+        "recall_at_10",
+        "mrr_at_10",
+        "hit_at_1_questions",
+        "hit_at_1",
+        "peak_memory_mib",
+    }
+)
 
 
 class Embedder(Protocol):

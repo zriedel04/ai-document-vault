@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -9,7 +10,14 @@ from pathlib import Path
 from vault_spikes import report as r
 
 PRIVATE_TEXT = "Patient diagnosis: confidential"
-KNOWN = {"embedding": r.SpikeText("Title", "Q?", "How.")}
+KNOWN = {
+    "embedding": r.SpikeSchema(
+        r.SpikeText("Title", "Q?", "How."),
+        re.compile(r"model(?:-[a-z]+)?|a|b|model-cpu|model-cuda"),
+        frozenset({"chunks", "fast", "rate", "n", "detail"}),
+        frozenset({"numpy", "torch"}),
+    )
+}
 
 
 def environment() -> r.Environment:
@@ -117,7 +125,65 @@ class OutputTest(unittest.TestCase):
 
     def test_the_merged_report_carries_the_spikes_own_text_not_the_files(self) -> None:
         report = r.Report.from_json(make().to_json(), KNOWN)
-        self.assertEqual((report.title, report.question, report.method), tuple(KNOWN["embedding"]))
+        self.assertEqual(
+            (report.title, report.question, report.method), tuple(KNOWN["embedding"].text)
+        )
+
+    def test_a_name_of_the_right_shape_is_still_refused_if_the_spike_cannot_produce_it(
+        self,
+    ) -> None:
+        # Lower-case words pass the shape of a candidate or a metric name, and are free text.
+        text = "patient-diagnosis-confidential"
+        for kind, rows in (
+            ("candidate", [{"candidate": text, "metrics": {"chunks": 1}}]),
+            ("metric", [{"candidate": "a", "metrics": {"medical_record_number": 1}}]),
+            ("metric", [{"candidate": "a", "metrics": {"chunks": 1, text.replace("-", "_"): 1}}]),
+        ):
+            data = make().to_json()
+            data["rows"] = rows
+            with (
+                self.subTest(kind=kind, rows=rows),
+                self.assertRaisesRegex(ValueError, f"{kind} name this spike cannot"),
+            ):
+                r.Report.from_json(data, KNOWN)
+
+    def test_the_refusal_never_repeats_the_name(self) -> None:
+        data = make().to_json()
+        data["rows"] = [{"candidate": PRIVATE_TEXT.lower(), "metrics": {}}]
+        with self.assertRaises(ValueError) as caught:
+            r.Report.from_json(data, KNOWN)
+        self.assertNotIn(PRIVATE_TEXT.lower(), str(caught.exception))
+
+    def test_names_of_the_right_shape_but_the_wrong_kind_are_refused(self) -> None:
+        for candidate in (None, 5, ["a"], {"a": 1}):
+            data = make().to_json()
+            data["rows"] = [{"candidate": candidate, "metrics": {}}]
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                r.Report.from_json(data, KNOWN)
+
+    def test_a_trailing_line_break_does_not_make_a_name_known(self) -> None:
+        for candidate in ("a\n", "a ", "a\r", "model-cpu\n"):
+            data = make().to_json()
+            data["rows"] = [{"candidate": candidate, "metrics": {}}]
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                r.Report.from_json(data, KNOWN)
+        data = make().to_json()
+        data["rows"] = [{"candidate": "a", "metrics": {"chunks\n": 1}}]
+        with self.assertRaises(ValueError):
+            r.Report.from_json(data, KNOWN)
+
+    def test_a_package_name_the_spike_cannot_list_is_refused_in_both_places(self) -> None:
+        text = "patient-diagnosis-confidential"
+        data = make().to_json()
+        data["environment"] = {**environment().to_json(), "packages": {text: "1.0"}}
+        with self.assertRaisesRegex(ValueError, "package name this spike cannot"):
+            r.Report.from_json(data, KNOWN)
+        cpu, gpu = make(), make()
+        gpu.environment = r.Environment("W", "3.12.1", "cpu", 8, 16.0, None, {text: "1.0"})
+        cpu.add("a", n=1)
+        gpu.add("b", n=2)
+        with self.assertRaisesRegex(ValueError, "package name this spike cannot"):
+            r.Report.from_json(r.merge([cpu, gpu]).to_json(), KNOWN)
 
     def test_free_text_in_the_environment_is_refused(self) -> None:
         long_text = "a" * 101

@@ -18,6 +18,29 @@ from vault_spikes.report import Environment, Report
 ENV = Environment("Windows-11", "3.12.1", "cpu", 8, 16.0, None, {})
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
+EMITTED: dict[str, set[str]] = {}
+_real_add = Report.add
+
+
+def setUpModule() -> None:
+    """Record every metric name the spikes emit during these tests, to compare with the schemas."""
+
+    def recording_add(self: Report, candidate: str, **metrics: float) -> None:
+        EMITTED.setdefault(self.spike, set()).update(metrics)
+        _real_add(self, candidate, **metrics)
+
+    Report.add = recording_add  # type: ignore[method-assign]
+
+
+def tearDownModule() -> None:
+    """Every metric a spike emitted must be in its schema, or a good report could not be merged."""
+    Report.add = _real_add  # type: ignore[method-assign]
+    schemas = {"embedding": emb.METRICS, "ocr": ocr.METRICS, "pdf": pdf.METRICS, "vec": vec.METRICS}
+    for spike, names in EMITTED.items():
+        unknown = names - schemas[spike]
+        assert not unknown, f"{spike} emits metrics its schema does not list: {sorted(unknown)}"
+    assert set(EMITTED) == set(schemas), "a spike was not exercised by these tests"
+
 
 class Clock:
     """A fake clock that advances by a fixed step each time it is read."""
@@ -197,10 +220,22 @@ def corpus_inputs() -> emb.EmbeddingInputs:
     ]
     questions = [
         c.Question(
-            "q1", "Who is the instructor?", "lookup", True, (c.Source("a.txt", "Dr. Example"),), ()
+            "q1",
+            "Who is the instructor?",
+            "lookup",
+            True,
+            (c.Source("a.txt", "Dr. Example"),),
+            (),
+            find_document=True,
         ),
         c.Question(
-            "q2", "What is the budget?", "lookup", True, (c.Source("b.txt", "total is 10"),), ()
+            "q2",
+            "What is the budget?",
+            "lookup",
+            True,
+            (c.Source("b.txt", "total is 10"),),
+            (),
+            find_document=True,
         ),
         c.Question(
             "q3", "What does the scan say?", "ocr", True, (c.Source("scan.pdf", "scanned"),), ()
@@ -240,7 +275,13 @@ class EmbeddingTest(unittest.TestCase):
     def test_the_right_document_with_the_wrong_passage_does_not_score(self) -> None:
         inputs = corpus_inputs()
         wrong = c.Question(
-            "q5", "Who is the instructor?", "lookup", True, (c.Source("a.txt", "no such text"),), ()
+            "q5",
+            "Who is the instructor?",
+            "lookup",
+            True,
+            (c.Source("a.txt", "no such text"),),
+            (),
+            find_document=True,
         )
         inputs = emb.EmbeddingInputs(inputs.corpus, inputs.documents, [wrong])
         metrics = (

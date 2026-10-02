@@ -9,6 +9,7 @@ written: the report holds numbers only. Engines are injected, so the unit tests 
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -42,6 +43,28 @@ METHOD = (
     "reference texts and the images stay outside the repository."
 )
 PACKAGES = ("rapidocr", "onnxruntime", "pillow")
+# What a report of this spike may contain (checked when a report is read back for a merge).
+# Tesseract is a program, not a package: its version is added by the command line.
+REPORT_PACKAGES = frozenset({*PACKAGES, "tesseract"})
+CANDIDATES = re.compile(r"rapidocr-ppocrv5|tesseract")
+METRICS = frozenset(
+    {
+        "images",
+        "failures",
+        "empty_results",
+        "references_unusable",
+        "load_seconds",
+        "seconds_spent_in_failures",
+        "images_per_minute",
+        "cer_mean_failures_as_errors",
+        "cer_mean",
+        "cer_median",
+        "cer_p90",
+        "seconds_per_image_p50",
+        "seconds_per_image_p95",
+        "peak_memory_mib",
+    }
+)
 
 
 class OcrEngine(Protocol):

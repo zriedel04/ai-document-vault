@@ -45,6 +45,10 @@ class Question:
     answerable: bool
     sources: tuple[Source, ...]
     alternatives: tuple[Source, ...]
+    # Set by the eval file's ``find_document: true``. Only these questions are scored by Hit@1,
+    # which the architecture plan defines for "find the document" questions; it is never guessed
+    # from the category or from how many documents the evidence happens to lie in.
+    find_document: bool = False
 
     @property
     def source_paths(self) -> tuple[str, ...]:
@@ -107,6 +111,7 @@ def load_questions(path: Path) -> list[Question]:
         msg = "the eval file has no questions list"
         raise SpikeInputError(msg)
     questions: list[Question] = []
+    seen: set[str] = set()
     for raw in rows:
         row = _mapping(raw, "a question")
         text, qid, category = row.get("question"), row.get("id"), row.get("category")
@@ -114,12 +119,28 @@ def load_questions(path: Path) -> list[Question]:
         if not (isinstance(text, str) and isinstance(qid, str) and isinstance(category, str)):
             msg = "a question needs id, question and category as text"
             raise SpikeInputError(msg)
+        if not qid.strip():
+            msg = "a question needs a non-empty id"
+            raise SpikeInputError(msg)
+        if qid in seen:
+            # Scores are kept per id, so a repeated id would silently score two questions with
+            # one ranking.
+            msg = "two questions have the same id"
+            raise SpikeInputError(msg)
+        seen.add(qid)
         if not isinstance(answerable, bool):
             msg = "answerable must be true or false"
             raise SpikeInputError(msg)
         sources = _sources(row.get("sources"), "sources")
         if answerable and not sources:
             msg = "an answerable question needs at least one source"
+            raise SpikeInputError(msg)
+        find_document = row.get("find_document", False)
+        if not isinstance(find_document, bool):
+            msg = "find_document must be true or false"
+            raise SpikeInputError(msg)
+        if find_document and (not answerable or len({s.path for s in sources}) != 1):
+            msg = "a find_document question must be answerable from exactly one document"
             raise SpikeInputError(msg)
         questions.append(
             Question(
@@ -129,6 +150,7 @@ def load_questions(path: Path) -> list[Question]:
                 answerable,
                 sources,
                 _sources(row.get("alternatives"), "alternatives"),
+                find_document,
             )
         )
     return questions

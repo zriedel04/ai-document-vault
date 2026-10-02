@@ -16,6 +16,7 @@ questions:
 - id: q1
   question: Who teaches the course?
   category: lookup
+  find_document: true
   answerable: true
   answer: Someone.
   sources:
@@ -75,6 +76,7 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual(questions[0].alternatives, (c.Source("a/copy.txt", "Instructor"),))
         self.assertEqual(questions[0].source_paths, ("a/syllabus.txt",))
         self.assertFalse(questions[1].answerable)
+        self.assertEqual([q.find_document for q in questions], [True, False])  # false unless marked
 
     def test_malformed_question_files_are_input_errors(self) -> None:
         bad = {
@@ -108,6 +110,24 @@ class LoaderTest(unittest.TestCase):
                 "questions:\n- {id: a, question: q, category: c, answerable: true, sources: 3}\n"
             ),
         }
+        two = "questions:\n- {id: a, question: q, category: c, answerable: false}\n"
+        bad["two questions with one id"] = two + two.split("\n", 1)[1]
+        bad["an empty id"] = "questions:\n- {id: '', question: q, category: c, answerable: false}\n"
+        bad["a blank id"] = (
+            "questions:\n- {id: '  ', question: q, category: c, answerable: false}\n"
+        )
+        one = "questions:\n- {id: a, question: q, category: c, answerable: true, "
+        bad["find_document as text"] = (
+            one + "find_document: 'yes', sources: [{path: a.txt, quote: x}]}\n"
+        )
+        bad["find_document without an answer"] = (
+            "questions:\n- {id: a, question: q, category: c, answerable: false,"
+            " find_document: true}\n"
+        )
+        bad["find_document with two documents"] = (
+            one
+            + "find_document: true, sources: [{path: a.txt, quote: x}, {path: b.txt, quote: y}]}\n"
+        )
         for name, text in bad.items():
             with self.subTest(name):
                 path = self.root / "bad.yaml"
@@ -257,8 +277,9 @@ def question(
     sources: tuple[c.Source, ...],
     alternatives: tuple[c.Source, ...] = (),
     answerable: bool = True,
+    find_document: bool = True,
 ) -> c.Question:
-    return c.Question("q", "text", "lookup", answerable, sources, alternatives)
+    return c.Question("q", "text", "lookup", answerable, sources, alternatives, find_document)
 
 
 HIT = "the passage that answers it"
@@ -349,12 +370,12 @@ class RetrievalScoreTest(unittest.TestCase):
         alt = question((ORIG,), (src("alt", "another way"),))
         self.assertEqual(rv.score_all([alt], {"q": [chunk("alt")]}, self.CANON).hit_at_1, 1.0)
 
-    def test_hit_at_1_covers_only_questions_whose_evidence_is_in_one_document(self) -> None:
-        single = c.Question("s", "t", "lookup", True, (src("a", "alpha"),), ())
+    def test_hit_at_1_covers_only_find_the_document_questions_with_one_document(self) -> None:
+        single = c.Question("s", "t", "lookup", True, (src("a", "alpha"),), (), True)
         several_passages = c.Question(
-            "p", "t", "x", True, (src("a", "alpha"), src("a", "beta")), ()
+            "p", "t", "x", True, (src("a", "alpha"), src("a", "beta")), (), True
         )
-        several_documents = c.Question("m", "t", "multi_doc", True, (src("a"), src("b")), ())
+        several_documents = c.Question("m", "t", "multi_doc", True, (src("a"), src("b")), (), True)
         ranked = {q.id: [chunk("a")] for q in (single, several_passages, several_documents)}
         ranked["s"] = [chunk("zzz")]  # the single-document question is the one that misses
         scores = rv.score_all([single, several_passages, several_documents], ranked, {})
@@ -364,8 +385,17 @@ class RetrievalScoreTest(unittest.TestCase):
         )
 
     def test_hit_at_1_is_none_when_no_question_has_one_document(self) -> None:
-        q = c.Question("m", "t", "multi_doc", True, (src("a"), src("b")), ())
+        q = c.Question("m", "t", "multi_doc", True, (src("a"), src("b")), (), True)
         scores = rv.score_all([q], {"m": [chunk("a")]}, {})
+        self.assertIsNone(scores.hit_at_1)
+        self.assertEqual(scores.hit_at_1_questions, 0)
+
+    def test_an_ordinary_question_with_one_document_is_not_scored_by_hit_at_1(self) -> None:
+        # "Who is the instructor?" has its evidence in one document but is not a question about
+        # finding a document, so it counts for Recall and MRR only.
+        ordinary = question((ORIG,), find_document=False)
+        scores = rv.score_all([ordinary], {"q": [chunk("orig")]}, self.CANON)
+        self.assertEqual(scores.questions, 1)
         self.assertIsNone(scores.hit_at_1)
         self.assertEqual(scores.hit_at_1_questions, 0)
 
