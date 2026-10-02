@@ -1,6 +1,14 @@
 version: 2
 updates:
-  # The npm ecosystem is added together with the frontend manifest.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+    commit-message:
+      prefix: build
   - package-ecosystem: uv
     directory: /backend
     schedule:
