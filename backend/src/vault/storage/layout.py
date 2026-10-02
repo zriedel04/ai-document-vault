@@ -52,6 +52,21 @@ class VaultPaths:
         return self.root / "local-token"
 
     @property
+    def trusted_entries(self) -> tuple[Path, ...]:
+        """The files and folders the program reads at start-up and trusts to be private."""
+        databases = (self.db, self.index_db)
+        sidecars = tuple(Path(f"{db}{suffix}") for db in databases for suffix in ("-wal", "-shm"))
+        return (
+            self.token_file,
+            *databases,
+            *sidecars,
+            self.blobs,
+            self.derived,
+            self.logs,
+            self.backups,
+        )
+
+    @property
     def folders(self) -> tuple[Path, ...]:
         return (self.root, self.blobs, self.derived, self.logs, self.backups)
 
@@ -105,6 +120,13 @@ def ensure_vault(path: Path) -> VaultPaths:
     if acl.IS_WINDOWS:
         try:
             acl.secure_vault_folder(paths.root, created=created)
+        except acl.VaultAccessError as error:
+            raise VaultPathError(str(error)) from error
+    if acl.IS_WINDOWS:
+        # Entries that were already there may carry their own access list (a file moved in
+        # from another folder keeps it). New ones inherit the private folder's.
+        try:
+            acl.verify_private([p for p in paths.trusted_entries if p.exists()])
         except acl.VaultAccessError as error:
             raise VaultPathError(str(error)) from error
     for folder in paths.folders:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -19,8 +20,10 @@ from vault.storage.acl import (
     VaultAccessError,
     is_private,
     parse_access_list,
+    parse_access_lists,
     sddl_is_private,
     secure_vault_folder,
+    verify_private,
 )
 
 OWNER = "S-1-5-21-111-222-333-1001"
@@ -141,28 +144,52 @@ class TestSddlIsPrivate:
         assert private(f"O:RDG:EDD:PAI(A;OICI;FA;;;{OWNER})")
 
 
+def access(
+    sddl: str = PRIVATE, *, owner: str = OWNER, user: str = OWNER, alias: str | None = None
+) -> AccessList:
+    return AccessList(user, alias or user, owner, sddl)
+
+
+def line(owner: str = OWNER, sddl: str = PRIVATE) -> str:
+    return f"O:{owner}\t{sddl}"
+
+
+HEADER = f"{OWNER}\tO:{OWNER}"
+
+
 class TestParseAccessList:
-    def test_the_user_and_the_list_are_split(self) -> None:
-        output = f"{OWNER}\r\nO:{OWNER}\r\n{PRIVATE}\r\n"
-        assert parse_access_list(output) == AccessList(OWNER, OWNER, PRIVATE)
+    def test_the_user_the_owner_and_the_list_are_split(self) -> None:
+        output = f"{HEADER}\r\n{line()}\r\n"
+        assert parse_access_list(output) == access()
+
+    def test_several_paths_come_back_in_order(self) -> None:
+        output = f"{HEADER}\n{line('BA')}\n{line(OWNER, 'D:P(A;;FA;;;SY)')}\n"
+        first, second = parse_access_lists(output, 2)
+        assert (first.owner, second.owner) == ("BA", OWNER)
+        assert second.sddl == "D:P(A;;FA;;;SY)"
+        assert first.user_sid == second.user_sid == OWNER
 
     def test_the_built_in_administrator_is_reported_by_its_alias(self) -> None:
-        parsed = parse_access_list(f"{OWNER}\nO:LA\n{PRIVATE}\n")
+        parsed = parse_access_list(f"{OWNER}\tO:LA\n{line()}\n")
         assert parsed.user_alias == "LA"
 
     @pytest.mark.parametrize(
         "output",
         [
             "",
-            f"{OWNER}\n",
-            PRIVATE,
-            f"{OWNER}\n{PRIVATE}",  # no owner line
-            f"{OWNER}\nO:{OWNER}\n{PRIVATE}\nextra",
-            f"{PRIVATE}\nO:{OWNER}\n{OWNER}",
-            f"{OWNER}\nO:WD\n{PRIVATE}",  # Everyone is not an alias for one user
-            f"{OWNER}\nO:BA\n{PRIVATE}",
-            f"{OWNER}\nO:{OTHER_USER}\n{PRIVATE}",  # not the same account
-            f"{OWNER}\nowner LA\n{PRIVATE}",
+            HEADER,  # no path line
+            f"{HEADER}\n",
+            line(),  # no header
+            f"{HEADER}\n{line()}\nextra",
+            f"{HEADER}\n{line()}\n{line()}",  # one path was asked for
+            f"{OWNER}\n{line()}",  # the header has no alias
+            f"{OWNER}\tO:WD\n{line()}",  # Everyone is not an alias for one user
+            f"{OWNER}\tO:BA\n{line()}",
+            f"{OWNER}\tO:{OTHER_USER}\n{line()}",  # not the same account
+            f"{OWNER}\towner LA\n{line()}",
+            f"{HEADER}\n{OWNER}\t{PRIVATE}",  # an owner that is not in SDDL form
+            f"{HEADER}\nO:{OWNER} {PRIVATE}",  # no tab between owner and list
+            f"{HEADER}\nO:\t{PRIVATE}",
             "x\ny\nz",
         ],
     )
@@ -171,21 +198,88 @@ class TestParseAccessList:
             parse_access_list(output)
 
     def test_is_private_uses_the_reported_user(self) -> None:
-        assert is_private(AccessList(OWNER, OWNER, PRIVATE))
-        assert not is_private(AccessList(OTHER_USER, OTHER_USER, PRIVATE))
+        assert is_private(access())
+        assert not is_private(access(user=OTHER_USER, owner=OTHER_USER))
+        assert not is_private(access(user=OTHER_USER))  # the list names a different account
 
     def test_the_built_in_administrator_alias_in_the_list_is_the_user(self) -> None:
         sddl = "O:BAG:SYD:PAI(A;OICI;FA;;;LA)"  # what the Windows runner reports for its account
-        assert is_private(AccessList(OWNER, "LA", sddl))
+        assert is_private(access(sddl, owner="BA", alias="LA"))
 
     def test_the_alias_is_the_user_only_when_it_was_reported_for_the_user(self) -> None:
         sddl = "O:BAG:SYD:PAI(A;OICI;FA;;;LA)"
-        assert not is_private(AccessList(OWNER, OWNER, sddl))  # another account's alias
+        assert not is_private(access(sddl, owner="BA"))  # another account's alias
         assert not sddl_is_private(sddl, OWNER)
 
     @pytest.mark.parametrize("alias", ["WD", "BU", "AU", "IU", "AN"])
     def test_a_broad_group_is_never_taken_for_the_user(self, alias: str) -> None:
         assert not sddl_is_private(f"O:BAG:SYD:PAI(A;OICI;FA;;;{alias})", OWNER, alias)
+
+
+class TestOwner:
+    """Whoever owns a path can rewrite its list and, through Owner Rights, may be granted access."""
+
+    @pytest.mark.parametrize("owner", [OWNER, "BA", "SY", "S-1-5-32-544", "S-1-5-18"])
+    def test_the_user_and_the_system_principals_may_own_it(self, owner: str) -> None:
+        assert is_private(access(owner=owner))
+
+    def test_the_built_in_administrator_alias_may_own_it(self) -> None:
+        assert is_private(access("D:P(A;;FA;;;LA)", owner="LA", alias="LA"))
+
+    @pytest.mark.parametrize(
+        "owner", [OTHER_USER, "LA", "DA", "WD", "BU", "AU", "OW", "CO", "S-1-5-21-9-9-9-513"]
+    )
+    def test_another_owner_is_not_private_even_if_the_list_looks_right(self, owner: str) -> None:
+        assert not is_private(access(owner=owner))
+
+    def test_an_owner_rights_entry_does_not_make_another_owner_acceptable(self) -> None:
+        # The case from review: the user and Owner Rights are allowed, but a second account owns it.
+        sddl = f"O:BAG:SYD:PAI(A;OICI;FA;;;{OWNER})(A;OICI;FA;;;OW)"
+        assert not is_private(access(sddl, owner=OTHER_USER))
+        assert is_private(access(sddl, owner=OWNER))
+
+
+class TestVerifyPrivate:
+    def paths(self, *names: str) -> list[Path]:
+        return [Path("vault") / name for name in names]
+
+    def test_nothing_to_check_asks_nothing(self) -> None:
+        def never(_paths: object) -> list[AccessList]:
+            raise AssertionError("must not run")
+
+        verify_private([], read=never)
+
+    def test_private_entries_pass(self) -> None:
+        verify_private(self.paths("a", "b"), read=lambda p: [access() for _ in p])
+
+    def test_every_open_entry_is_named_and_nothing_else(self) -> None:
+        opened = {"local-token", "vault.db"}
+
+        def read(paths: Sequence[Path]) -> list[AccessList]:
+            return [access(OPEN) if p.name in opened else access() for p in paths]
+
+        with pytest.raises(VaultAccessError) as caught:
+            verify_private(self.paths("local-token", "blobs", "vault.db"), read=read)
+        message = str(caught.value)
+        assert "local-token, vault.db" in message
+        assert "blobs" not in message
+        assert "delete it" in message
+        assert "S-1-5" not in message  # no access list in this message
+
+    def test_an_entry_with_another_owner_is_named(self) -> None:
+        with pytest.raises(VaultAccessError, match=r"vault\.db"):
+            verify_private(self.paths("vault.db"), read=lambda p: [access(owner=OTHER_USER)])
+
+    def test_a_reading_that_does_not_match_the_paths_is_an_error(self) -> None:
+        with pytest.raises(VaultAccessError, match="does not understand"):
+            verify_private(self.paths("a", "b"), read=lambda p: [access()])
+
+    def test_a_reading_that_fails_is_not_trusted(self) -> None:
+        def broken(_paths: object) -> list[AccessList]:
+            raise VaultAccessError("no PowerShell")
+
+        with pytest.raises(VaultAccessError):
+            verify_private(self.paths("a"), read=broken)
 
 
 class FakeFolder:
@@ -197,7 +291,7 @@ class FakeFolder:
         self.hardened: list[Path] = []
 
     def read(self, _folder: Path) -> AccessList:
-        return AccessList(OWNER, OWNER, self.sddl)
+        return access(self.sddl)
 
     def harden(self, folder: Path) -> None:
         self.hardened.append(folder)
@@ -261,7 +355,18 @@ class TestSecureVaultFolder:
 
 
 class TestEnsureVaultOnWindows:
-    """``ensure_vault`` calls the check before it creates anything inside the folder."""
+    """``ensure_vault`` calls the checks before it creates anything inside the folder."""
+
+    @pytest.fixture
+    def verified(self, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        """Pretend to be on Windows with nothing to run; record what is verified."""
+        seen: list[list[str]] = []
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+        monkeypatch.setattr(acl, "secure_vault_folder", lambda _root, *, created: None)
+        monkeypatch.setattr(
+            acl, "verify_private", lambda paths: seen.append([p.name for p in paths])
+        )
+        return seen
 
     def test_the_folder_is_secured_before_the_subfolders_exist(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -273,10 +378,55 @@ class TestEnsureVaultOnWindows:
 
         monkeypatch.setattr(acl, "IS_WINDOWS", True)
         monkeypatch.setattr(acl, "secure_vault_folder", fake_secure)
+        monkeypatch.setattr(acl, "verify_private", lambda _paths: None)
         layout.ensure_vault(tmp_path / "AIVault")
         assert seen == [(True, [])]  # new, and still empty when it was secured
         layout.ensure_vault(tmp_path / "AIVault")
         assert seen[1][0] is False  # the second start finds it existing
+
+    def test_a_new_vault_has_no_existing_entries_to_verify(
+        self, tmp_path: Path, verified: list[list[str]]
+    ) -> None:
+        layout.ensure_vault(tmp_path / "AIVault")
+        assert verified == [[]]
+
+    def test_the_existing_token_database_and_subfolders_are_verified_before_the_token_is_read(
+        self, tmp_path: Path, verified: list[list[str]]
+    ) -> None:
+        root = tmp_path / "AIVault"
+        for folder in ("blobs", "derived", "logs", "backups"):
+            (root / folder).mkdir(parents=True)
+        for name in ("local-token", "vault.db", "vault.db-wal", "index.db-shm", "other.txt"):
+            (root / name).write_text("x", encoding="utf-8")
+        layout.ensure_vault(root)
+        assert verified == [
+            [
+                "local-token",
+                "vault.db",
+                "vault.db-wal",
+                "index.db-shm",
+                "blobs",
+                "derived",
+                "logs",
+                "backups",
+            ]
+        ]  # other.txt is not a file the program trusts, and absent entries are left out
+
+    def test_an_open_existing_entry_stops_the_start_before_the_subfolders_are_made(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(_paths: object) -> None:
+            raise VaultAccessError("these items can be used by other accounts: local-token")
+
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+        monkeypatch.setattr(acl, "secure_vault_folder", lambda _root, *, created: None)
+        monkeypatch.setattr(acl, "verify_private", refuse)
+        root = tmp_path / "AIVault"
+        root.mkdir()
+        (root / "local-token").write_text("x", encoding="utf-8")
+        with pytest.raises(layout.VaultPathError, match="local-token"):
+            layout.ensure_vault(root)
+        assert not (root / "blobs").exists()
 
     def test_a_refusal_stops_the_start_before_the_subfolders_are_made(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -293,20 +443,21 @@ class TestEnsureVaultOnWindows:
     def test_other_systems_do_not_call_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def never(_root: Path, *, created: bool) -> None:
+        def never(*_args: object, **_kwargs: object) -> None:
             raise AssertionError("must not run")
 
         monkeypatch.setattr(acl, "IS_WINDOWS", False)
         monkeypatch.setattr(acl, "secure_vault_folder", never)
+        monkeypatch.setattr(acl, "verify_private", never)
         assert layout.ensure_vault(tmp_path / "AIVault").blobs.is_dir()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="uses PowerShell and Windows access lists")
 class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI job only
-    def grant(self, folder: Path, sid: str) -> None:
-        # A leading * means "this SID", whatever language Windows is in.
+    def grant(self, path: Path, sid: str, *, flags: str = "(OI)(CI)") -> None:
+        # A leading * means "this SID", whatever language Windows is in. Files take no flags.
         subprocess.run(  # noqa: S603
-            ["icacls", str(folder), "/grant", f"*{sid}:(OI)(CI)R"],  # noqa: S607
+            ["icacls", str(path), "/grant", f"*{sid}:{flags}R"],  # noqa: S607
             check=True,
             capture_output=True,
         )
@@ -348,3 +499,28 @@ class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI j
         assert not self.is_private(folder)
         layout.ensure_vault(folder)  # empty, so it is hardened
         assert self.is_private(folder)
+
+    def test_a_second_start_accepts_the_vault_it_made(self, tmp_path: Path) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        paths.token_file.write_text("x", encoding="utf-8")
+        paths.db.write_bytes(b"x")
+        layout.ensure_vault(root)  # token, database and subfolders inherited the private list
+
+    def test_a_token_file_with_its_own_open_access_list_stops_the_start(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        paths.token_file.write_text("x", encoding="utf-8")
+        self.grant(paths.token_file, "S-1-5-32-545", flags="")  # Users may read the token file
+        with pytest.raises(layout.VaultPathError, match="local-token"):
+            layout.ensure_vault(root)
+
+    def test_an_open_database_file_stops_the_start(self, tmp_path: Path) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        paths.db.write_bytes(b"x")
+        self.grant(paths.db, "S-1-5-19", flags="")  # one named account, not a broad group
+        with pytest.raises(layout.VaultPathError, match=r"vault\.db"):
+            layout.ensure_vault(root)

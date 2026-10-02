@@ -10,8 +10,12 @@ The access list is read and written through PowerShell, in the language-independ
 nothing depends on the language of Windows. Any failure to read it counts as "not private".
 
 The check is an allow-list: every entry that grants access must name the current user or one of a
-few system principals. A list of "bad" groups would miss a second account or a domain group that
-was granted access by name, which is just as able to read the token and the documents.
+few system principals, and the owner (who can rewrite the list) must be the current user or one of
+them. A list of "bad" groups would miss a second account or a domain group that was granted access
+by name, which is just as able to read the token and the documents. The same check is made on the
+files and folders of an existing vault that the program trusts (the token, the database, the
+subfolders), because a file moved in from elsewhere keeps its own access list instead of taking the
+folder's.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, NamedTuple
 
@@ -36,6 +40,9 @@ DENY_TYPES: Final = frozenset({"D", "OD", "XD"})
 SID = re.compile(r"S-1-\d+(?:-\d+)+")
 # The only abbreviations SDDL has for a single user account: the built-in Administrator and Guest.
 USER_ALIASES: Final = frozenset({"LA", "LG"})
+# Who may own a path besides the current user: SYSTEM and Builtin Administrators. An elevated
+# administrator's new folder is owned by the Administrators group, not by the user.
+OWNER_PRINCIPALS: Final = frozenset({"SY", "BA", "S-1-5-18", "S-1-5-32-544"})
 ACE = re.compile(r"\(([^()]*)\)")
 POWERSHELL_TIMEOUT_SECONDS: Final = 60
 
@@ -46,13 +53,20 @@ POWERSHELL_TIMEOUT_SECONDS: Final = 60
 READ_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
     "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
-    "$sid;"
     # The same SID as SDDL writes it: the built-in Administrator account (RID 500) shows up as the
     # alias "LA", so the access list cannot be compared with the SID alone.
-    "(New-Object System.Security.AccessControl.RawSecurityDescriptor('O:'+$sid))"
+    "$form=(New-Object System.Security.AccessControl.RawSecurityDescriptor('O:'+$sid))"
     ".GetSddlForm('Owner');"
-    "(New-Object System.IO.DirectoryInfo($env:VAULT_FOLDER)).GetAccessControl()"
-    ".GetSecurityDescriptorSddlForm('Access')"
+    # A tab ([char]9) separates the fields; no double quotes, which are fragile on a command line.
+    "$sid+[char]9+$form;"
+    # One line per path: the owner, then the access list. A file and a folder need different
+    # classes to read their security descriptor.
+    "foreach($p in ($env:VAULT_PATHS -split '\\|')){"
+    "if([System.IO.Directory]::Exists($p)){"
+    "$acl=(New-Object System.IO.DirectoryInfo($p)).GetAccessControl()}"
+    "else{$acl=(New-Object System.IO.FileInfo($p)).GetAccessControl()};"
+    "$acl.GetSecurityDescriptorSddlForm('Owner')+[char]9+"
+    "$acl.GetSecurityDescriptorSddlForm('Access')}"
 )
 MAKE_PRIVATE_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
@@ -79,35 +93,51 @@ DACL_BODY = re.compile(r"(?:P|AI|AR)*((?:\([^()]*\))*)")
 
 
 class AccessList(NamedTuple):
-    """What PowerShell reported: the current user's SID, the way SDDL writes it, and the folder's
-    access list (SDDL)."""
+    """What PowerShell reported about one path: the current user's SID, the way SDDL writes that
+    SID, the path's owner (SDDL form) and its access list (SDDL)."""
 
     user_sid: str
     user_alias: str
+    owner: str
     sddl: str
 
 
 OWNER_FORM = re.compile(r"O:([A-Z]{2}|S-1-\d+(?:-\d+)+)")
+BAD_OUTPUT = "PowerShell returned an access list this program does not understand"
+
+
+def parse_access_lists(output: str, count: int) -> list[AccessList]:
+    """Split what the read script prints for ``count`` paths. Anything else is an error."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != count + 1:
+        raise VaultAccessError(BAD_OUTPUT)
+    user_sid, _, form = lines[0].partition("\t")
+    user = OWNER_FORM.fullmatch(form)
+    if SID.fullmatch(user_sid) is None or user is None:
+        raise VaultAccessError(BAD_OUTPUT)
+    alias = user.group(1)
+    if alias != user_sid and alias not in USER_ALIASES:
+        raise VaultAccessError(BAD_OUTPUT)
+    result = []
+    for line in lines[1:]:
+        owner_form, tab, sddl = line.partition("\t")
+        owner = OWNER_FORM.fullmatch(owner_form)
+        if not tab or owner is None:
+            raise VaultAccessError(BAD_OUTPUT)
+        result.append(AccessList(user_sid, alias, owner.group(1), sddl))
+    return result
 
 
 def parse_access_list(output: str) -> AccessList:
-    """Split the three lines the read script prints. Anything else is an error, never a guess."""
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if len(lines) != 3 or SID.fullmatch(lines[0]) is None:
-        msg = "PowerShell returned an access list this program does not understand"
-        raise VaultAccessError(msg)
-    owner = OWNER_FORM.fullmatch(lines[1])
-    if owner is None:
-        msg = "PowerShell returned an access list this program does not understand"
-        raise VaultAccessError(msg)
-    alias = owner.group(1)
-    if alias != lines[0] and alias not in USER_ALIASES:
-        msg = "PowerShell returned an access list this program does not understand"
-        raise VaultAccessError(msg)
-    return AccessList(user_sid=lines[0], user_alias=alias, sddl=lines[2])
+    return parse_access_lists(output, 1)[0]
 
 
 def is_private(access: AccessList) -> bool:
+    """True if the list is private and the owner, who can rewrite it, is trusted too."""
+    user_names = {access.user_sid.upper(), access.user_alias.upper()}
+    owner = access.owner.upper()
+    if owner not in user_names and owner not in OWNER_PRINCIPALS:
+        return False
     return sddl_is_private(access.sddl, access.user_sid, access.user_alias)
 
 
@@ -157,10 +187,12 @@ def _powershell() -> str:  # pragma: no cover - Windows only
     return str(Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 
-def _run(script: str, folder: Path) -> str:  # pragma: no cover - Windows only
+def _run(script: str, *paths: Path) -> str:  # pragma: no cover - Windows only
     command = [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script]
     environment = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
-    environment["VAULT_FOLDER"] = str(folder)
+    # ``|`` cannot be part of a Windows path, so it separates them safely.
+    environment["VAULT_FOLDER"] = str(paths[0])
+    environment["VAULT_PATHS"] = "|".join(str(path) for path in paths)
     try:
         result = subprocess.run(  # noqa: S603 - fixed program path, fixed script, no user input
             command,
@@ -181,8 +213,12 @@ def _run(script: str, folder: Path) -> str:  # pragma: no cover - Windows only
     return result.stdout
 
 
+def read_accesses(paths: Sequence[Path]) -> list[AccessList]:  # pragma: no cover - Windows only
+    return parse_access_lists(_run(READ_SCRIPT, *paths), len(paths))
+
+
 def read_access(folder: Path) -> AccessList:  # pragma: no cover - Windows only
-    return parse_access_list(_run(READ_SCRIPT, folder))
+    return read_accesses([folder])[0]
 
 
 def make_private(folder: Path) -> None:  # pragma: no cover - Windows only
@@ -213,7 +249,8 @@ def secure_vault_folder(
         # bug report) exactly who is still allowed in.
         msg = (
             f"the vault folder {root} is still open to other accounts after setting its "
-            f"permissions (access list: {after.sddl[:300]}; your account: {after.user_sid})"
+            f"permissions (owner: {after.owner}; access list: {after.sddl[:300]}; "
+            f"your account: {after.user_sid})"
         )
         raise VaultAccessError(msg)
     msg = (
@@ -222,3 +259,33 @@ def secure_vault_folder(
         "off inheritance and keep only your account), or choose an empty folder"
     )
     raise VaultAccessError(msg)
+
+
+def verify_private(
+    paths: Sequence[Path],
+    *,
+    read: Callable[[Sequence[Path]], list[AccessList]] = read_accesses,
+) -> None:
+    """Refuse to go on if any of these existing files or folders can be used by other accounts.
+
+    Nothing is changed: a file that is open is either one the owner moved in from elsewhere or
+    one that may already have been read, so the owner decides (for the token, that means deleting
+    it so a new one is made). Only the names are reported, never what is inside.
+    """
+    if not paths:
+        return
+    accesses = read(paths)
+    if len(accesses) != len(paths):
+        raise VaultAccessError(BAD_OUTPUT)
+    open_names = [
+        path.name for path, access in zip(paths, accesses, strict=True) if not is_private(access)
+    ]
+    if open_names:
+        msg = (
+            "these items in the vault folder can be used by other accounts on this PC: "
+            + ", ".join(open_names)
+            + ". They were not changed. Turn off inheritance and keep only your account in each "
+            "one's Security tab, or move them out and copy them back in (a copy takes the "
+            "folder's permissions); if it is `local-token`, delete it so a new one is made"
+        )
+        raise VaultAccessError(msg)
