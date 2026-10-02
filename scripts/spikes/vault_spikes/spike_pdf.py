@@ -30,11 +30,16 @@ METHOD = (
     "page by page. Pages per second is total pages over total extraction time. A page with no "
     "text counts as scanned. Heading candidates are lines whose words are at least 1.2 times the "
     "page's median font size and that have at most 12 words. Word error rate compares the "
-    "extracted text with a reference text file of the same name where one exists. Extracted "
-    "text is compared in memory and never stored; files and references stay outside the "
+    "extracted text with a reference text file of the same name (`NAME.txt`) where one exists. "
+    "Heading accuracy compares the detected headings with a file of the expected ones "
+    "(`NAME.headings.txt`, one heading per line, case and spacing ignored): precision is the "
+    "share of detected headings that are expected, recall the share of expected headings that "
+    "were detected, both summed over all files that have such a file. Extracted text and "
+    "headings are compared in memory and never stored; files and references stay outside the "
     "repository unless they are the public synthetic fixtures."
 )
 PACKAGES = ("pypdfium2", "pdfplumber")
+HEADINGS_SUFFIX = ".headings.txt"
 HEADING_RATIO = 1.2
 HEADING_MAX_WORDS = 12
 
@@ -56,16 +61,29 @@ class ExtractionError(Exception):
 
 @dataclass(frozen=True)
 class PdfText:
+    """What an extractor returns. ``headings`` are the lines it judged to be headings, kept in
+    memory only to be compared with the reference headings; they are never reported."""
+
     pages: list[str]
-    headings: int
+    headings: list[str]
 
 
 class PdfExtractor(Protocol):
     """Extracts one PDF. ``name`` is a label fixed in code."""
 
     name: str
+    detects_headings: bool  # False: the extractor returns no headings, so none are scored
 
     def extract(self, path: Path) -> PdfText: ...
+
+
+def normalise_heading(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def heading_set(text: str) -> set[str]:
+    """The expected headings of a reference file: one per line, blank lines ignored."""
+    return {line for line in (normalise_heading(raw) for raw in text.splitlines()) if line}
 
 
 def run_pdf_spike(
@@ -94,6 +112,7 @@ def run_pdf_spike(
     files_with_headings = 0
     seconds = 0.0
     word_error_rates: list[float] = []
+    heading_hits = heading_detected = heading_expected = files_with_heading_reference = 0
     for pdf in pdfs:
         begin = clock()
         try:
@@ -110,10 +129,20 @@ def run_pdf_spike(
         outcomes[Outcome.OK] += 1
         pages_total += len(result.pages)
         pages_without_text += sum(1 for page in result.pages if not page.strip())
-        headings += result.headings
+        headings += len(result.headings)
         if result.headings:
             files_with_headings += 1
-        reference = (references_dir or pdf.parent) / f"{pdf.stem}.txt"
+        reference_dir = references_dir or pdf.parent
+        heading_file = reference_dir / f"{pdf.stem}{HEADINGS_SUFFIX}"
+        if extractor.detects_headings and heading_file.is_file():
+            expected = heading_set(heading_file.read_text(encoding="utf-8"))
+            detected = {normalise_heading(h) for h in result.headings} - {""}
+            if expected:
+                files_with_heading_reference += 1
+                heading_hits += len(expected & detected)
+                heading_detected += len(detected)
+                heading_expected += len(expected)
+        reference = reference_dir / f"{pdf.stem}.txt"
         if reference.is_file():
             with contextlib.suppress(ValueError):  # an empty reference is not scored
                 word_error_rates.append(
@@ -137,6 +166,18 @@ def run_pdf_spike(
     if word_error_rates:
         metrics["wer_mean"] = mean(word_error_rates)
         metrics["wer_median"] = median(word_error_rates)
+    if files_with_heading_reference:
+        recall = heading_hits / heading_expected
+        metrics["files_with_heading_reference"] = files_with_heading_reference
+        metrics["heading_recall"] = recall
+        if heading_detected:
+            precision = heading_hits / heading_detected
+            metrics["heading_precision"] = precision
+            metrics["heading_f1"] = (
+                2 * precision * recall / (precision + recall) if precision + recall else 0.0
+            )
+        else:
+            metrics["heading_f1"] = 0.0
     if (peak := peak_memory_mib()) is not None:
         metrics["peak_memory_mib"] = peak
     report.add(extractor.name, **metrics)

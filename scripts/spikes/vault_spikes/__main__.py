@@ -72,7 +72,12 @@ def parser() -> argparse.ArgumentParser:
     common(pdf)
     pdf.add_argument("--extractor", choices=["pypdfium2", "pypdfium2+pdfplumber"], required=True)
     pdf.add_argument("--pdfs", type=Path, required=True)
-    pdf.add_argument("--references", type=Path, help="folder of <pdf name>.txt (default: pdfs)")
+    pdf.add_argument(
+        "--references",
+        type=Path,
+        help="folder of <pdf name>.txt (text) and <pdf name>.headings.txt (headings, one per "
+        "line); default: the PDF folder",
+    )
 
     joined = commands.add_parser("merge", help="combine the reports of one spike into one")
     common(joined)
@@ -84,6 +89,32 @@ def available() -> dict[str, bool]:
     facts = {name: importlib.util.find_spec(name) is not None for name in OPTIONAL}
     facts["tesseract_on_path"] = shutil.which("tesseract") is not None
     return facts
+
+
+def require_embedding_inputs(corpus: Path, questions: Path) -> None:
+    """Say plainly what is missing, instead of failing in the middle of a model download.
+
+    The defaults point at the public synthetic corpus and eval set, which arrive in the demo
+    corpus pull request; until that is merged, pass ``--corpus`` and ``--questions``.
+    """
+    missing = [
+        what
+        for what, ok in (
+            (
+                "the corpus manifest (--corpus FOLDER with manifest.json)",
+                (corpus / "manifest.json").is_file(),
+            ),
+            ("the eval questions (--questions FILE)", questions.is_file()),
+        )
+        if not ok
+    ]
+    if missing:
+        msg = (
+            "cannot find " + " and ".join(missing) + ". The public synthetic corpus and eval set "
+            "(demo/corpus and eval/public) come with the demo corpus change and are not in "
+            "this checkout yet; pass your own paths to run the embedding spike"
+        )
+        raise SpikeInputError(msg)
 
 
 def show(report: Report, written: tuple[Path, Path]) -> None:
@@ -119,6 +150,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "embedding":
+        require_embedding_inputs(args.corpus, args.questions)
         embedder = adapters.SentenceTransformerEmbedder(args.candidate, args.device)
         pdf_pages = adapters.pdf_pages_for_corpus if available()["pypdfium2"] else None
         documents = load_manifest(args.corpus / "manifest.json")

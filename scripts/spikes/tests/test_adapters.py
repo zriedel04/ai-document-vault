@@ -11,34 +11,41 @@ from vault_spikes import adapters
 from vault_spikes.spike_pdf import HEADING_MAX_WORDS, ExtractionError, Outcome
 
 
-def word(top: float, size: float) -> dict[str, float | str]:
-    return {"text": "w", "top": top, "size": size}
+def word(top: float, size: float, text: str = "w", x0: float = 0.0) -> dict[str, float | str]:
+    return {"text": text, "top": top, "size": size, "x0": x0}
 
 
 class HeadingTest(unittest.TestCase):
     def test_large_short_lines_are_candidates(self) -> None:
         words = [word(10, 20), word(10, 20)]  # a title line
         words += [word(40 + 12 * i, 10) for i in range(30)]  # body lines
-        self.assertEqual(adapters.heading_candidates(words), 1)
+        self.assertEqual(len(adapters.heading_candidates(words)), 1)
+
+    def test_the_heading_text_is_returned_left_to_right(self) -> None:
+        words = [word(10, 20, "World", 80), word(10, 20, "Hello", 10)]
+        words += [word(40 + 12 * i, 10) for i in range(30)]
+        self.assertEqual(adapters.heading_candidates(words), ["Hello World"])
 
     def test_a_page_of_one_size_has_none(self) -> None:
-        self.assertEqual(adapters.heading_candidates([word(10 + 12 * i, 10) for i in range(20)]), 0)
-        self.assertEqual(adapters.heading_candidates([]), 0)
+        self.assertEqual(
+            len(adapters.heading_candidates([word(10 + 12 * i, 10) for i in range(20)])), 0
+        )
+        self.assertEqual(len(adapters.heading_candidates([])), 0)
 
     def test_a_long_large_line_is_not_a_heading(self) -> None:
         words = [word(10, 20) for _ in range(HEADING_MAX_WORDS + 1)]
         words += [word(40 + 12 * i, 10) for i in range(40)]
-        self.assertEqual(adapters.heading_candidates(words), 0)
+        self.assertEqual(len(adapters.heading_candidates(words)), 0)
 
     def test_words_on_one_line_may_differ_a_little_in_height(self) -> None:
         words = [word(10, 20), word(11.5, 20)]
         words += [word(40 + 12 * i, 10) for i in range(30)]
-        self.assertEqual(adapters.heading_candidates(words), 1)
+        self.assertEqual(len(adapters.heading_candidates(words)), 1)
 
     def test_a_mixed_size_line_is_not_a_heading(self) -> None:
         words = [word(10, 20), word(10, 10)]
         words += [word(40 + 12 * i, 10) for i in range(30)]
-        self.assertEqual(adapters.heading_candidates(words), 0)
+        self.assertEqual(len(adapters.heading_candidates(words)), 0)
 
 
 class ClassifyTest(unittest.TestCase):

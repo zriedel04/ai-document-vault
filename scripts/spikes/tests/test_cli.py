@@ -87,13 +87,42 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertTrue(err.startswith("error: no PDF files"))
 
-    def test_a_missing_corpus_is_an_input_error(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            code, _, err = run(
-                "embedding", "--candidate", "qwen3-embedding-0.6b", "--corpus", folder
+    def test_missing_inputs_are_named_before_any_model_is_touched(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            mock.patch.object(adapters, "SentenceTransformerEmbedder") as embedder,
+        ):
+            code, out, err = run(
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--corpus",
+                folder,
+                "--questions",
+                str(Path(folder) / "nope.yaml"),
             )
         self.assertEqual(code, 2)
-        self.assertIn("cannot read the manifest", err)
+        self.assertEqual(out, "")
+        self.assertIn("cannot find the corpus manifest", err)
+        self.assertIn("and the eval questions", err)
+        self.assertIn("demo corpus change", err)
+        embedder.assert_not_called()
+
+    def test_only_the_missing_input_is_named(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "manifest.json").write_text("{}", encoding="utf-8")
+            code, _, err = run(
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--corpus",
+                folder,
+                "--questions",
+                str(Path(folder) / "nope.yaml"),
+            )
+        self.assertEqual(code, 2)
+        self.assertNotIn("manifest", err.split(". The public")[0])
+        self.assertIn("the eval questions", err)
 
     def test_unknown_candidates_are_refused_by_the_parser(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

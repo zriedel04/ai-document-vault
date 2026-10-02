@@ -190,6 +190,7 @@ class Pypdfium2Extractor:
     """Page text from pypdfium2; no heading detection."""
 
     name = "pypdfium2"
+    detects_headings = False
 
     def extract(self, path: Path) -> PdfText:
         _need("pypdfium2", "pdf")
@@ -207,21 +208,21 @@ class Pypdfium2Extractor:
                 pages.append(textpage.get_text_range())
                 textpage.close()
                 page.close()
-            return PdfText(pages, 0)
+            return PdfText(pages, [])
         except Exception as error:
             raise ExtractionError(_classify(error)) from None
         finally:
             document.close()
 
 
-def heading_candidates(words: list[dict[str, float | str]]) -> int:
-    """Count lines of at most ``HEADING_MAX_WORDS`` words that are all well above the median size.
+def heading_candidates(words: list[dict[str, float | str]]) -> list[str]:
+    """The lines of at most ``HEADING_MAX_WORDS`` words that are all well above the median size.
 
-    ``words`` are pdfplumber words with ``top`` and ``size``. Words whose tops differ by less than
-    two points share a line.
+    ``words`` are pdfplumber words with ``top``, ``size`` and ``text``. Words whose tops differ by
+    less than two points share a line, and a line reads left to right.
     """
     if not words:
-        return 0
+        return []
     median_size = statistics.median(float(w["size"]) for w in words)
     lines: list[list[dict[str, float | str]]] = []
     for word in sorted(words, key=lambda w: float(w["top"])):
@@ -229,18 +230,19 @@ def heading_candidates(words: list[dict[str, float | str]]) -> int:
             lines[-1].append(word)
         else:
             lines.append([word])
-    return sum(
-        1
+    return [
+        " ".join(str(w["text"]) for w in sorted(line, key=lambda w: float(w.get("x0", 0.0))))
         for line in lines
         if len(line) <= HEADING_MAX_WORDS
         and all(float(w["size"]) >= HEADING_RATIO * median_size for w in line)
-    )
+    ]
 
 
 class PypdfiumPlumberExtractor:
     """Page text from pypdfium2, and heading candidates from pdfplumber's font sizes."""
 
     name = "pypdfium2+pdfplumber"
+    detects_headings = True
 
     def extract(self, path: Path) -> PdfText:
         _need("pdfplumber", "pdf")
@@ -249,10 +251,11 @@ class PypdfiumPlumberExtractor:
         text = Pypdfium2Extractor().extract(path)
         try:
             with pdfplumber.open(str(path)) as document:
-                headings = sum(
-                    heading_candidates(page.extract_words(extra_attrs=["size"]))
+                headings = [
+                    heading
                     for page in document.pages
-                )
+                    for heading in heading_candidates(page.extract_words(extra_attrs=["size"]))
+                ]
         except Exception as error:
             raise ExtractionError(_classify(error)) from None
         return PdfText(text.pages, headings)

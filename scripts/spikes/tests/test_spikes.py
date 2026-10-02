@@ -83,6 +83,34 @@ class VecTest(unittest.TestCase):
         # part of the measured size.
         self.assertEqual(row.metrics["insert_vectors_per_second"], round(2500 / 6.0, 4))
 
+    def test_several_real_stores_can_share_a_folder_and_clean_up_after_themselves(self) -> None:
+        # The run builds a store for the correctness check and one per size, all in one folder.
+        # sqlite-vec is not available here, so the extension and the table are replaced with a
+        # plain table; what is tested is that each store has a database file of its own.
+        class PlainTable(vec.SqliteVecStore):
+            def _load_extension(self) -> None:
+                pass
+
+            def _create_table(self, dim: int) -> None:
+                self.db.execute("CREATE TABLE v(rowid INTEGER PRIMARY KEY, embedding BLOB)")
+
+            def nearest(self, query: bytes, k: int) -> list[int]:
+                return [int(row[0]) for row in self.db.execute("SELECT rowid FROM v LIMIT ?", (k,))]
+
+        with tempfile.TemporaryDirectory() as folder:
+            report = vec.run_vec_spike(
+                lambda dim: PlainTable(dim, Path(folder)),
+                sizes=(30, 40),
+                dim=4,
+                queries=1,
+                k=3,
+                check_size=10,
+                environment=ENV,
+                clock=Clock(),
+            )
+            self.assertEqual([r.candidate for r in report.rows][-2:], ["vectors-30", "vectors-40"])
+            self.assertEqual(list(Path(folder).iterdir()), [])  # every database was removed
+
     def test_a_wrong_store_is_noticed(self) -> None:
         class Wrong(vec.PythonStore):
             def nearest(self, query: bytes, k: int) -> list[int]:
@@ -168,9 +196,15 @@ def corpus_inputs() -> emb.EmbeddingInputs:
         c.Chunk("b.txt", 1, f"The budget total is 10. The budget is final. {PRIVATE_TEXT}"),
     ]
     questions = [
-        c.Question("q1", "Who is the instructor?", "lookup", True, ("a.txt",), ()),
-        c.Question("q2", "What is the budget?", "lookup", True, ("b.txt",), ()),
-        c.Question("q3", "What does the scan say?", "ocr", True, ("scan.pdf",), ()),
+        c.Question(
+            "q1", "Who is the instructor?", "lookup", True, (c.Source("a.txt", "Dr. Example"),), ()
+        ),
+        c.Question(
+            "q2", "What is the budget?", "lookup", True, (c.Source("b.txt", "total is 10"),), ()
+        ),
+        c.Question(
+            "q3", "What does the scan say?", "ocr", True, (c.Source("scan.pdf", "scanned"),), ()
+        ),
         c.Question("q4", "Unanswerable?", "not_in_vault", False, (), ()),
     ]
     corpus = c.Corpus(chunks, frozenset({"a.txt", "b.txt"}), skipped=1)
@@ -195,12 +229,28 @@ class EmbeddingTest(unittest.TestCase):
         self.assertEqual(metrics["hit_at_1"], 1.0)
         self.assertEqual(metrics["questions_scored"], 2)
         self.assertEqual(metrics["questions_left_out"], 1)  # the scan question
+        self.assertEqual(metrics["sources_not_in_any_chunk"], 0)
         self.assertEqual(metrics["chunks"], 2)
         self.assertEqual(metrics["dimensions"], 3)
         self.assertEqual(metrics["load_seconds"], 1.0)
         # 2 chunks in 1 second of fake time: 2 per second, so 7200 chunks take one hour.
         self.assertEqual(metrics["chunks_per_second"], 2.0)
         self.assertEqual(metrics["hours_for_vault_of_chunks"], 1.0)
+
+    def test_the_right_document_with_the_wrong_passage_does_not_score(self) -> None:
+        inputs = corpus_inputs()
+        wrong = c.Question(
+            "q5", "Who is the instructor?", "lookup", True, (c.Source("a.txt", "no such text"),), ()
+        )
+        inputs = emb.EmbeddingInputs(inputs.corpus, inputs.documents, [wrong])
+        metrics = (
+            emb.run_embedding_spike(FakeEmbedder(), inputs, environment=ENV, clock=Clock())
+            .rows[0]
+            .metrics
+        )
+        self.assertEqual(metrics["recall_at_10"], 0.0)
+        self.assertEqual(metrics["hit_at_1"], 0.0)
+        self.assertEqual(metrics["sources_not_in_any_chunk"], 1)
 
     def test_a_warm_up_call_is_made_before_timing(self) -> None:
         embedder = FakeEmbedder()
@@ -285,6 +335,36 @@ class OcrTest(unittest.TestCase):
         self.assertEqual(report.rows[0].metrics["failures"], 1)
         self.assertNotIn(PRIVATE_TEXT, everything(report))
 
+    def test_time_lost_in_a_failing_call_lowers_the_throughput(self) -> None:
+        # The clock moves only inside a recognise call: 1 s for a good image, 100 s for a timeout.
+        clock = Clock(step=0.0)
+
+        class Slow(FakeOcr):
+            def recognise(self, image: Path) -> str:
+                clock.now += 100.0 if image.name in self.broken else 1.0
+                return super().recognise(image)
+
+        engine = Slow({"a.png": "hello world", "c.png": "receipt"}, broken=frozenset({"b.png"}))
+        metrics = (
+            ocr.run_ocr_spike(engine, self.samples(), environment=ENV, clock=clock).rows[0].metrics
+        )
+        self.assertEqual(metrics["failures"], 1)
+        self.assertEqual(metrics["seconds_spent_in_failures"], 100.0)
+        # Two images read in 102 s of work (the warm-up is not timed): 2 / 102 per second.
+        self.assertEqual(metrics["images_per_minute"], round(2 / 102 * 60, 4))
+        # Latency is still the latency of the images that worked.
+        self.assertEqual(metrics["seconds_per_image_p50"], 1.0)
+
+    def test_a_failed_image_counts_as_a_wrong_image_in_the_second_error_figure(self) -> None:
+        engine = FakeOcr({"a.png": "hello world", "c.png": "receipt"}, broken=frozenset({"b.png"}))
+        metrics = (
+            ocr.run_ocr_spike(engine, self.samples(), environment=ENV, clock=Clock())
+            .rows[0]
+            .metrics
+        )
+        self.assertEqual(metrics["cer_mean"], 0.0)  # the two images that worked were exact
+        self.assertEqual(metrics["cer_mean_failures_as_errors"], round(1 / 3, 4))
+
     def test_recognised_and_reference_text_never_reach_the_report(self) -> None:
         samples = [ocr.LabelledImage(Path("a.png"), f"{PRIVATE_TEXT} alpha")]
         engine = FakeOcr({"a.png": f"{PRIVATE_TEXT} alpha"})
@@ -306,6 +386,7 @@ class OcrTest(unittest.TestCase):
         metrics = report.rows[0].metrics
         self.assertEqual(metrics["failures"], 3)
         self.assertNotIn("cer_mean", metrics)
+        self.assertEqual(metrics["images_per_minute"], 0.0)
 
     def test_no_samples_is_an_error(self) -> None:
         with self.assertRaises(ValueError):
@@ -337,8 +418,14 @@ class OcrTest(unittest.TestCase):
 class FakePdf:
     name = "fake-pdf"
 
-    def __init__(self, results: dict[str, pdf.PdfText | pdf.Outcome | Exception]) -> None:
+    def __init__(
+        self,
+        results: dict[str, pdf.PdfText | pdf.Outcome | Exception],
+        *,
+        detects_headings: bool = True,
+    ) -> None:
         self.results = results
+        self.detects_headings = detects_headings
 
     def extract(self, path: Path) -> pdf.PdfText:
         result = self.results[path.name]
@@ -353,7 +440,7 @@ class PdfTest(unittest.TestCase):
     def test_outcomes_pages_headings_and_speed(self) -> None:
         extractor = FakePdf(
             {
-                "ok.pdf": pdf.PdfText(["page one", "", "page three"], 4),
+                "ok.pdf": pdf.PdfText(["page one", "", "page three"], ["A", "B", "C", "D"]),
                 "locked.pdf": pdf.Outcome.ENCRYPTED,
                 "broken.pdf": pdf.Outcome.CORRUPT,
                 "weird.pdf": RuntimeError(PRIVATE_TEXT),
@@ -383,8 +470,8 @@ class PdfTest(unittest.TestCase):
             (root / "empty.txt").write_text("  ", encoding="utf-8")
             extractor = FakePdf(
                 {
-                    "ok.pdf": pdf.PdfText(["the quick brown dog"], 0),
-                    "empty.pdf": pdf.PdfText(["text"], 0),
+                    "ok.pdf": pdf.PdfText(["the quick brown dog"], []),
+                    "empty.pdf": pdf.PdfText(["text"], []),
                 }
             )
             report = pdf.run_pdf_spike(
@@ -393,6 +480,69 @@ class PdfTest(unittest.TestCase):
         metrics = report.rows[0].metrics
         self.assertEqual(metrics["references_used"], 1)
         self.assertEqual(metrics["wer_mean"], 0.25)
+
+    def heading_run(
+        self, detected: list[str], expected: str | None, *, detects_headings: bool = True
+    ) -> dict[str, float]:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "doc.pdf").write_bytes(b"x")
+            if expected is not None:
+                (root / "doc.headings.txt").write_text(expected, encoding="utf-8")
+            extractor = FakePdf(
+                {"doc.pdf": pdf.PdfText(["page"], detected)}, detects_headings=detects_headings
+            )
+            report = pdf.run_pdf_spike(
+                extractor, [root / "doc.pdf"], environment=ENV, clock=Clock()
+            )
+        return dict(report.rows[0].metrics)
+
+    def test_heading_accuracy_is_scored_against_the_expected_headings(self) -> None:
+        # Two real headings found, one false positive, one real heading missed.
+        metrics = self.heading_run(
+            ["Introduction", "  METHODS  ", "A bold sentence"], "introduction\nMethods\nResults\n\n"
+        )
+        self.assertEqual(metrics["files_with_heading_reference"], 1)
+        self.assertEqual(metrics["heading_precision"], round(2 / 3, 4))
+        self.assertEqual(metrics["heading_recall"], round(2 / 3, 4))
+        self.assertEqual(metrics["heading_f1"], round(2 / 3, 4))
+
+    def test_the_same_count_of_candidates_can_be_all_wrong(self) -> None:
+        # Counting candidates cannot tell this from a perfect run; accuracy can.
+        right = self.heading_run(["One", "Two"], "One\nTwo")
+        wrong = self.heading_run(["Not", "Headings"], "One\nTwo")
+        self.assertEqual(right["heading_candidates"], wrong["heading_candidates"])
+        self.assertEqual(right["heading_f1"], 1.0)
+        self.assertEqual(wrong["heading_recall"], 0.0)
+        self.assertEqual(wrong["heading_precision"], 0.0)
+        self.assertEqual(wrong["heading_f1"], 0.0)
+
+    def test_finding_no_headings_scores_zero_recall(self) -> None:
+        metrics = self.heading_run([], "One\nTwo")
+        self.assertEqual(metrics["heading_recall"], 0.0)
+        self.assertEqual(metrics["heading_f1"], 0.0)
+        self.assertNotIn("heading_precision", metrics)  # nothing was detected to be right or wrong
+
+    def test_without_a_reference_file_no_accuracy_is_claimed(self) -> None:
+        metrics = self.heading_run(["One"], None)
+        self.assertNotIn("heading_recall", metrics)
+        self.assertNotIn("files_with_heading_reference", metrics)
+        self.assertEqual(self.heading_run(["One"], "  \n\n").get("heading_recall"), None)
+
+    def test_an_extractor_that_detects_no_headings_is_not_scored_for_them(self) -> None:
+        metrics = self.heading_run([], "One\nTwo", detects_headings=False)
+        self.assertNotIn("heading_recall", metrics)
+
+    def test_heading_text_never_reaches_the_report(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "doc.pdf").write_bytes(b"x")
+            (root / "doc.headings.txt").write_text(PRIVATE_TEXT, encoding="utf-8")
+            extractor = FakePdf({"doc.pdf": pdf.PdfText(["page"], [PRIVATE_TEXT, "other"])})
+            report = pdf.run_pdf_spike(
+                extractor, [root / "doc.pdf"], environment=ENV, clock=Clock()
+            )
+        self.assertNotIn(PRIVATE_TEXT, everything(report))
 
     def test_no_pdfs_is_an_error(self) -> None:
         with self.assertRaises(ValueError):

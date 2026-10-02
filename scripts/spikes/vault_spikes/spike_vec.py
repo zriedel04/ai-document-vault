@@ -8,6 +8,7 @@ the unit tests can run the whole spike against a plain-Python store.
 from __future__ import annotations
 
 import array
+import os
 import random
 import sqlite3
 import tempfile
@@ -89,16 +90,28 @@ class PythonStore:
 
 
 class SqliteVecStore:
-    """The real thing: a ``vec0`` table in a temporary database file."""
+    """The real thing: a ``vec0`` table in its own temporary database file.
+
+    Every store gets a database file of its own and removes it on close, so one run can build
+    several stores in the same folder (the correctness check and each measured size).
+    """
 
     def __init__(self, dim: int, directory: Path) -> None:
+        handle, name = tempfile.mkstemp(prefix="spike-vec-", suffix=".db", dir=directory)
+        os.close(handle)
+        self.path = Path(name)
+        self.db = sqlite3.connect(self.path)
+        self._load_extension()
+        self._create_table(dim)
+
+    def _load_extension(self) -> None:
         import sqlite_vec
 
-        self.path = directory / "spike-vec.db"
-        self.db = sqlite3.connect(self.path)
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
+
+    def _create_table(self, dim: int) -> None:
         self.db.execute(f"CREATE VIRTUAL TABLE v USING vec0(embedding float[{dim}])")
 
     def insert(self, rows: Iterable[tuple[int, bytes]]) -> None:
@@ -117,6 +130,8 @@ class SqliteVecStore:
 
     def close(self) -> None:
         self.db.close()
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(f"{self.path}{suffix}").unlink(missing_ok=True)
 
 
 def probe_extension_loading() -> dict[str, bool]:

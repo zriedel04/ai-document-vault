@@ -35,8 +35,9 @@ METHOD = (
     "memory is that engine's. Every image in DIR with a reference text file of the same name is "
     "recognised once. Character error rate is the edit distance between the recognised and the "
     "reference text (whitespace collapsed) divided by the reference length; time is wall-clock per "
-    "image after one untimed warm-up image. Recognised text is compared in memory and never "
-    "stored. The reference texts and the images stay outside the repository."
+    "image after one untimed warm-up image. Images per minute counts the time lost in failed "
+    "calls as well (a timeout can take minutes), and a second error figure counts each failed "
+    "image as a wrong one. Recognised text is compared in memory and never stored. The reference texts and the images stay outside the repository."
 )
 PACKAGES = ("rapidocr", "onnxruntime", "pillow")
 
@@ -101,6 +102,7 @@ def run_ocr_spike(
     error_rates: list[float] = []
     seconds: list[float] = []
     failures = 0
+    failed_seconds = 0.0
     empty = 0
     skipped_references = 0
     for sample in samples:
@@ -113,6 +115,8 @@ def run_ocr_spike(
         try:
             text = engine.recognise(sample.image)
         except Exception:
+            # The time a failing call wasted (a timeout can be minutes) counts as work done.
+            failed_seconds += clock() - begin
             failures += 1
             continue
         seconds.append(clock() - begin)
@@ -126,15 +130,21 @@ def run_ocr_spike(
         "empty_results": empty,
         "references_unusable": skipped_references,
         "load_seconds": load_seconds,
+        "seconds_spent_in_failures": failed_seconds,
     }
+    worked = sum(seconds) + failed_seconds
+    if worked > 0:
+        # Practical throughput: images read per minute of all OCR work, failed attempts included.
+        metrics["images_per_minute"] = per_second(len(seconds), worked) * 60
     if error_rates:
         metrics |= {
             "cer_mean": mean(error_rates),
+            # A call that failed read nothing, so for this figure it counts as a wrong image.
+            "cer_mean_failures_as_errors": mean([*error_rates, *[1.0] * failures]),
             "cer_median": median(error_rates),
             "cer_p90": percentile(error_rates, 0.9),
             "seconds_per_image_p50": median(seconds),
             "seconds_per_image_p95": percentile(seconds, 0.95),
-            "images_per_minute": per_second(len(seconds), sum(seconds)) * 60,
         }
     if (peak := peak_memory_mib()) is not None:
         metrics["peak_memory_mib"] = peak

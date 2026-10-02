@@ -13,10 +13,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from vault_spikes.corpus import Corpus, Document, Question, canonical_paths
+from vault_spikes.corpus import Chunk, Corpus, Document, Question, canonical_paths
 from vault_spikes.metrics import mean, peak_memory_mib, per_second
 from vault_spikes.report import Environment, Report, collect_environment
-from vault_spikes.retrieval import K, rank_by_similarity, score_all
+from vault_spikes.retrieval import K, rank_by_similarity, score_all, sources_missing_from
 
 QUESTION = (
     "How fast does each candidate embedding model run on this PC (CPU and GPU if present), how "
@@ -28,8 +28,11 @@ METHOD = (
     "process so the peak memory is that candidate's. The public corpus (`demo/corpus/`) is cut "
     "into chunks of at most 800 characters; throughput is chunks embedded per second in batches. "
     "Each answerable public question is embedded and its top 10 chunks are ranked by cosine "
-    "similarity: Recall@10 is the share of required documents found, MRR@10 the reciprocal rank of "
-    "the first acceptable document, Hit@1 whether the top chunk is acceptable. Questions whose "
+    "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
+    "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
+    "required passages found, MRR@10 the reciprocal rank of the first chunk holding an acceptable "
+    "passage, Hit@1 whether the top chunk does. Required passages that no chunk holds at all are "
+    "counted separately. Questions whose "
     "documents the script cannot read (scans, pictures) are left out and counted. Private sample "
     "documents are never read by this spike."
 )
@@ -99,13 +102,13 @@ def run_embedding_spike(
         for q in inputs.questions
         if q.answerable and q.source_paths and set(q.source_paths) <= readable
     ]
-    ranked: dict[str, list[str]] = {}
+    canonical = canonical_paths(inputs.documents)
+    ranked: dict[str, list[Chunk]] = {}
     if scored:
         query_vectors = embedder.embed_queries([q.text for q in scored])
-        chunk_docs = [chunk.doc_path for chunk in corpus.chunks]
         for question, vector in zip(scored, query_vectors, strict=True):
-            ranked[question.id] = rank_by_similarity(vector, vectors, chunk_docs, K)
-    scores = score_all(scored, ranked, canonical_paths(inputs.documents)) if scored else None
+            ranked[question.id] = rank_by_similarity(vector, vectors, corpus.chunks, K)
+    scores = score_all(scored, ranked, canonical) if scored else None
 
     metrics: dict[str, int | float] = {
         "dimensions": len(vectors[0]),
@@ -118,6 +121,7 @@ def run_embedding_spike(
         "questions_scored": scores.questions if scores else 0,
         "questions_left_out": len([q for q in inputs.questions if q.answerable])
         - (scores.questions if scores else 0),
+        "sources_not_in_any_chunk": sources_missing_from(scored, corpus.chunks, canonical),
     }
     if scores:
         metrics |= {

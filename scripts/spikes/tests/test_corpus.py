@@ -24,6 +24,7 @@ questions:
     quote: Instructor
   alternatives:
   - path: a/copy.txt
+    quote: Instructor
 - id: q2
   question: Unanswerable?
   category: not_in_vault
@@ -70,8 +71,9 @@ class LoaderTest(unittest.TestCase):
     def test_questions_are_read(self) -> None:
         questions = c.load_questions(self.write("q.yaml", QUESTIONS))
         self.assertEqual([q.id for q in questions], ["q1", "q2"])
+        self.assertEqual(questions[0].sources, (c.Source("a/syllabus.txt", "Instructor"),))
+        self.assertEqual(questions[0].alternatives, (c.Source("a/copy.txt", "Instructor"),))
         self.assertEqual(questions[0].source_paths, ("a/syllabus.txt",))
-        self.assertEqual(questions[0].alternative_paths, ("a/copy.txt",))
         self.assertFalse(questions[1].answerable)
 
     def test_malformed_question_files_are_input_errors(self) -> None:
@@ -89,6 +91,18 @@ class LoaderTest(unittest.TestCase):
             "source without path": (
                 "questions:\n- {id: a, question: q, category: c, answerable: true,"
                 " sources: [{page: 1}]}\n"
+            ),
+            "source without quote": (
+                "questions:\n- {id: a, question: q, category: c, answerable: true,"
+                " sources: [{path: a.txt, page: 1}]}\n"
+            ),
+            "source with a blank quote": (
+                "questions:\n- {id: a, question: q, category: c, answerable: true,"
+                " sources: [{path: a.txt, quote: '  '}]}\n"
+            ),
+            "alternative without quote": (
+                "questions:\n- {id: a, question: q, category: c, answerable: true,"
+                " sources: [{path: a.txt, quote: x}], alternatives: [{path: b.txt}]}\n"
             ),
             "sources not a list": (
                 "questions:\n- {id: a, question: q, category: c, answerable: true, sources: 3}\n"
@@ -211,57 +225,112 @@ class SplitTest(unittest.TestCase):
                 c.split_text("text", max_chars, overlap)
 
 
+def src(path: str, quote: str = "the passage") -> c.Source:
+    return c.Source(path, quote)
+
+
+def chunk(doc: str, text: str = "nothing relevant", page: int = 1) -> c.Chunk:
+    return c.Chunk(doc, page, text)
+
+
 def question(
-    sources: tuple[str, ...], alternatives: tuple[str, ...] = (), answerable: bool = True
+    sources: tuple[c.Source, ...],
+    alternatives: tuple[c.Source, ...] = (),
+    answerable: bool = True,
 ) -> c.Question:
     return c.Question("q", "text", "lookup", answerable, sources, alternatives)
+
+
+HIT = "the passage that answers it"
+ORIG = src("orig", "the passage that answers it")
 
 
 class RetrievalScoreTest(unittest.TestCase):
     CANON: ClassVar[dict[str, str]] = {"copy": "orig"}
 
+    def score(self, q: c.Question, ranked: list[c.Chunk]) -> tuple[float, float, float]:
+        return rv.score_question(q, ranked, self.CANON)
+
     def test_a_hit_at_rank_one(self) -> None:
-        self.assertEqual(rv.score_question(question(("orig",)), ["orig", "x"], {}), (1.0, 1.0, 1.0))
-
-    def test_rank_decides_the_reciprocal_rank(self) -> None:
-        recall, rr, hit = rv.score_question(question(("orig",)), ["x", "y", "orig"], {})
-        self.assertEqual((recall, rr, hit), (1.0, 1 / 3, 0.0))
-
-    def test_a_miss_and_the_cut_off(self) -> None:
-        self.assertEqual(rv.score_question(question(("orig",)), ["x", "y"], {}), (0.0, 0.0, 0.0))
-        ranked = [f"x{i}" for i in range(10)] + ["orig"]
-        self.assertEqual(rv.score_question(question(("orig",)), ranked, {}), (0.0, 0.0, 0.0))
-
-    def test_exact_duplicates_are_interchangeable(self) -> None:
         self.assertEqual(
-            rv.score_question(question(("orig",)), ["copy"], self.CANON), (1.0, 1.0, 1.0)
+            self.score(question((ORIG,)), [chunk("orig", f"see {HIT} here"), chunk("x")]),
+            (1.0, 1.0, 1.0),
         )
 
-    def test_an_alternative_counts_for_a_single_document_question(self) -> None:
-        q = question(("orig",), ("alt",))
-        self.assertEqual(rv.score_question(q, ["alt"], {}), (1.0, 1.0, 1.0))
+    def test_rank_decides_the_reciprocal_rank(self) -> None:
+        ranked = [chunk("x"), chunk("y"), chunk("orig", HIT)]
+        self.assertEqual(self.score(question((ORIG,)), ranked), (1.0, 1 / 3, 0.0))
 
-    def test_a_multi_document_question_needs_every_source(self) -> None:
-        q = question(("a", "b"), ("alt",))
-        recall, rr, _ = rv.score_question(q, ["a", "x"], {})
+    def test_a_miss_and_the_cut_off(self) -> None:
+        self.assertEqual(self.score(question((ORIG,)), [chunk("x"), chunk("y")]), (0.0, 0.0, 0.0))
+        ranked = [chunk(f"x{i}") for i in range(10)] + [chunk("orig", HIT)]
+        self.assertEqual(self.score(question((ORIG,)), ranked), (0.0, 0.0, 0.0))
+
+    def test_the_right_document_but_another_passage_scores_nothing(self) -> None:
+        # The top ten can all come from the right document and still miss the passage.
+        ranked = [chunk("orig", f"an unrelated paragraph number {i}") for i in range(10)]
+        self.assertEqual(self.score(question((ORIG,)), ranked), (0.0, 0.0, 0.0))
+
+    def test_the_passage_in_the_wrong_document_scores_nothing(self) -> None:
+        self.assertEqual(self.score(question((ORIG,)), [chunk("other", HIT)]), (0.0, 0.0, 0.0))
+
+    def test_whitespace_and_line_breaks_in_the_quote_or_chunk_are_ignored(self) -> None:
+        q = question((src("orig", "the passage\nthat   answers\tit"),))
+        self.assertEqual(self.score(q, [chunk("orig", f"x  {HIT}\n y")]), (1.0, 1.0, 1.0))
+
+    def test_exact_duplicates_are_interchangeable(self) -> None:
+        self.assertEqual(self.score(question((ORIG,)), [chunk("copy", HIT)]), (1.0, 1.0, 1.0))
+
+    def test_an_alternative_counts_for_a_single_passage_question(self) -> None:
+        q = question((ORIG,), (src("alt", "another way to say it"),))
+        self.assertEqual(
+            self.score(q, [chunk("alt", "here is another way to say it")]), (1.0, 1.0, 1.0)
+        )
+
+    def test_a_multi_passage_question_needs_every_source(self) -> None:
+        a, b = src("a", "first passage"), src("b", "second passage")
+        q = question((a, b), (src("alt", "alternative passage"),))
+        recall, rr, _ = self.score(q, [chunk("a", "first passage"), chunk("x")])
         self.assertEqual((recall, rr), (0.5, 1.0))
-        self.assertEqual(rv.score_question(q, ["a", "b"], {})[0], 1.0)
-        # an alternative does not stand in for a document of a multi-document question
-        self.assertEqual(rv.score_question(q, ["alt"], {})[0], 0.0)
+        both = [chunk("a", "first passage"), chunk("b", "second passage")]
+        self.assertEqual(self.score(q, both)[0], 1.0)
+        # an alternative does not stand in for a passage of a multi-passage question
+        self.assertEqual(self.score(q, [chunk("alt", "alternative passage")])[0], 0.0)
+
+    def test_two_passages_of_one_document_are_two_sources(self) -> None:
+        q = question((src("a", "first passage"), src("a", "second passage")))
+        self.assertEqual(self.score(q, [chunk("a", "first passage only")])[0], 0.5)
+
+    def test_a_long_quote_cut_by_a_chunk_boundary_is_found_by_either_half(self) -> None:
+        quote = "one two three four five six seven eight nine ten"
+        q = question((src("a", quote),))
+        self.assertEqual(self.score(q, [chunk("a", "one two three four five six")])[0], 1.0)
+        self.assertEqual(self.score(q, [chunk("a", "six seven eight nine ten")])[0], 1.0)
+        self.assertEqual(self.score(q, [chunk("a", "three four five six seven")])[0], 0.0)
+
+    def test_a_short_quote_must_be_whole(self) -> None:
+        q = question((src("a", "Total $187.92"),))
+        self.assertEqual(self.score(q, [chunk("a", "Total only")])[0], 0.0)
 
     def test_averages_skip_questions_without_a_ranking(self) -> None:
-        q1 = c.Question("q1", "t", "lookup", True, ("a",), ())
-        q2 = c.Question("q2", "t", "lookup", True, ("b",), ())
-        scores = rv.score_all([q1, q2], {"q1": ["a"]}, {})
+        q1 = c.Question("q1", "t", "lookup", True, (src("a", "alpha"),), ())
+        q2 = c.Question("q2", "t", "lookup", True, (src("b", "beta"),), ())
+        scores = rv.score_all([q1, q2], {"q1": [chunk("a", "alpha")]}, {})
         self.assertEqual(scores.questions, 1)
         self.assertEqual(scores.recall_at_10, 1.0)
         with self.assertRaises(ValueError):
             rv.score_all([q2], {}, {})
 
+    def test_sources_no_chunk_holds_are_counted(self) -> None:
+        q = question((src("a", "alpha"), src("b", "beta"), src("c", "gamma")))
+        chunks = [chunk("a", "alpha here"), chunk("c", "something else")]
+        self.assertEqual(rv.sources_missing_from([q], chunks, {}), 2)
+
     def test_ranking_by_similarity(self) -> None:
         vectors = [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]
-        docs = ["d0", "d1", "d2"]
-        self.assertEqual(rv.rank_by_similarity([1.0, 0.0], vectors, docs, k=2), ["d0", "d2"])
+        chunks = [chunk("d0"), chunk("d1"), chunk("d2")]
+        ranked = rv.rank_by_similarity([1.0, 0.0], vectors, chunks, k=2)
+        self.assertEqual([x.doc_path for x in ranked], ["d0", "d2"])
 
 
 if __name__ == "__main__":

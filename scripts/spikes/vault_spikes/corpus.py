@@ -30,13 +30,25 @@ class SpikeInputError(ValueError):
 
 
 @dataclass(frozen=True)
+class Source:
+    """One passage of one document that an answer needs: where it is and what it says."""
+
+    path: str
+    quote: str
+
+
+@dataclass(frozen=True)
 class Question:
     id: str
     text: str
     category: str
     answerable: bool
-    source_paths: tuple[str, ...]
-    alternative_paths: tuple[str, ...]
+    sources: tuple[Source, ...]
+    alternatives: tuple[Source, ...]
+
+    @property
+    def source_paths(self) -> tuple[str, ...]:
+        return tuple(source.path for source in self.sources)
 
 
 @dataclass(frozen=True)
@@ -62,20 +74,25 @@ def _mapping(value: object, what: str) -> dict[str, Any]:
     return value
 
 
-def _paths(entries: object, what: str) -> tuple[str, ...]:
+def _sources(entries: object, what: str) -> tuple[Source, ...]:
+    """Each entry needs a path and the verbatim quote that marks the passage (eval/README.md)."""
     if entries is None:
         return ()
     if not isinstance(entries, list):
         msg = f"{what} must be a list"
         raise SpikeInputError(msg)
-    paths: list[str] = []
+    sources: list[Source] = []
     for entry in entries:
-        path = _mapping(entry, what).get("path")
+        row = _mapping(entry, what)
+        path, quote = row.get("path"), row.get("quote")
         if not isinstance(path, str) or not path:
             msg = f"every entry of {what} needs a path"
             raise SpikeInputError(msg)
-        paths.append(path)
-    return tuple(paths)
+        if not isinstance(quote, str) or not quote.strip():
+            msg = f"every entry of {what} needs a quote, because retrieval is scored by passage"
+            raise SpikeInputError(msg)
+        sources.append(Source(path, quote))
+    return tuple(sources)
 
 
 def load_questions(path: Path) -> list[Question]:
@@ -100,7 +117,7 @@ def load_questions(path: Path) -> list[Question]:
         if not isinstance(answerable, bool):
             msg = "answerable must be true or false"
             raise SpikeInputError(msg)
-        sources = _paths(row.get("sources"), "sources")
+        sources = _sources(row.get("sources"), "sources")
         if answerable and not sources:
             msg = "an answerable question needs at least one source"
             raise SpikeInputError(msg)
@@ -111,7 +128,7 @@ def load_questions(path: Path) -> list[Question]:
                 category,
                 answerable,
                 sources,
-                _paths(row.get("alternatives"), "alternatives"),
+                _sources(row.get("alternatives"), "alternatives"),
             )
         )
     return questions
