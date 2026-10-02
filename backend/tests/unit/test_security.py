@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 
 from vault.core.logging import SafeFormatter
 from vault.core.security import (
-    COOKIE_NAME,
     HOST,
     LOCAL_USER,
     LocalSecurityMiddleware,
@@ -157,7 +156,7 @@ def with_token(extra: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
 @pytest.mark.parametrize("method", CHANGING)
 def test_a_changing_request_needs_a_same_origin_header(method: str) -> None:
     base = host("localhost:8765")
-    path = "/api/session"
+    path = "/api/documents"
     assert status_of(with_token(base), method=method, path=path) == 403  # no Origin at all
     same = [*base, (b"origin", b"http://localhost:8765")]
     assert status_of(with_token(same), method=method, path=path) == 200
@@ -182,12 +181,12 @@ def test_a_changing_request_needs_a_same_origin_header(method: str) -> None:
 )
 def test_a_changing_request_from_another_origin_is_refused(origin: str) -> None:
     headers = [*host("localhost:8765"), (b"origin", origin.encode())]
-    assert status_of(with_token(headers), method="POST", path="/api/session") == 403
+    assert status_of(with_token(headers), method="POST", path="/api/documents") == 403
 
 
 def test_origin_is_compared_without_regard_to_case() -> None:
     headers = [*host("LocalHost:8765"), (b"origin", b"http://localhost:8765")]
-    assert status_of(with_token(headers), method="POST", path="/api/session") == 200
+    assert status_of(with_token(headers), method="POST", path="/api/documents") == 200
 
 
 def test_two_origin_headers_are_refused() -> None:
@@ -196,7 +195,7 @@ def test_two_origin_headers_are_refused() -> None:
         (b"origin", b"http://localhost:8765"),
         (b"origin", b"http://localhost:8765"),
     ]
-    assert status_of(with_token(headers), method="POST", path="/api/session") == 403
+    assert status_of(with_token(headers), method="POST", path="/api/documents") == 403
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
@@ -206,7 +205,7 @@ def test_reading_does_not_need_an_origin(method: str) -> None:
 
 def test_the_host_is_checked_before_the_origin() -> None:
     headers = [*host("evil.example"), (b"origin", b"http://evil.example")]
-    assert status_of(with_token(headers), method="POST", path="/api/session") == 403
+    assert status_of(with_token(headers), method="POST", path="/api/documents") == 403
 
 
 # --- Token ----------------------------------------------------------------------------------
@@ -243,21 +242,26 @@ def test_a_wrong_or_malformed_token_is_refused_not_an_error(authorization: str) 
     assert status_of(headers, path="/api/documents") == 401
 
 
-def test_the_token_is_accepted_as_a_bearer_header_or_as_the_cookie() -> None:
+def test_the_token_is_accepted_as_a_bearer_header() -> None:
     base = host("localhost")
     bearer = [*base, (b"authorization", f"Bearer {TOKEN}".encode())]
     assert status_of(bearer, path="/api/documents") == 200
     lower = [*base, (b"authorization", f"bearer {TOKEN}".encode())]
     assert status_of(lower, path="/api/documents") == 200
-    cookie = [*base, (b"cookie", f"other=1; {COOKIE_NAME}={TOKEN}".encode())]
-    assert status_of(cookie, path="/api/documents") == 200
 
 
-def test_the_token_is_not_accepted_in_the_query_string_or_a_differently_named_cookie() -> None:
+@pytest.mark.parametrize("name", ["vault_session", "session", "token", "local-token"])
+def test_a_cookie_never_carries_the_token(name: str) -> None:
+    # A browser sends cookies to every port on the host, so a cookie must never be accepted:
+    # another local program would receive it.
+    headers = [*host("localhost"), (b"cookie", f"other=1; {name}={TOKEN}".encode())]
+    assert status_of(headers, path="/api/documents") == 401
+
+
+def test_the_token_is_not_accepted_in_the_query_string() -> None:
     import asyncio
 
     base = host("localhost")
-    assert status_of([*base, (b"cookie", f"session={TOKEN}".encode())], path="/api/x") == 401
     middleware = LocalSecurityMiddleware(inner_app, token=TOKEN)
     scope: Message = {
         "type": "http",
@@ -278,22 +282,22 @@ def test_the_token_is_not_accepted_in_the_query_string_or_a_differently_named_co
     assert sent[0]["status"] == 401
 
 
-def test_a_bad_bearer_header_does_not_fall_back_to_a_good_cookie_by_accident() -> None:
-    # The bearer header is the one that is checked when it is present.
+def test_a_bad_bearer_header_is_not_rescued_by_a_cookie() -> None:
     headers = [
         *host("localhost"),
         (b"authorization", b"Bearer wrong"),
-        (b"cookie", f"{COOKIE_NAME}={TOKEN}".encode()),
+        (b"cookie", f"vault_session={TOKEN}".encode()),
     ]
     assert status_of(headers, path="/api/documents") == 401
 
 
-def test_only_the_open_paths_work_without_a_token() -> None:
+def test_only_the_health_check_works_without_a_token() -> None:
     base = host("localhost")
     assert status_of(base, path="/api/health") == 200
     origin = [*base, (b"origin", b"http://localhost")]
-    assert status_of(origin, method="POST", path="/api/session") == 200
-    assert status_of(origin, method="PUT", path="/api/session") == 401
+    for method in ("POST", "PUT", "DELETE"):
+        assert status_of(origin, method=method, path="/api/health") == 401
+    assert status_of(origin, method="POST", path="/api/session") == 401  # no sign-in call exists
     assert status_of(base, path="/api/session") == 401  # GET /api/session needs the token
 
 
@@ -345,37 +349,28 @@ def test_a_foreign_host_is_refused_even_with_the_token(app: FastAPI, token: str)
 def test_a_foreign_origin_is_refused_even_with_the_token(app: FastAPI, token: str) -> None:
     headers = {"Authorization": f"Bearer {token}", "Origin": "http://evil.example"}
     page_on_another_site = TestClient(app, base_url="http://localhost", headers=headers)
-    assert page_on_another_site.post("/api/session").status_code == 403
+    assert page_on_another_site.post("/api/documents").status_code == 403
 
 
-def test_the_token_signs_in_with_a_cookie_the_page_cannot_read(
+def test_the_token_identifies_the_user_as_a_bearer_header(
     anonymous: TestClient, token: str
 ) -> None:
-    refused = anonymous.post(
-        "/api/session", headers={"Authorization": "Bearer wrong", "Origin": "http://localhost"}
-    )
-    assert refused.status_code == 401
-    assert "set-cookie" not in refused.headers
-
-    response = anonymous.post(
-        "/api/session", headers={"Authorization": f"Bearer {token}", "Origin": "http://localhost"}
-    )
-    assert response.status_code == 204
-    cookie = response.headers["set-cookie"].lower()
-    assert cookie.startswith(f"{COOKIE_NAME}={token}".lower())
-    assert "httponly" in cookie
-    assert "samesite=strict" in cookie
-
-    me = anonymous.get("/api/session", headers={"Cookie": f"{COOKIE_NAME}={token}"})
+    me = anonymous.get("/api/session", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json() == {"id": LOCAL_USER.id, "name": LOCAL_USER.name}
 
 
-def test_signing_in_needs_the_origin_and_the_token(anonymous: TestClient, token: str) -> None:
-    assert (
-        anonymous.post("/api/session", headers={"Authorization": f"Bearer {token}"}).status_code
-        == 403
-    )
+def test_no_response_sets_a_cookie(anonymous: TestClient, token: str) -> None:
+    # Nothing in the app may hand the token to the browser as a cookie (it would reach every port).
+    headers = {"Authorization": f"Bearer {token}", "Origin": "http://localhost"}
+    for method, path in (("GET", "/api/health"), ("GET", "/api/session"), ("POST", "/api/session")):
+        response = anonymous.request(method, path, headers=headers)
+        assert "set-cookie" not in response.headers, (method, path)
+
+
+def test_there_is_no_sign_in_call(anonymous: TestClient, token: str) -> None:
+    headers = {"Authorization": f"Bearer {token}", "Origin": "http://localhost"}
+    assert anonymous.post("/api/session", headers=headers).status_code == 405
     assert anonymous.post("/api/session", headers={"Origin": "http://localhost"}).status_code == 401
 
 

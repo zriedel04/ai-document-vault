@@ -37,14 +37,7 @@ export interface paths {
          */
         get: operations["read_session_api_session_get"];
         put?: never;
-        /**
-         * Start Session
-         * @description Check the token (``Authorization: Bearer ...``) and set the session cookie.
-         *
-         *     The middleware leaves this one path open because the caller does not have the cookie yet, so
-         *     the check is made here.
-         */
-        post: operations["start_session_api_session_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -118,24 +111,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Me"];
                 };
-            };
-        };
-    };
-    start_session_api_session_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

@@ -8,9 +8,11 @@ passes through :class:`LocalSecurityMiddleware`, which is deny by default:
    rebinding, where an attacker's domain is pointed at 127.0.0.1 and the browser sends that domain.
 2. A request that can change something (any method but GET, HEAD and OPTIONS) must carry an
    ``Origin`` that is exactly the origin the ``Host`` header names, so another site cannot send it.
-3. Every ``/api`` path except the public ones below needs the per-install token, as
-   ``Authorization: Bearer <token>`` or as the ``vault_session`` cookie that ``POST /api/session``
-   sets after checking the token. The cookie is HttpOnly and ``SameSite=Strict``.
+3. Every ``/api`` path except the public one below needs the per-install token as
+   ``Authorization: Bearer <token>``, and only that. There is deliberately no cookie: a browser
+   sends cookies to every port on the same host, so another local program (for example a dev
+   server on ``localhost:3000``) would receive the token. The page keeps the token in its own
+   origin's storage and sends it explicitly, which no other port can read.
 
 There is no CORS configuration, on purpose: no other origin is ever allowed. A rejection is logged
 as its reason only (never a header value), and the response repeats nothing the client sent.
@@ -31,7 +33,6 @@ from pathlib import Path
 from typing import Final
 
 from starlette.datastructures import Headers
-from starlette.requests import cookie_parser
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -39,11 +40,9 @@ from vault.core.logging import log_event
 
 logger = logging.getLogger(__name__)
 
-COOKIE_NAME: Final = "vault_session"
 API_PREFIX: Final = "/api"
-# The only API requests that do not need the token: liveness, and the call that exchanges the
-# token for the session cookie (it checks the token itself).
-PUBLIC_API: Final = frozenset({("GET", "/api/health"), ("POST", "/api/session")})
+# The only API request that does not need the token: liveness.
+PUBLIC_API: Final = frozenset({("GET", "/api/health")})
 SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 # Always use ``fullmatch`` with these (``$`` also matches before a trailing newline).
 HOST = re.compile(r"(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?", re.IGNORECASE)
@@ -104,13 +103,12 @@ def token_matches(expected: str, supplied: str) -> bool:
 
 
 def supplied_token(headers: Headers) -> str | None:
-    """The token the request carries: a bearer header first, then the session cookie."""
+    """The token the request carries as a bearer header, or None. Cookies are never read."""
     authorization = headers.get("authorization", "")
     scheme, _, value = authorization.partition(" ")
     if scheme.lower() == "bearer" and value:
         return value
-    cookies = cookie_parser(headers.get("cookie", ""))
-    return cookies.get(COOKIE_NAME)
+    return None
 
 
 def _host_is_local(headers: Headers) -> str | None:
