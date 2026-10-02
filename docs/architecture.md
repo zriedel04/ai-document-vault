@@ -22,6 +22,7 @@ These do not change the architecture. They record where the repository setup dif
 | Section 20 (CI on `windows-latest`) | CI runs on Windows | Linux CI runs on every push and Windows CI on pull requests only, to stay within the 2,000 free Actions minutes per month on private repositories |
 | Section 1 (executive summary) | Wording said one SQLite database holds full-text and vector search | Corrected to match section 5 and ADR 0004: full-text search lives in `vault.db` and vectors live in a separate, rebuildable `index.db`, so the backed-up file never contains embeddings. The architecture is unchanged; only the summary wording was stale |
 | Decisions 7, 8 and 12 (PDF library part) | Embedding model, OCR engine and PDF extraction are recommended, to be confirmed by Phase 0 spikes | Recorded as Proposed ADRs 0013 to 0015. Nothing hardware-dependent is Accepted until the spikes have run on the Windows PC |
+| Section 10 (application security), section 5 (vault layout) | Origin/Host checks and "a random per-install token in a SameSite=Strict cookie or header"; a `current_user` dependency; the app refuses a vault inside a Git working tree | Implemented in `backend/src/vault/core/security.py` and `storage/layout.py`. The plan left the token's delivery open, so: the token is a file named `local-token` in the vault folder (mode 0600, and on Windows the vault folder gets an owner-only access list that is checked at every start), accepted only as `Authorization: Bearer`. A cookie was tried first and dropped after review: a browser sends cookies to every port on the same host, so another local program would have received the token, and `SameSite` does not isolate ports. The page keeps the token in `sessionStorage` (per origin) and sends it in the header. Only `GET /api/health` is open; every other `/api` path needs the token. `local-token` is added to the vault layout in section 5 and to the ignore rules. The launcher (PR 6) and the next frontend change will hand the token to the browser; until then the API is reachable only by a client that holds it |
 
 ## 1. Executive Summary
 
@@ -164,6 +165,7 @@ D:\AIVault\
   derived\            per document version: page text JSON, OCR JSON (with   [rebuildable]
     <version_id>\     word boxes), thumbnails, page images used for OCR
   config.toml         settings, model routing, price table (no secrets)       [BACK UP]
+  local-token         the access token for the local API (owner-only)       [BACK UP]
   logs\               rotating logs, no document text                         [optional]
   backups\            local snapshots before migrations                      [n/a]
 ```
@@ -438,7 +440,7 @@ The only data that ever leaves your PC is the question plus the specific passage
 
 | Risk | Mitigation |
 | --- | --- |
-| Other websites calling your localhost API (CSRF, DNS rebinding) | Bind to 127.0.0.1 only; reject requests whose `Host` isn't localhost/127.0.0.1; require same `Origin` on state-changing requests; a random per-install token in a SameSite=Strict cookie or header; no permissive CORS |
+| Other websites calling your localhost API (CSRF, DNS rebinding) | Bind to 127.0.0.1 only; reject requests whose `Host` isn't localhost/127.0.0.1; require same `Origin` on state-changing requests; a random per-install token sent as an `Authorization` header (not a cookie; see the implementation notes at the top); no permissive CORS |
 | Malicious or malformed files | Size caps; type detected from content (magic bytes), not extension; allowlist of types; parsing in a child process with timeout and memory limit; zip-bomb limits for DOCX/PPTX/XLSX (they are zip files); files are never executed or opened with their default Windows handler |
 | Path traversal, bad filenames | Stored files are named by hash; original names are data only; exports sanitize names (reserved Windows names, illegal characters, length) |
 | Serving files back to the browser | Originals served with correct content type, `X-Content-Type-Options: nosniff`, a strict Content-Security-Policy, and `Content-Disposition: attachment` for anything not rendered by our viewer; HTML and SVG never rendered inline; PDF.js with scripting disabled |
