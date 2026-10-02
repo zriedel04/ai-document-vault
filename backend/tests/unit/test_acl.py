@@ -390,7 +390,7 @@ class TestEnsureVaultOnWindows:
         layout.ensure_vault(tmp_path / "AIVault")
         assert verified == [[]]
 
-    def test_the_existing_token_database_and_subfolders_are_verified_before_the_token_is_read(
+    def test_every_entry_in_the_vault_folder_is_verified_before_the_token_is_read(
         self, tmp_path: Path, verified: list[list[str]]
     ) -> None:
         root = tmp_path / "AIVault"
@@ -400,17 +400,40 @@ class TestEnsureVaultOnWindows:
             (root / name).write_text("x", encoding="utf-8")
         layout.ensure_vault(root)
         assert verified == [
-            [
-                "local-token",
-                "vault.db",
-                "vault.db-wal",
-                "index.db-shm",
-                "blobs",
-                "derived",
-                "logs",
-                "backups",
-            ]
-        ]  # other.txt is not a file the program trusts, and absent entries are left out
+            sorted(
+                [
+                    "local-token",
+                    "vault.db",
+                    "vault.db-wal",
+                    "index.db-shm",
+                    "other.txt",  # anything else in the folder, so a stray file cannot slip by
+                    "blobs",
+                    "derived",
+                    "logs",
+                    "backups",
+                ]
+            )
+        ]  # entries that do not exist are not asked for twice
+
+    @pytest.mark.parametrize("database", ["vault.db", "index.db"])
+    @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+    def test_every_sqlite_side_file_of_each_database_is_trusted(
+        self, tmp_path: Path, suffix: str, database: str
+    ) -> None:
+        paths = layout.VaultPaths(tmp_path)
+        assert tmp_path / f"{database}{suffix}" in paths.trusted_entries
+
+    @pytest.mark.parametrize(
+        "name", ["vault.db-journal", "index.db-journal", "vault.db-mj1A2B3C4D", "copy of vault.db"]
+    )
+    def test_a_side_file_or_stray_copy_is_verified_even_when_not_named(
+        self, tmp_path: Path, verified: list[list[str]], name: str
+    ) -> None:
+        root = tmp_path / "AIVault"
+        root.mkdir()
+        (root / name).write_text("x", encoding="utf-8")
+        layout.ensure_vault(root)
+        assert name in verified[0]
 
     def test_an_open_existing_entry_stops_the_start_before_the_subfolders_are_made(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -515,6 +538,24 @@ class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI j
         paths.token_file.write_text("x", encoding="utf-8")
         self.grant(paths.token_file, "S-1-5-32-545", flags="")  # Users may read the token file
         with pytest.raises(layout.VaultPathError, match="local-token"):
+            layout.ensure_vault(root)
+
+    def test_an_open_rollback_journal_stops_the_start(self, tmp_path: Path) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        journal = Path(f"{paths.db}-journal")
+        journal.write_bytes(b"x")
+        self.grant(journal, "S-1-5-19", flags="")  # one named account, not a broad group
+        with pytest.raises(layout.VaultPathError, match=r"vault\.db-journal"):
+            layout.ensure_vault(root)
+
+    def test_an_open_file_with_an_unexpected_name_stops_the_start(self, tmp_path: Path) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        stray = paths.root / "vault.db-mj1A2B3C4D"
+        stray.write_bytes(b"x")
+        self.grant(stray, "S-1-5-32-545", flags="")
+        with pytest.raises(layout.VaultPathError, match=r"vault\.db-mj1A2B3C4D"):
             layout.ensure_vault(root)
 
     def test_an_open_database_file_stops_the_start(self, tmp_path: Path) -> None:

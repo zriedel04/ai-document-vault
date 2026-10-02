@@ -53,9 +53,16 @@ class VaultPaths:
 
     @property
     def trusted_entries(self) -> tuple[Path, ...]:
-        """The files and folders the program reads at start-up and trusts to be private."""
+        """The files and folders the program reads at start-up and trusts to be private.
+
+        SQLite keeps a database's recent pages in side files next to it: the write-ahead log and
+        its shared-memory index (``-wal``, ``-shm``) and the rollback journal (``-journal``).
+        Any of them can hold database pages, so each is as private as the database.
+        """
         databases = (self.db, self.index_db)
-        sidecars = tuple(Path(f"{db}{suffix}") for db in databases for suffix in ("-wal", "-shm"))
+        sidecars = tuple(
+            Path(f"{db}{suffix}") for db in databases for suffix in ("-wal", "-shm", "-journal")
+        )
         return (
             self.token_file,
             *databases,
@@ -65,6 +72,18 @@ class VaultPaths:
             self.logs,
             self.backups,
         )
+
+    def entries_to_verify(self) -> list[Path]:
+        """Every existing entry the start-up access check covers: the named ones above, and
+        whatever else sits directly in the vault folder.
+
+        A fixed list of names misses what SQLite or a person puts there under another name (a
+        super-journal, a copied backup, a stray file), so the folder's own contents are listed
+        too. Files deeper inside the four subfolders inherit the subfolder's list.
+        """
+        entries = {p for p in self.trusted_entries if p.exists()}
+        entries.update(self.root.iterdir())
+        return sorted(entries)
 
     @property
     def folders(self) -> tuple[Path, ...]:
@@ -126,7 +145,7 @@ def ensure_vault(path: Path) -> VaultPaths:
         # Entries that were already there may carry their own access list (a file moved in
         # from another folder keeps it). New ones inherit the private folder's.
         try:
-            acl.verify_private([p for p in paths.trusted_entries if p.exists()])
+            acl.verify_private(paths.entries_to_verify())
         except acl.VaultAccessError as error:
             raise VaultPathError(str(error)) from error
     for folder in paths.folders:
