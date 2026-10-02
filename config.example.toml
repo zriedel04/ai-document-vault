@@ -9,5 +9,9 @@ path = 'D:\AIVault'
 host = "127.0.0.1"
 port = 8765
 
+[frontend]
+# The built frontend (npm run build in frontend/). Defaults to frontend/dist in this repository.
+# dist = 'C:\path\to\frontend\dist'
+
 [logging]
 level = "INFO"

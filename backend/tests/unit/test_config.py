@@ -24,6 +24,7 @@ def test_defaults_without_a_file() -> None:
     assert settings.server.port == 8765
     assert settings.logging.level == "INFO"
     assert settings.vault.path is None
+    assert settings.frontend.dist is None
 
 
 def test_toml_file_values(tmp_path: Path) -> None:
@@ -126,3 +127,10 @@ def test_settings_are_immutable() -> None:
     settings = Settings()
     with pytest.raises(ValidationError):
         settings.server.port = 1  # type: ignore[misc]
+
+
+def test_the_example_config_is_valid() -> None:
+    example = Path(__file__).resolve().parents[3] / "config.example.toml"
+    settings = load_settings(example)
+    assert settings.server.port == 8765
+    assert settings.frontend.dist is None  # the example leaves the default in place

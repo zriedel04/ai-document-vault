@@ -32,6 +32,8 @@ py -m pip install --user pre-commit
 pre-commit install
 ```
 
+Frontend work needs Node 22.13 or newer on an even-numbered line (22.13+, 24 or 26+; see `frontend/README.md`). From `frontend/`, `npm ci` installs the locked dependencies, and the commands in [`frontend/README.md`](frontend/README.md) run the tests, lint, type check and build. Commit `frontend/package-lock.json` with any dependency change. After an API change, regenerate `frontend/openapi.json` and the TypeScript types as described there; CI fails if they are stale.
+
 Backend work needs Python 3.12 and [uv](https://docs.astral.sh/uv/). From `backend/`, `uv sync` installs the locked dependencies, and the commands in [`backend/README.md`](backend/README.md) run the tests, Ruff, mypy and the licence check. CI runs the same checks. Commit `backend/uv.lock` with any dependency change, and add a dependency only if its licence passes `scripts/check_python_licenses.py` (see Licences below).
 
 ## Workflow
@@ -52,7 +54,7 @@ Allowed: MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0, Python-2.0, 
 Case by case, with a note in the PR: LGPL, MPL, and custom model licences.
 Not allowed: GPL, AGPL, SSPL, non-commercial licences.
 
-`scripts/check_python_licenses.py` enforces this for Python packages in CI. It fails on a disallowed licence and on a package whose licence it cannot read. An SPDX `WITH` exception is accepted only if it is on the script's `ALLOWED_EXCEPTIONS` list (today `LLVM-exception`); an unknown or custom exception fails. A package accepted case by case is listed in its `REVIEWED` table with the licence it was reviewed under and the reason, and the exception is dropped if that licence changes. The runtime-only check runs with `--strict`, which ignores `REVIEWED`, so an exception can only cover development tools that are not shipped (today: `pathspec`, MPL-2.0, through mypy).
+`scripts/check_python_licenses.py` and `scripts/check_npm_licenses.py` enforce this for Python and npm packages in CI. It fails on a disallowed licence and on a package whose licence it cannot read. In the Python check, an SPDX `WITH` exception is accepted only if it is on the script's `ALLOWED_EXCEPTIONS` list (today `LLVM-exception`); an unknown or custom exception fails. A package accepted case by case is listed in its `REVIEWED` table with the licence it was reviewed under and the reason, and the exception is dropped if that licence changes. The runtime-only check runs with `--strict`, which ignores `REVIEWED`, so an exception can only cover development tools that are not shipped (today: `pathspec`, MPL-2.0, through mypy; and in the frontend `lightningcss`, MPL-2.0, `caniuse-lite`, CC-BY-4.0, and a few packages under MIT-0 or BlueOak-1.0.0, which are as permissive as MIT and ISC but are not on the allowed list yet).
 
 A written licence audit is done before the repository is made public.
 
