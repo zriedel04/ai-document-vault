@@ -35,6 +35,7 @@ MAIL_ASK = "emails/advisor-extension-request.txt"
 MAIL_REPLY = "emails/advisor-reply.txt"
 STANDUP_0908 = "notes/standup-2026-09-08.txt"
 STANDUP_0915 = "notes/standup-2026-09-15.txt"
+STANDUP_0915_EDITED = "notes/standup-2026-09-15-edited.txt"
 STANDUP_0922 = "notes/standup-2026-09-22.txt"
 CONTRACT = "notes/team-contract.md"
 JOURNAL = "notes/project-journal.md"
@@ -224,6 +225,8 @@ _RAW: list[_Row] = [
         "SQLite.",
         (s(STANDUP_0915, "Jordan: chose SQLite for the prototype."),),
         (),
+        # The edited copy changes other lines and keeps this one, so it answers just as well.
+        alternatives=(s(STANDUP_0915_EDITED, "Jordan: chose SQLite for the prototype."),),
     ),
     _q(
         "lookup",
@@ -412,6 +415,12 @@ _RAW: list[_Row] = [
             ),
         ),
         (REQ_V1,),
+        alternatives=(
+            s(
+                JOURNAL,
+                "We removed in-app chat from the first release because it would take too long to build.",
+            ),
+        ),
     ),
     _q(
         "multi_doc",

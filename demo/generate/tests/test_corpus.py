@@ -282,6 +282,32 @@ class EvalSetTests(unittest.TestCase):
             if q.alternatives:
                 self.assertNotEqual(q.category, "multi_doc", f"{q.id}: every source is needed")
 
+    def test_every_document_that_holds_a_source_quote_is_cited(self) -> None:
+        # The other direction of the alternatives rule: a near-duplicate that keeps the answer
+        # (the edited standup repeats the SQLite line) answers the question as well as the
+        # original, so a retriever that returns it must not be scored as a miss. Exact copies
+        # are matched to their original when scoring, so they are skipped. A paraphrase in
+        # another document (the journal restating a decision in its own words) is not caught
+        # here and is checked in review.
+        for q in QUESTIONS:
+            cited = {s.path for s in (*q.sources, *q.alternatives)}
+            for src in q.sources:
+                for path, doc in DOCS.items():
+                    if doc.exact_duplicate_of or path in cited:
+                        continue
+                    with self.subTest(question=q.id, document=path):
+                        self.assertNotIn(norm(src.quote), norm(" ".join(doc.page_texts())))
+
+    def test_the_edited_standup_is_an_alternative_for_the_sqlite_question(self) -> None:
+        question = next(q for q in QUESTIONS if q.question.startswith("Which database did Jordan"))
+        self.assertEqual(
+            {a.path for a in question.alternatives}, {"notes/standup-2026-09-15-edited.txt"}
+        )
+
+    def test_the_journal_is_an_alternative_for_the_in_app_chat_question(self) -> None:
+        question = next(q for q in QUESTIONS if q.question.startswith("Is in-app chat part"))
+        self.assertEqual({a.path for a in question.alternatives}, {"notes/project-journal.md"})
+
     def test_an_alternative_carries_every_number_of_the_expected_answer(self) -> None:
         # An alternative is as good as a source, so it must answer the question on its own. This
         # catches a missing time, date, year or count; a missing fact in words is left to review.

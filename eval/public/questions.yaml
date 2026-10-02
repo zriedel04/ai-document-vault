@@ -127,6 +127,10 @@ questions:
   - path: notes/standup-2026-09-15.txt
     page: null
     quote: 'Jordan: chose SQLite for the prototype.'
+  alternatives:
+  - path: notes/standup-2026-09-15-edited.txt
+    page: null
+    quote: 'Jordan: chose SQLite for the prototype.'
 - id: q014
   question: How many items does a list endpoint return by default and what is the most a client can ask
     for?
@@ -341,6 +345,10 @@ questions:
   - path: project/requirements-v2.docx
     page: null
     quote: Payments, video calls, in-app chat and a native mobile application are out of scope.
+  alternatives:
+  - path: notes/project-journal.md
+    page: null
+    quote: We removed in-app chat from the first release because it would take too long to build.
   distractors:
   - project/requirements-v1.docx
 - id: q031
