@@ -10,8 +10,19 @@ from fastapi.testclient import TestClient
 
 from vault.core.config import Settings
 from vault.main import create_app
+from vault.storage import acl
 
 LOCAL = "http://localhost"
+
+
+@pytest.fixture(autouse=True)
+def _skip_powershell(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Starting PowerShell for every test vault would slow the Windows job for no gain.
+
+    ``tests/unit/test_acl.py`` covers the Windows access-list step, including a real run.
+    """
+    if request.module.__name__.rsplit(".", 1)[-1] != "test_acl":
+        monkeypatch.setattr(acl, "IS_WINDOWS", False)
 
 
 @pytest.fixture

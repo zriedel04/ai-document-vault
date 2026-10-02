@@ -8,7 +8,6 @@ belong here (see ``config.example.toml``).
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import tomllib
 from pathlib import Path
@@ -19,7 +18,8 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 CONFIG_ENV_VAR = "AIVAULT_CONFIG"
 DEFAULT_CONFIG_FILE = "config.toml"
-LOOPBACK_NAMES = frozenset({"localhost"})
+# Keep in step with the Host pattern in vault.core.security.
+SERVER_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class _Section(BaseModel):
@@ -46,25 +46,19 @@ class ServerSettings(_Section):
     @field_validator("host")
     @classmethod
     def _loopback_only(cls, host: str) -> str:
-        """The server is local-only: refuse any address other than loopback.
+        """The server is local-only: only the three spellings the Host check accepts.
 
-        ``[::1]`` is accepted as a spelling of ``::1`` and returned without the brackets, which
-        is the form uvicorn and the socket layer expect.
+        Another loopback address such as ``127.0.0.2`` binds fine, but every request to it would
+        carry a ``Host`` header that the security middleware rejects (``vault.core.security.HOST``
+        names the same three spellings), so it is refused here instead of starting an app nobody
+        can use. ``[::1]`` is accepted as a spelling of ``::1`` and returned without the
+        brackets, which is the form uvicorn and the socket layer expect.
         """
-        if host in LOOPBACK_NAMES:
-            return host
-        if host.startswith("[") and host.endswith("]"):
-            host = host[1:-1]
-        try:
-            is_loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            is_loopback = False
-        if not is_loopback:
-            msg = (
-                f"server.host must be a loopback address (127.0.0.1, ::1, localhost), not {host!r}"
-            )
+        bare = "::1" if host == "[::1]" else host
+        if bare not in SERVER_HOSTS:
+            msg = f"server.host must be one of 127.0.0.1, localhost or ::1, not {host!r}"
             raise ValueError(msg)
-        return host
+        return bare
 
 
 class LoggingSettings(_Section):

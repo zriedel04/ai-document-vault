@@ -17,7 +17,7 @@ Run from this folder. Python 3.12 and [uv](https://docs.astral.sh/uv/) are requi
 
 ## Settings
 
-`config.toml` (copy `../config.example.toml`) is read from the current folder, or from the path in `AIVAULT_CONFIG`. Environment variables override it: `AIVAULT_SERVER__PORT=9000`. Unknown keys are an error. The server only accepts a loopback `server.host`.
+`config.toml` (copy `../config.example.toml`) is read from the current folder, or from the path in `AIVAULT_CONFIG`. Environment variables override it: `AIVAULT_SERVER__PORT=9000`. Unknown keys are an error. The server only accepts `127.0.0.1`, `localhost` or `::1` as `server.host`, the three spellings the Host check accepts.
 
 ## Security
 
@@ -28,7 +28,7 @@ Every request passes through `vault.core.security.LocalSecurityMiddleware`, whic
 - Every `/api` path except `GET /api/health` and `POST /api/session` needs the install's token, as `Authorization: Bearer <token>` or as the `vault_session` cookie. `POST /api/session` checks the bearer token and sets that cookie (HttpOnly, `SameSite=Strict`; a browser keeps it per host name, so open the app at one address, such as `http://127.0.0.1:8765`, and stay on it). `GET /api/session` returns the signed-in user.
 - There is no CORS configuration: no other origin is ever allowed. A refusal is a 403 (Host or Origin) or 401 (token) with a fixed body, and the log line carries the reason only, never a header value.
 
-The token is the file `local-token` in the vault folder, created on first start with owner-only permissions where the OS supports it (on Windows the folder's permissions apply, so keep the vault in your own profile or data drive). A file that is not a well-formed token stops the start-up: delete it to get a new one. Without a vault folder (demo mode, tests) the token is random for that process and nobody holds it, so only the open endpoints work. Every endpoint takes the user from `Depends(current_user)`, which today returns the one local user; real login would change that function only.
+The token is the file `local-token` in the vault folder, created on first start with mode 0600. On Windows `chmod` does nothing useful and a folder under a drive root lets every account on the PC read it, so `vault.storage.acl` makes the vault folder owner-only (it removes the inherited entries and grants only the current user, through PowerShell), reads the access list back and refuses to start if Users, Authenticated Users, Everyone or another broad group can still get in. A folder that already has files and is open is not changed; the error says how to fix it. A file that is not a well-formed token stops the start-up: delete it to get a new one. Without a vault folder (demo mode, tests) the token is random for that process and nobody holds it, so only the open endpoints work. Every endpoint takes the user from `Depends(current_user)`, which today returns the one local user; real login would change that function only.
 
 ## Vault folder and database
 

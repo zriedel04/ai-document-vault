@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from vault.core.config import CONFIG_ENV_VAR, Settings, load_settings
+from vault.core.security import HOST
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +93,6 @@ def test_invalid_files_are_rejected(tmp_path: Path, text: str) -> None:
     ("host", "expected"),
     [
         ("127.0.0.1", "127.0.0.1"),
-        ("127.0.0.2", "127.0.0.2"),
         ("::1", "::1"),
         ("[::1]", "::1"),  # brackets are dropped: uvicorn and sockets want the bare address
         ("localhost", "localhost"),
@@ -114,6 +114,31 @@ def test_bracketed_host_reaches_uvicorn_without_brackets() -> None:
 def test_non_loopback_hosts_are_rejected(host: str) -> None:
     with pytest.raises(ValidationError):
         Settings.model_validate({"server": {"host": host}})
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.2",
+        "127.1",
+        "0:0:0:0:0:0:0:1",
+        "LOCALHOST",
+        "localhost ",
+        "[localhost]",
+        "[127.0.0.1]",
+    ],
+)
+def test_a_loopback_address_the_host_check_would_reject_is_refused(host: str) -> None:
+    # They bind, but requests to them carry a Host header the security middleware rejects.
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"server": {"host": host}})
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]"])
+def test_every_accepted_host_is_accepted_by_the_host_check(host: str) -> None:
+    bare = Settings.model_validate({"server": {"host": host}}).server.host
+    spelled = f"[{bare}]" if ":" in bare else bare
+    assert HOST.fullmatch(f"{spelled}:8765")
 
 
 def test_environment_cannot_set_a_non_loopback_host(monkeypatch: pytest.MonkeyPatch) -> None:

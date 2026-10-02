@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from vault.storage import acl
+
 
 class VaultPathError(ValueError):
     """The configured vault folder cannot be used."""
@@ -85,15 +87,26 @@ def validate_vault_root(path: Path) -> Path:
     if _git_root_containing(root) is not None:
         msg = (
             "the vault folder is inside a Git repository; choose a folder outside every "
-            "repository, for example D:\\AIVault"
+            "repository, for example C:\\AIVault"
         )
         raise VaultPathError(msg)
     return root
 
 
 def ensure_vault(path: Path) -> VaultPaths:
-    """Validate ``path``, then create the vault folder and its subfolders."""
+    """Validate ``path``, then create the vault folder and its subfolders.
+
+    On Windows the vault folder is first made private to its owner (see :mod:`vault.storage.acl`),
+    before the subfolders, the databases or the token are created inside it, so they inherit that.
+    """
     paths = VaultPaths(validate_vault_root(path))
+    created = not paths.root.exists()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    if acl.IS_WINDOWS:
+        try:
+            acl.secure_vault_folder(paths.root, created=created)
+        except acl.VaultAccessError as error:
+            raise VaultPathError(str(error)) from error
     for folder in paths.folders:
         folder.mkdir(parents=True, exist_ok=True)
     return paths
