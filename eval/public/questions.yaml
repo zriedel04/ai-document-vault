@@ -277,8 +277,9 @@ questions:
   question: How did the decision about in-app chat develop over time?
   category: multi_doc
   answerable: true
-  answer: It was an open question in a team standup and again in a team meeting, and it was later removed
-    from the first release because it would take too long to build.
+  answer: It was an open question in a team standup and again in a team meeting, was written into the
+    first draft of the requirements as requirement FR-6 (an in-app chat for the members of a group), and
+    was later removed from the first release because it would take too long to build.
   sources:
   - path: notes/standup-2026-09-22.txt
     page: null
@@ -286,11 +287,12 @@ questions:
   - path: scans/team-meeting-notes-scan.pdf
     page: 2
     quote: '- Should the first release include in-app chat?'
+  - path: project/requirements-v1.docx
+    page: null
+    quote: 'FR-6: The system shall provide an in-app chat for the members of a group.'
   - path: notes/project-journal.md
     page: null
     quote: We removed in-app chat from the first release because it would take too long to build.
-  distractors:
-  - project/requirements-v1.docx
 - id: q026
   question: How much did Sam Patel's laptop screen repair cost?
   category: lookup
@@ -368,7 +370,11 @@ questions:
   sources:
   - path: project/requirements-v1.docx
     page: null
-    quote: 'FR-8: The system shall send an email reminder 24 hours before a scheduled meeting.'
+    quote: 'FR-8: The system shall send an email reminder 24 hours before a scheduled meeting. 3. Non-functional
+      requirements'
+  - path: project/requirements-v1.docx
+    page: null
+    quote: 'NFR-5: Passwords shall be stored only as salted hashes. 4. Out of scope'
   - path: project/requirements-v2.docx
     page: null
     quote: 'FR-8: The system shall let a student export a scheduled meeting as an iCalendar file.'
@@ -383,10 +389,11 @@ questions:
     quote: 'FR-11: The system shall let a student report inappropriate content to an administrator.'
   - path: project/requirements-v2.docx
     page: null
-    quote: 'FR-12: The system shall let an administrator import the course list from a CSV file.'
+    quote: 'FR-12: The system shall let an administrator import the course list from a CSV file. 3. Non-functional
+      requirements'
   - path: project/requirements-v2.docx
     page: null
-    quote: 'NFR-6: All pages shall meet the WCAG 2.1 level AA contrast requirements.'
+    quote: 'NFR-6: All pages shall meet the WCAG 2.1 level AA contrast requirements. 4. Out of scope'
 - id: q032
   question: When is Assignment 2 due for Team Northwind?
   category: version
@@ -548,7 +555,17 @@ questions:
   sources:
   - path: data/project-budget.csv
     page: null
-    quote: Total,82.90
+    quote: 'item,cost_usd
+
+      Domain name,12.00
+
+      Hosting for three months,45.00
+
+      Poster printing,7.50
+
+      Demo day snacks,18.40
+
+      Total,82.90'
 - id: q046
   question: Does the poster printing receipt agree with the project budget?
   category: multi_doc
@@ -560,7 +577,17 @@ questions:
     quote: Poster prints 1 x $7.50
   - path: data/project-budget.csv
     page: null
-    quote: Poster printing,7.50
+    quote: 'item,cost_usd
+
+      Domain name,12.00
+
+      Hosting for three months,45.00
+
+      Poster printing,7.50
+
+      Demo day snacks,18.40
+
+      Total,82.90'
 - id: q047
   question: How many hours in total did Jordan log over the six weeks?
   category: numeric
@@ -569,7 +596,21 @@ questions:
   sources:
   - path: data/team-hours.csv
     page: null
-    quote: total,36,41,27
+    quote: 'week,alex_hours,jordan_hours,sam_hours
+
+      1,4,5,3
+
+      2,5,6,4
+
+      3,6,6,5
+
+      4,7,8,6
+
+      5,6,9,2
+
+      6,8,7,7
+
+      total,36,41,27'
 - id: q048
   question: In which week did Sam log the fewest hours?
   category: numeric
@@ -578,7 +619,21 @@ questions:
   sources:
   - path: data/team-hours.csv
     page: null
-    quote: 5,6,9,2
+    quote: 'week,alex_hours,jordan_hours,sam_hours
+
+      1,4,5,3
+
+      2,5,6,4
+
+      3,6,6,5
+
+      4,7,8,6
+
+      5,6,9,2
+
+      6,8,7,7
+
+      total,36,41,27'
 - id: q049
   question: Who got the team's laptop fixed at a shop?
   category: paraphrase

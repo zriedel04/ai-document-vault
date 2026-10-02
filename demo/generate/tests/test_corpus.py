@@ -359,6 +359,49 @@ class EvalSetTests(unittest.TestCase):
         rows = [r for r in data(DOCS["data/grades.csv"]).decode("utf-8").splitlines() if r]
         self.assertEqual(norm(table[0].quote), norm(" ".join(rows)))
 
+    def test_a_csv_source_is_the_whole_table(self) -> None:
+        # A row alone does not say which column a number belongs to, and a total does not show
+        # what it adds up, so a passage that holds only a row could earn full recall without
+        # the answer being derivable from it.
+        for q in QUESTIONS:
+            for src in q.sources:
+                doc = DOCS[src.path]
+                if doc.kind == "csv":
+                    rows = [r for r in (doc.text or "").splitlines() if r.strip()]
+                    with self.subTest(question=q.id, document=src.path):
+                        self.assertEqual(norm(src.quote), norm(" ".join(rows)))
+
+    def test_the_hours_questions_cite_the_header_with_the_numbers(self) -> None:
+        for start in ("How many hours in total did Jordan", "In which week did Sam log"):
+            question = next(q for q in QUESTIONS if q.question.startswith(start))
+            quote = norm(question.sources[0].quote)
+            self.assertTrue(quote.startswith("week,alex_hours,jordan_hours,sam_hours"), start)
+            self.assertIn("total,36,41,27", quote)
+
+    def test_the_version_comparison_cites_where_each_list_ends_in_both_versions(self) -> None:
+        # "Added between version 1 and 2" is only shown by the lists' ends: the last item of
+        # each list, followed by the next heading, so the passage proves nothing comes after.
+        question = next(
+            q for q in QUESTIONS if q.question.startswith("Which requirements were added")
+        )
+        for path in ("project/requirements-v1.docx", "project/requirements-v2.docx"):
+            text = norm(" ".join(DOCS[path].page_texts()))
+            quotes = [norm(s.quote) for s in question.sources if s.path == path]
+            for prefix, heading in (
+                ("FR", "3. Non-functional requirements"),
+                ("NFR", "4. Out of scope"),
+            ):
+                end = text.index(heading)
+                last = text[text.rindex(f"{prefix}-", 0, end) : end].strip()
+                with self.subTest(document=path, list=prefix):
+                    self.assertIn(f"{last} {heading}", quotes)
+
+    def test_the_chat_decision_includes_the_temporary_requirement(self) -> None:
+        question = next(q for q in QUESTIONS if q.question.startswith("How did the decision about"))
+        self.assertIn("project/requirements-v1.docx", {s.path for s in question.sources})
+        self.assertNotIn("project/requirements-v1.docx", question.distractors)
+        self.assertIn("FR-6", question.answer)
+
     def test_the_number_rule_notices_a_missing_time(self) -> None:
         answer = "Monday, October 12, 2026 at 11:59 PM."
         incomplete = "The deadline was extended to October 12, 2026."

@@ -56,6 +56,27 @@ MATH_SYLLABUS = "courses/math241/syllabus.pdf"
 OS_SYLLABUS = "courses/cs350/syllabus.pdf"
 DEMO_DAY = "emails/class-announcement-demo-day.txt"
 
+# A row of a CSV file says nothing without its header row, and what a total covers is only shown by
+# the rows above it, so a question that cites a CSV file cites the whole table (see the tests).
+BUDGET_TABLE = (
+    "item,cost_usd\n"
+    "Domain name,12.00\n"
+    "Hosting for three months,45.00\n"
+    "Poster printing,7.50\n"
+    "Demo day snacks,18.40\n"
+    "Total,82.90"
+)
+HOURS_TABLE = (
+    "week,alex_hours,jordan_hours,sam_hours\n"
+    "1,4,5,3\n"
+    "2,5,6,4\n"
+    "3,6,6,5\n"
+    "4,7,8,6\n"
+    "5,6,9,2\n"
+    "6,8,7,7\n"
+    "total,36,41,27"
+)
+
 
 @dataclass(frozen=True)
 class Source:
@@ -359,19 +380,20 @@ _RAW: list[_Row] = [
     _q(
         "multi_doc",
         "How did the decision about in-app chat develop over time?",
-        "It was an open question in a team standup and again in a team meeting, and it was later removed from the first release because it would take too long to build.",
+        "It was an open question in a team standup and again in a team meeting, was written into the first draft of the requirements as requirement FR-6 (an in-app chat for the members of a group), and was later removed from the first release because it would take too long to build.",
         (
             s(
                 STANDUP_0922,
                 "Blockers: we need to decide whether the first release has in-app chat.",
             ),
             s(MEETING, "- Should the first release include in-app chat?", 2),
+            s(REQ_V1, "FR-6: The system shall provide an in-app chat for the members of a group."),
             s(
                 JOURNAL,
                 "We removed in-app chat from the first release because it would take too long to build.",
             ),
         ),
-        (REQ_V1,),
+        (),
     ),
     _q(
         "lookup",
@@ -429,9 +451,15 @@ _RAW: list[_Row] = [
         "Which requirements were added between version 1 and version 2 of the specification?",
         "FR-8 (export a meeting as an iCalendar file), FR-9 (leave a group), FR-10 (remove a member), FR-11 (report inappropriate content), FR-12 (import the course list from a CSV file) and NFR-6 (WCAG 2.1 AA contrast).",
         (
+            # Both ends of each list, so the passages show where version 1 stopped.
             s(
                 REQ_V1,
-                "FR-8: The system shall send an email reminder 24 hours before a scheduled meeting.",
+                "FR-8: The system shall send an email reminder 24 hours before a scheduled meeting. "
+                "3. Non-functional requirements",
+            ),
+            s(
+                REQ_V1,
+                "NFR-5: Passwords shall be stored only as salted hashes. 4. Out of scope",
             ),
             s(
                 REQ_V2,
@@ -445,9 +473,14 @@ _RAW: list[_Row] = [
             ),
             s(
                 REQ_V2,
-                "FR-12: The system shall let an administrator import the course list from a CSV file.",
+                "FR-12: The system shall let an administrator import the course list from a CSV file. "
+                "3. Non-functional requirements",
             ),
-            s(REQ_V2, "NFR-6: All pages shall meet the WCAG 2.1 level AA contrast requirements."),
+            s(
+                REQ_V2,
+                "NFR-6: All pages shall meet the WCAG 2.1 level AA contrast requirements. "
+                "4. Out of scope",
+            ),
         ),
         (),
     ),
@@ -580,7 +613,7 @@ _RAW: list[_Row] = [
         "numeric",
         "What is the total of the team's project budget?",
         "$82.90.",
-        (s(BUDGET, "Total,82.90"),),
+        (s(BUDGET, BUDGET_TABLE),),
         (),
     ),
     _q(
@@ -589,7 +622,7 @@ _RAW: list[_Row] = [
         "Yes, both show $7.50.",
         (
             s(PRINTING, "Poster prints 1 x $7.50"),
-            s(BUDGET, "Poster printing,7.50"),
+            s(BUDGET, BUDGET_TABLE),
         ),
         (),
     ),
@@ -597,14 +630,14 @@ _RAW: list[_Row] = [
         "numeric",
         "How many hours in total did Jordan log over the six weeks?",
         "41 hours.",
-        (s(HOURS, "total,36,41,27"),),
+        (s(HOURS, HOURS_TABLE),),
         (),
     ),
     _q(
         "numeric",
         "In which week did Sam log the fewest hours?",
         "Week 5, with 2 hours.",
-        (s(HOURS, "5,6,9,2"),),
+        (s(HOURS, HOURS_TABLE),),
         (),
     ),
     # --- paraphrase: few shared words -------------------------------------------------------
