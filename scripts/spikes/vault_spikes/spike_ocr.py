@@ -37,7 +37,8 @@ METHOD = (
     "reference text (whitespace collapsed) divided by the reference length; time is wall-clock per "
     "image after one untimed warm-up image. Images per minute counts the time lost in failed "
     "calls as well (a timeout can take minutes), and a second error figure counts each failed "
-    "image as a wrong one. Recognised text is compared in memory and never stored. The reference texts and the images stay outside the repository."
+    "image as a wrong one. Recognised text is compared in memory and never stored. The "
+    "reference texts and the images stay outside the repository."
 )
 PACKAGES = ("rapidocr", "onnxruntime", "pillow")
 
