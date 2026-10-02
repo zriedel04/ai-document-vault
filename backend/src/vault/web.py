@@ -13,6 +13,8 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from starlette.datastructures import URL
+from starlette.responses import RedirectResponse
 from starlette.routing import Match, Route
 from starlette.types import Receive, Scope, Send
 
@@ -44,25 +46,47 @@ def install_frontend(app: FastAPI, dist: Path) -> None:
         """An API path no route answers is a 404 for every method, never the frontend.
 
         If a real route matches the path but not the method, the answer is the usual 405 with
-        its ``Allow`` header instead.
+        its ``Allow`` header instead. If a real route matches the path with a trailing slash
+        added or removed, the answer is the redirect the API gives when it runs alone.
         """
 
         # A class with ``__call__`` is mounted as a plain ASGI app, which Starlette routes for
         # every HTTP method. A function endpoint would be limited to GET, and a fixed method list
         # would leave TRACE, CONNECT and custom verbs to Starlette's own 405.
-        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-            # Ask each real route which methods it would answer for this path. Probing with a
-            # method works for every kind of route (the included routers have no ``methods``).
-            allowed: set[str] = set()
+        def real_matches(self, scope: Scope, methods: list[str]) -> set[str]:
+            """The methods among ``methods`` that a real route answers for this scope's path.
+
+            Probing with a method works for every kind of route (the included routers have no
+            ``methods`` attribute). The catch-alls are not "real" routes.
+            """
+            found: set[str] = set()
             for route in app.router.routes:
                 if getattr(route, "endpoint", None) in (unknown_api, frontend):
-                    continue  # the catch-alls are not "real" routes
-                for method in api_methods:
+                    continue
+                for method in methods:
                     match, _ = route.matches({**scope, "method": method})
                     if match == Match.FULL:
-                        allowed.add(method)
+                        found.add(method)
+            return found
+
+        def slash_variant(self, scope: Scope) -> str | None:
+            """The path with a trailing slash added or removed, if a real route takes that one."""
+            path: str = scope["path"]
+            other = path.rstrip("/") if path.endswith("/") else path + "/"
+            if self.real_matches({**scope, "path": other}, api_methods):
+                return other
+            return None
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            allowed = self.real_matches(scope, api_methods)
             if allowed:
                 raise HTTPException(status_code=405, headers={"Allow": ", ".join(sorted(allowed))})
+            if (other := self.slash_variant(scope)) is not None:
+                # What Starlette does for the API alone: redirect to the canonical path. The
+                # catch-all would otherwise answer 404 before the router could.
+                url = URL(scope={**scope, "path": other})
+                await RedirectResponse(url=str(url))(scope, receive, send)
+                return
             raise HTTPException(status_code=404)
 
     unknown_api = UnknownApi()

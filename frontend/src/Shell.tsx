@@ -6,7 +6,7 @@ import { useHealthState } from "./api/health-context";
 import { ColorSchemeToggle } from "./components/ColorSchemeToggle";
 import { HealthBadge } from "./components/HealthBadge";
 import { RouterNavLink } from "./components/router-nav-link";
-import { NAV_ITEMS } from "./nav";
+import { NAV_ITEMS, isInSection } from "./nav";
 
 /** The frame around every page: header, navigation and the page itself. */
 export function Shell() {
@@ -40,7 +40,7 @@ export function Shell() {
               key={item.path}
               to={item.path}
               activeOptions={{ exact: item.path === "/" }}
-              active={item.path === "/" ? pathname === "/" : pathname.startsWith(item.path)}
+              active={isInSection(pathname, item.path)}
               label={item.label}
               onClick={close}
             />

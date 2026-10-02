@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { NAV_ITEMS } from "./nav";
+import { NAV_ITEMS, isInSection } from "./nav";
 import { type FetchFn, jsonResponse, renderApp } from "./test/render";
 
 describe("navigation", () => {
@@ -35,6 +35,18 @@ describe("navigation", () => {
     await renderApp({ route: "/search" });
     expect(screen.getByRole("link", { name: "Search" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "Search" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("data-active");
+  });
+
+  it("does not mark a section whose name is only the start of an unknown address", async () => {
+    await renderApp({ route: "/documents-old" });
+    expect(screen.getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    for (const item of NAV_ITEMS) {
+      const link = screen.getByRole("link", { name: item.label });
+      expect(link).not.toHaveAttribute("aria-current");
+      expect(link).not.toHaveAttribute("data-active"); // the highlight, set by Shell
+    }
   });
 
   it("shows a not-found page for an unknown address", async () => {
@@ -45,6 +57,21 @@ describe("navigation", () => {
   it("loads a section directly from its address", async () => {
     await renderApp({ route: "/search" });
     expect(screen.getByRole("heading", { level: 2, name: "Search" })).toBeInTheDocument();
+  });
+});
+
+describe("isInSection", () => {
+  it.each([
+    ["/documents", "/documents", true],
+    ["/documents/", "/documents", true],
+    ["/documents/42", "/documents", true],
+    ["/documents-old", "/documents", false],
+    ["/documentsx/documents", "/documents", false],
+    ["/", "/", true],
+    ["/search", "/", false],
+    ["", "/documents", false],
+  ])("%s in section %s is %s", (pathname, path, expected) => {
+    expect(isInSection(pathname, path)).toBe(expected);
   });
 });
 

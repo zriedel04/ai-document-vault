@@ -193,3 +193,29 @@ def test_committed_frontend_schema_is_current() -> None:
         "`uv run python -m vault.openapi ../frontend/openapi.json`, then in frontend/ run "
         "`npm run api:generate`"
     )
+
+
+@pytest.mark.parametrize("path", ["/api/health/", "/api/openapi.json/"])
+def test_a_trailing_slash_on_a_real_api_route_redirects_like_the_api_alone(
+    client: TestClient, dist: Path, path: str
+) -> None:
+    # Without the frontend installed, Starlette redirects a real route's slash variant. The
+    # frontend catch-alls must not change that.
+    plain = TestClient(create_app(Settings()))
+    expected = plain.get(path, follow_redirects=False)
+    assert expected.status_code == 307
+    response = client.get(path, follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == expected.headers["location"]
+    assert response.headers["location"].endswith(path.rstrip("/"))
+
+
+def test_a_redirect_keeps_the_query_string_and_the_method(client: TestClient) -> None:
+    response = client.post("/api/health/?a=1", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"].endswith("/api/health?a=1")
+
+
+@pytest.mark.parametrize("path", ["/api/nothing/", "/api/health/extra/", "/api/"])
+def test_a_slash_on_an_unknown_api_path_is_still_404(client: TestClient, path: str) -> None:
+    assert client.get(path, follow_redirects=False).status_code == 404
