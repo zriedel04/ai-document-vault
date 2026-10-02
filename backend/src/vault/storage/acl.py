@@ -123,7 +123,9 @@ def _run(script: str, folder: Path) -> str:  # pragma: no cover - Windows only
         msg = "could not run PowerShell to check the vault folder's permissions"
         raise VaultAccessError(msg) from error
     if result.returncode != 0:
-        msg = "PowerShell could not read or change the vault folder's permissions"
+        # PowerShell's own message names the cmdlet and the folder, never file contents.
+        detail = " ".join(result.stderr.split())[:300]
+        msg = f"PowerShell could not read or change the vault folder's permissions: {detail}"
         raise VaultAccessError(msg)
     return result.stdout
 
