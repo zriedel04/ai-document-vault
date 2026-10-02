@@ -13,11 +13,12 @@ Run from this folder. Python 3.12 and [uv](https://docs.astral.sh/uv/) are requi
 | Tests with coverage | `uv run pytest` |
 | Lint and format check | `uv run ruff check . && uv run ruff format --check .` |
 | Type check | `uv run mypy` |
-| Licence check | `uv run python ../scripts/check_python_licenses.py` |
+| Licence check | `uv run python ../scripts/check_python_licenses.py --ignore vault` |
+| Export the API schema for the frontend | `uv run python -m vault.openapi ../frontend/openapi.json` |
 
 ## Settings
 
-`config.toml` (copy `../config.example.toml`) is read from the current folder, or from the path in `AIVAULT_CONFIG`. Environment variables override it: `AIVAULT_SERVER__PORT=9000`. Unknown keys are an error. The server only accepts `127.0.0.1`, `localhost` or `::1` as `server.host`, the three spellings the Host check accepts.
+`config.toml` (copy `../config.example.toml`) is read from the current folder, or from the path in `AIVAULT_CONFIG`. Environment variables override it: `AIVAULT_SERVER__PORT=9000`. Unknown keys are an error. The server only accepts `127.0.0.1`, `localhost` or `::1` as `server.host`, the three spellings the Host check accepts. If `frontend/dist/index.html` exists (or `frontend.dist` points at a build), the server also serves the built frontend, so the app and the API share one origin; other GETs without a file extension return `index.html` for client-side routes, and unknown `/api/...` paths are 404.
 
 ## Security
 

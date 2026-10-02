@@ -61,6 +61,11 @@ class ServerSettings(_Section):
         return bare
 
 
+class FrontendSettings(_Section):
+    # The built frontend (``npm run build``). Unset means ``frontend/dist`` next to ``backend/``.
+    dist: Path | None = None
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -72,6 +77,7 @@ class Settings(BaseSettings):
 
     vault: VaultSettings = VaultSettings()
     server: ServerSettings = ServerSettings()
+    frontend: FrontendSettings = FrontendSettings()
     logging: LoggingSettings = LoggingSettings()
 
     @classmethod
