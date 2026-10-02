@@ -72,7 +72,9 @@ class Question:
     answer: str
     sources: tuple[Source, ...] = ()  # every passage the answer needs
     # Other passages that also give the answer: citing one of them is as good as citing a source
-    # (the same fact in a second document). They are never required.
+    # (the same fact in a second document). They are never required. Each is one passage that
+    # answers alone: a question that two or more documents answer only together (the two
+    # syllabi that each give one final date) cannot be written down here, so it is not asked.
     alternatives: tuple[Source, ...] = ()
     distractors: tuple[str, ...] = ()  # documents that look relevant but are outdated or wrong
     tags: tuple[str, ...] = field(default=())
@@ -273,20 +275,10 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which comes first, the Calculus II final or the Operating Systems final?",
-        "The Calculus II final (Tuesday, December 8 at 9:00 AM), one day before the Operating Systems final (Wednesday, December 9 at 1:00 PM).",
-        (
-            s(
-                STUDY,
-                "Tuesday, December 8 at 9:00 AM: Calculus II final - Wednesday, December 9 at 1:00 PM: Operating Systems final",
-            ),
-        ),
-        alternatives=(
-            s(
-                CALENDAR,
-                "Tue Dec 8: Calculus II final at 9:00 AM Wed Dec 9: Operating Systems final at 1:00 PM",
-            ),
-        ),
+        "Which calculators may be used in the Calculus II final?",
+        "A scientific calculator is allowed; graphing calculators are not.",
+        (s(MATH_SYLLABUS, "A scientific calculator is allowed. Graphing calculators are not.", 2),),
+        (),
     ),
     # --- multi_doc and reasoning ------------------------------------------------------------
     _q(

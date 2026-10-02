@@ -185,20 +185,14 @@ questions:
     quote: 'Each team has 12 minutes for its prototype demo on Friday, November 20: 8 minutes to present
       and 4 minutes for questions.'
 - id: q018
-  question: Which comes first, the Calculus II final or the Operating Systems final?
+  question: Which calculators may be used in the Calculus II final?
   category: lookup
   answerable: true
-  answer: The Calculus II final (Tuesday, December 8 at 9:00 AM), one day before the Operating Systems
-    final (Wednesday, December 9 at 1:00 PM).
+  answer: A scientific calculator is allowed; graphing calculators are not.
   sources:
-  - path: notes/study-plan.md
-    page: null
-    quote: 'Tuesday, December 8 at 9:00 AM: Calculus II final - Wednesday, December 9 at 1:00 PM: Operating
-      Systems final'
-  alternatives:
-  - path: screenshots/calendar-finals-week.png
-    page: null
-    quote: 'Tue Dec 8: Calculus II final at 9:00 AM Wed Dec 9: Operating Systems final at 1:00 PM'
+  - path: courses/math241/syllabus.pdf
+    page: 2
+    quote: A scientific calculator is allowed. Graphing calculators are not.
 - id: q019
   question: Why did Alex ask the instructor for more time on Assignment 2?
   category: lookup
