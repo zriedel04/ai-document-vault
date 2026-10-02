@@ -1,4 +1,4 @@
-"""Command line: ``python -m vault_spikes <check|vec|embedding|ocr|pdf|merge>``.
+"""Command line: ``python -m vault_spikes <check|vec|fetch-model|embedding|ocr|pdf|merge>``.
 
 Run from ``scripts/spikes`` on the owner's Windows PC. Console output and reports hold numbers
 only, never document text or file names.
@@ -15,9 +15,9 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from vault_spikes import adapters
+from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
 from vault_spikes.corpus import SpikeInputError, build_corpus, load_manifest, load_questions
-from vault_spikes.report import Report, merge
+from vault_spikes.report import Report, SpikeText, merge
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
 from vault_spikes.spike_pdf import run_pdf_spike
@@ -33,6 +33,17 @@ OPTIONAL = {
     "onnxruntime": "ocr",
     "pypdfium2": "pdf",
     "pdfplumber": "pdf",
+}
+
+
+KNOWN = {
+    name: SpikeText(module.TITLE, module.QUESTION, module.METHOD)
+    for name, module in (
+        ("embedding", spike_embedding),
+        ("ocr", spike_ocr),
+        ("pdf", spike_pdf),
+        ("vec", spike_vec),
+    )
 }
 
 
@@ -60,6 +71,11 @@ def parser() -> argparse.ArgumentParser:
     )
     emb.add_argument("--batch-size", type=int, default=16)
     emb.add_argument("--vault-chunks", type=int, default=100_000)
+
+    fetch = commands.add_parser(
+        "fetch-model", help="download an embedding model before it is measured (not timed)"
+    )
+    fetch.add_argument("--candidate", choices=sorted(adapters.EMBEDDING_MODELS), required=True)
 
     ocr = commands.add_parser("ocr", help="OCR accuracy and speed")
     common(ocr)
@@ -149,6 +165,11 @@ def run(args: argparse.Namespace) -> int:
         show(report, report.write(args.out, stem="vec"))
         return 0
 
+    if args.command == "fetch-model":
+        adapters.fetch_model(args.candidate)
+        print(f"{args.candidate}: downloaded")
+        return 0
+
     if args.command == "embedding":
         require_embedding_inputs(args.corpus, args.questions)
         embedder = adapters.SentenceTransformerEmbedder(args.candidate, args.device)
@@ -192,7 +213,8 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     reports = [
-        Report.from_json(json.loads(path.read_text(encoding="utf-8"))) for path in args.inputs
+        Report.from_json(json.loads(path.read_text(encoding="utf-8")), KNOWN)
+        for path in args.inputs
     ]
     combined = merge(reports)
     show(combined, combined.write(args.out))

@@ -387,6 +387,8 @@ class OcrTest(unittest.TestCase):
         self.assertEqual(metrics["failures"], 3)
         self.assertNotIn("cer_mean", metrics)
         self.assertEqual(metrics["images_per_minute"], 0.0)
+        # Every call failed, which is the worst case and still has a figure: all wrong.
+        self.assertEqual(metrics["cer_mean_failures_as_errors"], 1.0)
 
     def test_no_samples_is_an_error(self) -> None:
         with self.assertRaises(ValueError):
@@ -527,7 +529,44 @@ class PdfTest(unittest.TestCase):
         metrics = self.heading_run(["One"], None)
         self.assertNotIn("heading_recall", metrics)
         self.assertNotIn("files_with_heading_reference", metrics)
-        self.assertEqual(self.heading_run(["One"], "  \n\n").get("heading_recall"), None)
+
+    def test_a_heading_free_pdf_is_a_label_and_false_headings_in_it_count(self) -> None:
+        # An empty headings file says the PDF has no headings, so all three are false.
+        metrics = self.heading_run(["Looks like", "a heading", "but is not"], "  \n\n")
+        self.assertEqual(metrics["files_with_heading_reference"], 1)
+        self.assertEqual(metrics["heading_false_positives"], 3)
+        self.assertEqual(metrics["heading_precision"], 0.0)
+        self.assertEqual(metrics["heading_f1"], 0.0)
+        self.assertNotIn("heading_recall", metrics)  # no expected heading to find
+
+    def test_finding_nothing_in_a_heading_free_pdf_is_correct_and_claims_no_ratio(self) -> None:
+        metrics = self.heading_run([], "")
+        self.assertEqual(metrics["files_with_heading_reference"], 1)
+        self.assertEqual(metrics["heading_false_positives"], 0)
+        for name in ("heading_precision", "heading_recall", "heading_f1"):
+            self.assertNotIn(name, metrics)
+
+    def test_false_headings_in_a_heading_free_pdf_lower_the_precision_of_the_whole_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, expected in (("a", "One\nTwo"), ("b", "")):
+                (root / f"{name}.pdf").write_bytes(b"x")
+                (root / f"{name}.headings.txt").write_text(expected, encoding="utf-8")
+            extractor = FakePdf(
+                {
+                    "a.pdf": pdf.PdfText(["page"], ["One", "Two"]),
+                    "b.pdf": pdf.PdfText(["page"], ["Noise", "More noise"]),
+                }
+            )
+            report = pdf.run_pdf_spike(
+                extractor, [root / "a.pdf", root / "b.pdf"], environment=ENV, clock=Clock()
+            )
+        metrics = report.rows[0].metrics
+        self.assertEqual(metrics["heading_recall"], 1.0)
+        self.assertEqual(metrics["heading_precision"], 0.5)  # 2 right of 4 found
+        self.assertEqual(metrics["heading_false_positives"], 2)
 
     def test_an_extractor_that_detects_no_headings_is_not_scored_for_them(self) -> None:
         metrics = self.heading_run([], "One\nTwo", detects_headings=False)

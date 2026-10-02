@@ -26,6 +26,7 @@ from vault_spikes.metrics import (
 from vault_spikes.report import Environment, Report, collect_environment
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"})
+TITLE = "OCR engines on this PC"
 QUESTION = (
     "How accurate (character error rate against reference text) and how fast is each OCR engine "
     "on screenshots and scans on this PC, and how reliable is it on Windows? Feeds ADR 0014."
@@ -88,7 +89,7 @@ def run_ocr_spike(
         raise ValueError(msg)
     report = Report(
         "ocr",
-        "OCR engines on this PC",
+        TITLE,
         QUESTION,
         METHOD,
         environment or collect_environment(PACKAGES),
@@ -137,11 +138,14 @@ def run_ocr_spike(
     if worked > 0:
         # Practical throughput: images read per minute of all OCR work, failed attempts included.
         metrics["images_per_minute"] = per_second(len(seconds), worked) * 60
+    if error_rates or failures:
+        # A call that failed read nothing, so for this figure it counts as a wrong image. It is
+        # reported even when every call failed (1.0), so an engine that never works compares with
+        # one that sometimes does.
+        metrics["cer_mean_failures_as_errors"] = mean([*error_rates, *[1.0] * failures])
     if error_rates:
         metrics |= {
             "cer_mean": mean(error_rates),
-            # A call that failed read nothing, so for this figure it counts as a wrong image.
-            "cer_mean_failures_as_errors": mean([*error_rates, *[1.0] * failures]),
             "cer_median": median(error_rates),
             "cer_p90": percentile(error_rates, 0.9),
             "seconds_per_image_p50": median(seconds),

@@ -20,6 +20,7 @@ from typing import Protocol
 from vault_spikes.metrics import mean, median, peak_memory_mib, per_second, word_error_rate
 from vault_spikes.report import Environment, Report, collect_environment
 
+TITLE = "PDF extraction on this PC"
 QUESTION = (
     "How fast and how accurate is PDF text extraction with pypdfium2, does heading detection by "
     "font size with pdfplumber work, and how do the libraries behave on encrypted, corrupt and "
@@ -34,7 +35,8 @@ METHOD = (
     "Heading accuracy compares the detected headings with a file of the expected ones "
     "(`NAME.headings.txt`, one heading per line, case and spacing ignored): precision is the "
     "share of detected headings that are expected, recall the share of expected headings that "
-    "were detected, both summed over all files that have such a file. Extracted text and "
+    "were detected, both summed over all files that have such a file; an empty file says the PDF "
+    "has no headings, so every heading found in it is a false one. Extracted text and "
     "headings are compared in memory and never stored; files and references stay outside the "
     "repository unless they are the public synthetic fixtures."
 )
@@ -100,7 +102,7 @@ def run_pdf_spike(
         raise ValueError(msg)
     report = Report(
         "pdf",
-        "PDF extraction on this PC",
+        TITLE,
         QUESTION,
         METHOD,
         environment or collect_environment(PACKAGES),
@@ -137,11 +139,12 @@ def run_pdf_spike(
         if extractor.detects_headings and heading_file.is_file():
             expected = heading_set(heading_file.read_text(encoding="utf-8"))
             detected = {normalise_heading(h) for h in result.headings} - {""}
-            if expected:
-                files_with_heading_reference += 1
-                heading_hits += len(expected & detected)
-                heading_detected += len(detected)
-                heading_expected += len(expected)
+            # An empty file is a label too: this PDF has no headings, so every heading found in
+            # it is a false one and must lower the precision.
+            files_with_heading_reference += 1
+            heading_hits += len(expected & detected)
+            heading_detected += len(detected)
+            heading_expected += len(expected)
         reference = reference_dir / f"{pdf.stem}.txt"
         if reference.is_file():
             with contextlib.suppress(ValueError):  # an empty reference is not scored
@@ -167,17 +170,22 @@ def run_pdf_spike(
         metrics["wer_mean"] = mean(word_error_rates)
         metrics["wer_median"] = median(word_error_rates)
     if files_with_heading_reference:
-        recall = heading_hits / heading_expected
         metrics["files_with_heading_reference"] = files_with_heading_reference
-        metrics["heading_recall"] = recall
-        if heading_detected:
-            precision = heading_hits / heading_detected
+        metrics["heading_false_positives"] = heading_detected - heading_hits
+        # Recall needs expected headings and precision needs detected ones; a figure with nothing
+        # to divide is left out, not set to a guess. F1 is 0 when either side has nothing right.
+        recall = heading_hits / heading_expected if heading_expected else None
+        precision = heading_hits / heading_detected if heading_detected else None
+        if recall is not None:
+            metrics["heading_recall"] = recall
+        if precision is not None:
             metrics["heading_precision"] = precision
+        if heading_expected or heading_detected:
             metrics["heading_f1"] = (
-                2 * precision * recall / (precision + recall) if precision + recall else 0.0
+                2 * precision * recall / (precision + recall)
+                if recall is not None and precision is not None and precision + recall
+                else 0.0
             )
-        else:
-            metrics["heading_f1"] = 0.0
     if (peak := peak_memory_mib()) is not None:
         metrics["peak_memory_mib"] = peak
     report.add(extractor.name, **metrics)

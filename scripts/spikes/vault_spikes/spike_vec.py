@@ -21,6 +21,7 @@ from typing import Protocol
 from vault_spikes.metrics import mean, peak_memory_mib, per_second, percentile
 from vault_spikes.report import Environment, Report, collect_environment
 
+TITLE = "sqlite-vec on this PC"
 QUESTION = (
     "Does the sqlite-vec extension load into this Python's sqlite3, and what are the insert rate, "
     "database size and exact-search latency at 10,000 and 100,000 vectors? Feeds ADR 0004."
@@ -169,7 +170,7 @@ def run_vec_spike(
     """
     report = Report(
         "vec",
-        "sqlite-vec on this PC",
+        TITLE,
         QUESTION,
         METHOD,
         environment or collect_environment(PACKAGES),

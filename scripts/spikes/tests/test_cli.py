@@ -12,6 +12,8 @@ from vault_spikes import __main__ as cli
 from vault_spikes import adapters
 from vault_spikes.report import Environment, Report
 
+KNOWN = cli.KNOWN
+
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
 
@@ -72,13 +74,33 @@ class CliTest(unittest.TestCase):
             root = Path(folder)
             paths = []
             for name in ("a", "b"):
-                report = Report("embedding", "T", "Q?", "How.", env)
+                report = Report("embedding", *KNOWN["embedding"], env)
                 report.add(f"model-{name}", chunks=1)
                 paths.append(str(report.write(root, stem=f"embedding-{name}")[0]))
             code, _, err = run("merge", *paths, "--out", str(root / "merged"))
             self.assertEqual(code, 0, err)
             merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
         self.assertEqual([r["candidate"] for r in merged["rows"]], ["model-a", "model-b"])
+
+    def test_merge_refuses_a_report_with_text_of_its_own(self) -> None:
+        env = Environment("w", "3.12", "c", 1, 1.0, None, {})
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = Report("embedding", "Patient diagnosis", "Q?", "How.", env)
+            report.add("model-a", chunks=1)
+            path = str(report.write(root, stem="embedding-a")[0])
+            code, out, err = run("merge", path, "--out", str(root / "merged"))
+            self.assertFalse((root / "merged").exists())
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertNotIn("Patient", err)
+
+    def test_fetch_model_downloads_through_the_adapter(self) -> None:
+        with mock.patch.object(adapters, "fetch_model") as fetch:
+            code, out, err = run("fetch-model", "--candidate", "qwen3-embedding-0.6b")
+        self.assertEqual((code, err), (0, ""))
+        fetch.assert_called_once_with("qwen3-embedding-0.6b")
+        self.assertEqual(out.strip(), "qwen3-embedding-0.6b: downloaded")
 
     def test_errors_are_one_line_on_stderr_with_exit_code_two(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

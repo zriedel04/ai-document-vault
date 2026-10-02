@@ -71,6 +71,7 @@ class SentenceTransformerEmbedder:
         if device not in {"cpu", "cuda"}:
             msg = "device must be cpu or cuda"
             raise ValueError(msg)
+        self.candidate = candidate
         self.name = f"{candidate}-{device}"
         self.model_id = EMBEDDING_MODELS[candidate]
         self.device = device
@@ -82,7 +83,20 @@ class SentenceTransformerEmbedder:
             require_cuda()
         from sentence_transformers import SentenceTransformer
 
-        self.model = SentenceTransformer(self.model_id, device=self.device)
+        # Only from the local cache, so the timed load never includes a download (which would
+        # make the first candidate run look slower than the next ones). ``fetch_model`` fills the
+        # cache first and is not timed.
+        try:
+            self.model = SentenceTransformer(
+                self.model_id, device=self.device, local_files_only=True
+            )
+        except OSError as error:
+            msg = (
+                f"the model {self.model_id} is not in the local cache yet; download it once with "
+                f"`uv run python -m vault_spikes fetch-model --candidate {self.candidate}` "
+                "(a download is not timed), then run this command again"
+            )
+            raise MissingDependencyError(msg) from error
 
     def _encode(self, texts: Sequence[str], *, query: bool) -> list[list[float]]:
         model = self.model
@@ -101,6 +115,24 @@ class SentenceTransformerEmbedder:
 
     def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
         return self._encode(texts, query=True)
+
+
+def fetch_model(candidate: str) -> None:
+    """Download a candidate's files into the local cache, outside any measurement."""
+    if candidate not in EMBEDDING_MODELS:
+        msg = f"unknown candidate {candidate!r}; choose one of {sorted(EMBEDDING_MODELS)}"
+        raise ValueError(msg)
+    _need("sentence_transformers", "embedding")
+    from sentence_transformers import SentenceTransformer
+
+    try:
+        SentenceTransformer(EMBEDDING_MODELS[candidate], device="cpu")
+    except OSError as error:
+        msg = (
+            f"could not download {EMBEDDING_MODELS[candidate]}: check the network connection. A "
+            "model that asks you to accept its licence also needs `uv run hf auth login`"
+        )
+        raise MissingDependencyError(msg) from error
 
 
 def gpu_name() -> str | None:

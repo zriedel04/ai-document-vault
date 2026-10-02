@@ -9,6 +9,7 @@ from pathlib import Path
 from vault_spikes import report as r
 
 PRIVATE_TEXT = "Patient diagnosis: confidential"
+KNOWN = {"embedding": r.SpikeText("Title", "Q?", "How.")}
 
 
 def environment() -> r.Environment:
@@ -83,14 +84,88 @@ class OutputTest(unittest.TestCase):
             json_path, md_path = report.write(Path(folder) / "out", stem="embedding-model-a")
             self.assertEqual(json_path.name, "embedding-model-a.json")
             self.assertTrue(md_path.is_file())
-            again = r.Report.from_json(json.loads(json_path.read_text(encoding="utf-8")))
+            again = r.Report.from_json(json.loads(json_path.read_text(encoding="utf-8")), KNOWN)
         self.assertEqual(again.to_json(), report.to_json())
 
     def test_reading_a_report_applies_the_checks_again(self) -> None:
         data = make().to_json()
         data["rows"] = [{"candidate": "model", "metrics": {"detail": PRIVATE_TEXT}}]
         with self.assertRaises(TypeError):
-            r.Report.from_json(data)
+            r.Report.from_json(data, KNOWN)
+
+    def test_free_text_in_the_title_question_or_method_is_refused(self) -> None:
+        for field in ("title", "question", "method"):
+            data = make().to_json()
+            data[field] = PRIVATE_TEXT
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "own text"):
+                r.Report.from_json(data, KNOWN)
+
+    def test_a_trailing_space_or_line_break_is_not_the_spikes_own_text(self) -> None:
+        for field in ("title", "question", "method"):
+            for suffix in (" ", "\n", "\r"):
+                data = make().to_json()
+                data[field] = str(data[field]) + suffix
+                with self.subTest(field=field, suffix=suffix), self.assertRaises(ValueError):
+                    r.Report.from_json(data, KNOWN)
+
+    def test_a_report_from_an_unknown_spike_is_refused(self) -> None:
+        for name in ("ocr", "", PRIVATE_TEXT, None, 1, ["embedding"]):
+            data = make().to_json()
+            data["spike"] = name
+            with self.subTest(spike=name), self.assertRaises(ValueError):
+                r.Report.from_json(data, KNOWN)
+
+    def test_the_merged_report_carries_the_spikes_own_text_not_the_files(self) -> None:
+        report = r.Report.from_json(make().to_json(), KNOWN)
+        self.assertEqual((report.title, report.question, report.method), tuple(KNOWN["embedding"]))
+
+    def test_free_text_in_the_environment_is_refused(self) -> None:
+        long_text = "a" * 101
+        for field, value in (
+            ("system", "Patient 'A' > 5\nresult"),
+            ("system", long_text),
+            ("cpu", PRIVATE_TEXT + "<b>"),
+            ("cpu", ["cpu"]),
+            ("cpu", {"x": "y"}),
+            ("cpu", ""),
+            ("cpu", "cpu\n"),
+            ("python", "3.12 secret words"),
+            ("python", "x"),
+            ("gpu", "gpu\n"),
+            ("gpu", long_text),
+            ("cpu_count", "8"),
+            ("cpu_count", True),
+            ("cpu_count", -1),
+            ("ram_gib", [16.0]),
+            ("packages", {"numpy": "see the document"}),
+            ("packages", {"patient record": "1.0"}),
+            ("packages", {"numpy": "1.0\n"}),
+        ):
+            data = make().to_json()
+            env = dict(data["environment"])  # type: ignore[call-overload]
+            env[field] = value
+            data["environment"] = env
+            with self.subTest(field=field, value=value), self.assertRaises((ValueError, TypeError)):
+                r.Report.from_json(data, KNOWN)
+
+    def test_real_machine_descriptions_are_accepted(self) -> None:
+        env = r.Environment(
+            "Windows-11-10.0.26200-SP0",
+            "3.12.15",
+            "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+            16,
+            63.2,
+            "NVIDIA GeForce RTX 3080, 12288 MiB",
+            {"sentence-transformers": "5.1.0", "torch": "2.8.0+cu128", "rapidocr": "not installed"},
+        )
+        self.assertEqual(r.Environment.from_json(env.to_json()), env)
+
+    def test_the_descriptions_taken_from_the_machine_always_fit(self) -> None:
+        for text in ("", "   ", "é" * 300, "\n"):
+            with self.subTest(text=text[:5]):
+                cleaned = r.machine_text(text)
+                self.assertTrue(r.MACHINE_TEXT.fullmatch(cleaned))
+        self.assertEqual(r.machine_text("Ünï GPU"), "?n? GPU")
 
     def test_file_stems_cannot_escape_the_folder(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

@@ -190,6 +190,54 @@ class RequireCudaTest(unittest.TestCase):
             embedder.load()
         require.assert_not_called()
 
+    def test_the_model_is_loaded_from_the_local_cache_only(self) -> None:
+        embedder = adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cpu")
+        fake_st = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}):
+            embedder.load()
+        fake_st.SentenceTransformer.assert_called_once_with(
+            "Qwen/Qwen3-Embedding-0.6B", device="cpu", local_files_only=True
+        )
+
+    def test_a_model_that_is_not_downloaded_says_how_to_fetch_it(self) -> None:
+        embedder = adapters.SentenceTransformerEmbedder("embeddinggemma-300m", "cpu")
+        fake_st = mock.MagicMock()
+        fake_st.SentenceTransformer.side_effect = OSError("not in cache")
+        with (
+            mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}),
+            self.assertRaises(adapters.MissingDependencyError) as caught,
+        ):
+            embedder.load()
+        self.assertIn("fetch-model --candidate embeddinggemma-300m", str(caught.exception))
+
+    def test_fetching_downloads_without_the_local_only_restriction(self) -> None:
+        fake_st = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}):
+            adapters.fetch_model("embeddinggemma-300m")
+        fake_st.SentenceTransformer.assert_called_once_with(
+            "google/embeddinggemma-300m", device="cpu"
+        )
+
+    def test_a_failed_download_is_explained(self) -> None:
+        fake_st = mock.MagicMock()
+        fake_st.SentenceTransformer.side_effect = OSError("401")
+        with (
+            mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}),
+            self.assertRaises(adapters.MissingDependencyError) as caught,
+        ):
+            adapters.fetch_model("embeddinggemma-300m")
+        self.assertIn("hf auth login", str(caught.exception))
+        self.assertNotIn("401", str(caught.exception))
+
+    def test_fetching_an_unknown_model_or_without_the_library_is_an_error(self) -> None:
+        with self.assertRaises(ValueError):
+            adapters.fetch_model("some-other-model")
+        with (
+            mock.patch.dict(sys.modules, {"sentence_transformers": None}),
+            self.assertRaises(adapters.MissingDependencyError),
+        ):
+            adapters.fetch_model("qwen3-embedding-0.6b")
+
     def test_the_cuda_embedder_checks_the_gpu_before_loading_the_model(self) -> None:
         embedder = adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cuda")
         fake_st = mock.MagicMock()

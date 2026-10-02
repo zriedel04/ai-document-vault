@@ -18,6 +18,7 @@ from vault_spikes.metrics import mean, peak_memory_mib, per_second
 from vault_spikes.report import Environment, Report, collect_environment
 from vault_spikes.retrieval import K, rank_by_similarity, score_all, sources_missing_from
 
+TITLE = "Embedding models on this PC"
 QUESTION = (
     "How fast does each candidate embedding model run on this PC (CPU and GPU if present), how "
     "much memory does it need, how long would a vault of the stated size take, and how well does "
@@ -25,7 +26,9 @@ QUESTION = (
 )
 METHOD = (
     "`python -m vault_spikes embedding --candidate NAME --device DEVICE`, one candidate per "
-    "process so the peak memory is that candidate's. The public corpus (`demo/corpus/`) is cut "
+    "process so the peak memory is that candidate's. The model is downloaded beforehand with "
+    "`fetch-model` and loaded only from the local cache, so the load time never includes a "
+    "download. The public corpus (`demo/corpus/`) is cut "
     "into chunks of at most 800 characters; throughput is chunks embedded per second in batches. "
     "Each answerable public question is embedded and its top 10 chunks are ranked by cosine "
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
@@ -74,7 +77,7 @@ def run_embedding_spike(
         raise ValueError(msg)
     report = Report(
         "embedding",
-        "Embedding models on this PC",
+        TITLE,
         QUESTION,
         METHOD,
         environment or collect_environment(PACKAGES),

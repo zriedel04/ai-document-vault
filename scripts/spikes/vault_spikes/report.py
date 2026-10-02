@@ -1,10 +1,13 @@
 """Spike reports: metrics only, never document text.
 
-A report is built from names fixed in code (a spike, a candidate, a metric) and numbers. There is
-no free-text field, so a script cannot put document text, a file name or an OCR result into a
-report by accident: the only strings are checked against strict patterns, and anything else is a
-TypeError or ValueError. The Markdown output has the five sections that ``scripts/check_adrs.py``
-requires of a spike file, with the conclusion left for the owner's review.
+A report is built from names fixed in code (a spike, a candidate, a metric) and numbers. Its
+title, question and method are fixed text per spike, and the only other strings (the machine and
+package descriptions) are checked against short, strict patterns, so a script cannot put document
+text, a file name or an OCR result into a report by accident: anything else is a TypeError or
+ValueError. A report read back from a JSON file is checked the same way, and its title, question
+and method must equal the fixed text of the spike it names. The Markdown output has the five
+sections that ``scripts/check_adrs.py`` requires of a spike file, with the conclusion left for the
+owner's review.
 """
 
 from __future__ import annotations
@@ -14,15 +17,24 @@ import math
 import os
 import platform
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, NamedTuple, cast
 
 # Always use ``fullmatch`` with these patterns (``$`` also matches before a trailing newline).
 SPIKE_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
 CANDIDATE = re.compile(r"[a-z0-9][a-z0-9._+-]{0,60}")
 METRIC = re.compile(r"[a-z][a-z0-9_]{0,48}")
+# A machine or GPU description such as "AMD64 Family 25 Model 97, AuthenticAMD": letters, digits and
+# a few marks, at most 100 characters. This is the one free-form text left in a report, and a
+# pattern cannot tell a CPU name from a short sentence, so the owner reviews the environment lines
+# of a report before committing it (docs/spikes/README.md).
+MACHINE_TEXT = re.compile(r"[A-Za-z0-9 ._+()/,:?-]{1,100}")
+PYTHON_VERSION = re.compile(r"\d{1,2}\.\d{1,3}(?:\.\d{1,3})?[A-Za-z0-9.+-]{0,20}")
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}")
+PACKAGE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.!+_-]{0,40}|not installed")
 SECTIONS: Final = ("Question", "Environment", "Method", "Results", "Conclusion")
 CONCLUSION_PLACEHOLDER: Final = (
     "To be written after the owner has reviewed these results. Do not accept the ADR from this "
@@ -30,6 +42,20 @@ CONCLUSION_PLACEHOLDER: Final = (
 )
 
 type Number = int | float | bool
+
+
+class SpikeText(NamedTuple):
+    """The fixed words of one spike's report: its title, question and method."""
+
+    title: str
+    question: str
+    method: str
+
+
+def machine_text(text: str) -> str:
+    """Make a description from the OS fit the report: unusual characters become ``?``."""
+    cleaned = re.sub(r"[^A-Za-z0-9 ._+()/,:?-]", "?", text).strip()[:100]
+    return cleaned or "unknown"
 
 
 @dataclass(frozen=True)
@@ -44,6 +70,27 @@ class Environment:
     gpu: str | None
     packages: dict[str, str]
 
+    def __post_init__(self) -> None:
+        for label, text in (("system", self.system), ("cpu", self.cpu), ("gpu", self.gpu)):
+            if text is not None and not MACHINE_TEXT.fullmatch(text):
+                msg = f"environment {label} must be a short machine description"
+                raise ValueError(msg)
+        if not PYTHON_VERSION.fullmatch(self.python):
+            msg = "environment python must be a version number"
+            raise ValueError(msg)
+        for count in (self.cpu_count, self.ram_gib):
+            if count is not None and (
+                isinstance(count, bool)
+                or not isinstance(count, int | float)
+                or not 0 <= count <= 1_000_000
+            ):
+                msg = "environment cpu_count and ram_gib must be plain numbers or none"
+                raise ValueError(msg)
+        for name, version in self.packages.items():
+            if not PACKAGE_NAME.fullmatch(name) or not PACKAGE_VERSION.fullmatch(version):
+                msg = "environment packages must be a name and a version number"
+                raise ValueError(msg)
+
     def to_json(self) -> dict[str, object]:
         return {
             "system": self.system,
@@ -57,15 +104,16 @@ class Environment:
 
     @classmethod
     def from_json(cls, data: dict[str, object]) -> Environment:
-        packages = cast("dict[str, str]", data["packages"])
+        # Anything that is not the expected type is refused by ``__post_init__``, never converted
+        # with ``str()``, so a list or a mapping cannot turn into text on the way in.
         return cls(
-            system=str(data["system"]),
-            python=str(data["python"]),
-            cpu=str(data["cpu"]),
+            system=cast("str", data["system"]),
+            python=cast("str", data["python"]),
+            cpu=cast("str", data["cpu"]),
             cpu_count=cast("int | None", data["cpu_count"]),
             ram_gib=cast("float | None", data["ram_gib"]),
             gpu=cast("str | None", data["gpu"]),
-            packages=dict(packages),
+            packages=cast("dict[str, str]", data["packages"]),
         )
 
 
@@ -113,12 +161,12 @@ def collect_environment(packages: tuple[str, ...] = (), gpu: str | None = None) 
         except metadata.PackageNotFoundError:
             versions[name] = "not installed"
     return Environment(
-        system=platform.platform(),
+        system=machine_text(platform.platform()),
         python=platform.python_version(),
-        cpu=platform.processor() or platform.machine() or "unknown",
+        cpu=machine_text(platform.processor() or platform.machine()),
         cpu_count=os.cpu_count(),
         ram_gib=total_ram_gib(),
-        gpu=gpu,
+        gpu=None if gpu is None else machine_text(gpu),
         packages=versions,
     )
 
@@ -175,13 +223,26 @@ class Report:
         }
 
     @classmethod
-    def from_json(cls, data: dict[str, object]) -> Report:
-        """Read a report back, applying every check again (a JSON file is input like any other)."""
+    def from_json(cls, data: dict[str, object], known: Mapping[str, SpikeText]) -> Report:
+        """Read a report back, applying every check again (a JSON file is input like any other).
+
+        ``known`` holds the fixed words of each spike. A report for another spike, or one whose
+        title, question or method is anything but those words, is refused: free text in a file
+        would otherwise travel into the merged report, which may be written to a tracked folder.
+        """
+        spike = data["spike"]
+        if not isinstance(spike, str) or spike not in known:
+            msg = "the report is not from a known spike"
+            raise ValueError(msg)
+        fixed = known[spike]
+        if (data["title"], data["question"], data["method"]) != tuple(fixed):
+            msg = "the report's title, question or method is not the spike's own text"
+            raise ValueError(msg)
         report = cls(
-            spike=str(data["spike"]),
-            title=str(data["title"]),
-            question=str(data["question"]),
-            method=str(data["method"]),
+            spike=spike,
+            title=fixed.title,
+            question=fixed.question,
+            method=fixed.method,
             environment=Environment.from_json(cast("dict[str, object]", data["environment"])),
         )
         for row in cast("list[dict[str, object]]", data["rows"]):
