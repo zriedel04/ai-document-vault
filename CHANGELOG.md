@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Content-addressed blob store (`vault.storage.blobs`): hashing copy into `sha256/aa/bb/<hash>.<ext>`, read-only blobs, exact-duplicate handling that is safe under concurrent imports, atomic publication with temporary-file cleanup, a size limit, `verify`, `scan` and `delete`.
 - Frontend shell in `frontend/`: Vite, React, TypeScript and Mantine with Dashboard, Documents, Search, Ask and Settings placeholders, a light/dark toggle, a typed API client generated from the backend's OpenAPI schema and a backend health badge. The backend serves the built frontend from the same origin. ESLint, Prettier, `tsc`, Vitest, an npm licence check and `npm audit` run in CI.
 - Backend skeleton in `backend/`: FastAPI app factory with `GET /api/health`, TOML settings with environment overrides, logging that never records document content, pytest, Ruff, mypy, a Python licence check and `pip-audit` in CI.
 - Repository foundation: ignore rules, repository safety check, pre-commit hooks, CI, templates and contributor docs.
