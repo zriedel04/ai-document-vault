@@ -10,8 +10,13 @@ A file becomes visible under its final name only once it is complete: it is copi
 file inside the store (same volume), flushed to disk and then linked to its final name, which is
 then marked read-only, so a crash or a refused copy leaves at most a temporary file, never a partial
 blob. (The file is flushed, but the folder entry is not forced to disk, so after a power cut the
-newest import may be missing; the import is then simply repeated.) Nothing here logs file names or
-content.
+newest import may be missing; the import is then simply repeated.) A crash between the link and the
+read-only mark can leave a finished blob writable, so start-up runs ``clean_temp()`` and ``seal()``.
+
+Imports of the same bytes are serialised by a claim on the hash (a lock file in the temporary
+folder), whatever extension each import brings: the extension is part of the file name, so a rename
+or a link alone cannot make two imports under ``.txt`` and ``.md`` collide. Nothing here logs file
+names or content.
 """
 
 from __future__ import annotations
@@ -20,8 +25,10 @@ import hashlib
 import os
 import re
 import stat
+import time
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Final
@@ -35,6 +42,9 @@ TEMP_FOLDER: Final = ".tmp"
 CHUNK_BYTES: Final = 1024 * 1024
 READ_ONLY: Final = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 WRITABLE: Final = stat.S_IWUSR
+LOCK_SUFFIX: Final = ".lock"
+LOCK_WAIT_SECONDS: Final = 60.0
+LOCK_POLL_SECONDS: Final = 0.01
 
 
 class BlobError(Exception):
@@ -47,6 +57,16 @@ class BlobTooLargeError(BlobError):
 
 class BlobNotFoundError(BlobError):
     """No blob has this hash."""
+
+
+class BlobIntegrityError(BlobError):
+    """Something that is not a blob occupies the place a blob belongs, so it cannot be stored
+    there. The store never deletes or replaces it: that is for the integrity check and the owner."""
+
+
+class BlobBusyError(BlobError):
+    """Another import of the same bytes did not finish in time (a lock left by a crash is removed
+    by ``clean_temp()`` at start-up)."""
 
 
 @dataclass(frozen=True)
@@ -157,20 +177,58 @@ class BlobStore:
                 out.flush()
                 os.fsync(out.fileno())
             sha256 = digest.hexdigest()
-            existing = self.find(sha256)
-            if existing is not None:
-                return StoredBlob(sha256, size, existing, created=False)
-            final = self.path_for(sha256, suffix)
-            final.parent.mkdir(parents=True, exist_ok=True)
-            if not self._publish(temp, final):
-                return StoredBlob(sha256, size, final, created=False)
-            # Drop the temporary name first: the read-only mark belongs to the file, so on Windows
-            # a read-only file cannot be unlinked through any of its names.
-            temp.unlink(missing_ok=True)
-            _read_only(final)
-            return StoredBlob(sha256, size, final, created=True)
+            with self._claim(sha256):
+                return self._store(temp, sha256, size, suffix)
         finally:
             temp.unlink(missing_ok=True)
+
+    def _store(self, temp: Path, sha256: str, size: int, suffix: str) -> StoredBlob:
+        """Publish the finished copy, holding the claim on its hash."""
+        existing = self.find(sha256)
+        if existing is not None:
+            self._seal_file(existing)  # a crash may have left it writable
+            return StoredBlob(sha256, size, existing, created=False)
+        final = self.path_for(sha256, suffix)
+        final.parent.mkdir(parents=True, exist_ok=True)
+        if not self._publish(temp, final):
+            # The name is taken. Only a real blob counts as the winner: a folder or another
+            # odd entry in its place is not one, and pointing a caller at it would be wrong.
+            winner = self.find(sha256)
+            if winner is None:
+                msg = "something that is not a blob occupies the place for this blob"
+                raise BlobIntegrityError(msg)
+            self._seal_file(winner)
+            return StoredBlob(sha256, size, winner, created=False)
+        # Drop the temporary name first: the read-only mark belongs to the file, so on Windows
+        # a read-only file cannot be unlinked through any of its names.
+        temp.unlink(missing_ok=True)
+        _read_only(final)
+        return StoredBlob(sha256, size, final, created=True)
+
+    @staticmethod
+    def _seal_file(path: Path) -> None:
+        if path.stat().st_mode & WRITABLE:
+            _read_only(path)
+
+    @contextmanager
+    def _claim(self, sha256: str) -> Iterator[None]:
+        """Hold the one claim on a hash, so imports (and a delete) of the same bytes take turns
+        whatever their extensions. The claim is a file created only if it does not exist."""
+        lock = self._temp_folder() / f"{check_sha256(sha256)}{LOCK_SUFFIX}"
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                break
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    msg = "another import of the same file did not finish"
+                    raise BlobBusyError(msg) from None
+                time.sleep(LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            lock.unlink(missing_ok=True)
 
     @staticmethod
     def _publish(temp: Path, final: Path) -> bool:
@@ -191,15 +249,24 @@ class BlobStore:
                 temp.rename(final)
             except FileExistsError:
                 return False
+            except OSError:
+                # Windows reports a folder in the way as an access error, not as "exists".
+                if final.exists() or final.is_symlink():
+                    return False
+                raise
         return True
 
-    def _temp_path(self) -> Path:
+    def _temp_folder(self) -> Path:
         folder = self.root / TEMP_FOLDER
         folder.mkdir(parents=True, exist_ok=True)
-        return folder / uuid.uuid4().hex
+        return folder
+
+    def _temp_path(self) -> Path:
+        return self._temp_folder() / uuid.uuid4().hex
 
     def clean_temp(self) -> int:
-        """Remove what a crashed copy left behind. Run at start-up, never while copying."""
+        """Remove what a crashed copy left behind, locks included. Run at start-up, never while
+        copying."""
         folder = self.root / TEMP_FOLDER
         if not folder.is_dir():
             return 0
@@ -209,6 +276,18 @@ class BlobStore:
                 entry.unlink()
                 removed += 1
         return removed
+
+    def seal(self) -> int:
+        """Make every blob read-only again and return how many were not. Run at start-up with
+        ``clean_temp()``: a crash between publishing a blob and marking it read-only leaves a
+        finished blob that anyone could edit in place under a name that still claims its hash.
+        (An edit is found by ``verify``; sealing only closes the door.)"""
+        sealed = 0
+        for _, path in self.scan().blobs:
+            if path.stat().st_mode & WRITABLE:
+                _read_only(path)
+                sealed += 1
+        return sealed
 
     # --- Reading and checking --------------------------------------------------------------
 
@@ -258,14 +337,15 @@ class BlobStore:
 
         Returns False if there was no such blob. Empty folders it leaves are removed too.
         """
-        path = self.find(sha256)
-        if path is None:
-            return False
-        _writable(path)
-        path.unlink()
-        for folder in (path.parent, path.parent.parent):
-            try:
-                folder.rmdir()
-            except OSError:
-                break  # not empty: other blobs share this prefix
-        return True
+        with self._claim(sha256):
+            path = self.find(sha256)
+            if path is None:
+                return False
+            _writable(path)
+            path.unlink()
+            for folder in (path.parent, path.parent.parent):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    break  # not empty: other blobs share this prefix
+            return True

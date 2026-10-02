@@ -1,12 +1,16 @@
 import hashlib
 import io
+import os
 import stat
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from vault.storage.blobs import (
+    BlobBusyError,
+    BlobIntegrityError,
     BlobNotFoundError,
     BlobStore,
     BlobTooLargeError,
@@ -120,6 +124,190 @@ class TestStoring:
         assert len({r.path for r in results}) == 1
         assert store.verify(results[0].sha256)
         assert list((store.root / ".tmp").iterdir()) == []
+
+
+class TestOneBlobPerHash:
+    """The extension is part of the file name, so two imports of the same bytes under different
+    extensions do not collide on their own; the claim on the hash is what keeps it to one file."""
+
+    @staticmethod
+    def slow_link(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Widen the window between "is it stored?" and "publish it", as a busy disk does."""
+        real = os.link
+
+        def link(src: Path, dst: Path) -> None:
+            time.sleep(0.05)
+            real(src, dst)
+
+        monkeypatch.setattr("vault.storage.blobs.os.link", link)
+
+    def test_concurrent_imports_under_different_extensions_store_one_blob(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.slow_link(monkeypatch)
+        results = []
+
+        def work(extension: str) -> None:
+            results.append(store.put(io.BytesIO(HELLO), extension))
+
+        threads = [
+            threading.Thread(target=work, args=(extension,))
+            for extension in ("txt", "md", "pdf", "docx", "png", "")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(results) == 6
+        assert sum(1 for r in results if r.created) == 1
+        assert len({r.path for r in results}) == 1  # every caller is told the winner's real path
+        assert results[0].path.exists()
+        assert [path for _, path in store.scan().blobs] == [results[0].path]
+        assert store.scan().strays == ()
+        assert list((store.root / ".tmp").iterdir()) == []
+
+    def test_a_delete_waits_for_an_import_of_the_same_bytes(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.slow_link(monkeypatch)
+        importer = threading.Thread(target=lambda: store.put(io.BytesIO(HELLO), "txt"))
+        importer.start()
+        time.sleep(0.01)  # the import is now publishing
+        deleted = store.delete(HELLO_SHA)
+        importer.join()
+        assert deleted is (not store.exists(HELLO_SHA))  # never a half-state: gone or kept whole
+
+    def test_the_claim_is_released_when_the_import_fails(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail(_path: Path) -> None:
+            raise OSError("disk went away")
+
+        monkeypatch.setattr("vault.storage.blobs._read_only", fail)
+        with pytest.raises(OSError, match="disk went away"):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert list((store.root / ".tmp").iterdir()) == []  # no lock and no temporary file
+
+    def test_a_lock_left_by_a_crash_stops_imports_until_start_up_cleans_it(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("vault.storage.blobs.LOCK_WAIT_SECONDS", 0.05)
+        store.root.joinpath(".tmp").mkdir(parents=True)
+        (store.root / ".tmp" / f"{HELLO_SHA}.lock").write_bytes(b"")
+        with pytest.raises(BlobBusyError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert not store.exists(HELLO_SHA)
+        assert list((store.root / ".tmp").iterdir()) == [store.root / ".tmp" / f"{HELLO_SHA}.lock"]
+        assert store.clean_temp() == 1
+        assert store.put(io.BytesIO(HELLO), "txt").created is True
+
+    def test_other_hashes_are_not_blocked_by_a_lock(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("vault.storage.blobs.LOCK_WAIT_SECONDS", 0.05)
+        store.root.joinpath(".tmp").mkdir(parents=True)
+        (store.root / ".tmp" / f"{HELLO_SHA}.lock").write_bytes(b"")
+        assert store.put(io.BytesIO(b"other bytes"), "txt").created is True
+
+
+class TestMalformedEntriesInTheWay:
+    def test_a_folder_in_the_blobs_place_is_an_error_not_a_blob(self, store: BlobStore) -> None:
+        folder = store.path_for(HELLO_SHA, "txt")
+        folder.mkdir(parents=True)
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert not store.exists(HELLO_SHA)
+        assert folder.is_dir()  # not deleted or replaced: that is the owner's call
+        assert list((store.root / ".tmp").iterdir()) == []
+
+    def test_the_error_names_neither_a_file_nor_a_path(self, store: BlobStore) -> None:
+        store.path_for(HELLO_SHA, "txt").mkdir(parents=True)
+        with pytest.raises(BlobIntegrityError) as caught:
+            store.put(io.BytesIO(HELLO), "txt")
+        assert str(store.root) not in str(caught.value)
+        assert HELLO_SHA not in str(caught.value)
+
+    def test_a_folder_in_the_way_on_a_system_without_links_is_the_same_error(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_links(*_args: object, **_kwargs: object) -> None:
+            raise OSError("hard links are not supported here")
+
+        def refused(_self: Path, _target: Path) -> Path:
+            raise PermissionError  # how Windows answers a rename onto a folder
+
+        store.path_for(HELLO_SHA, "txt").mkdir(parents=True)
+        monkeypatch.setattr("vault.storage.blobs.os.link", no_links)
+        monkeypatch.setattr(Path, "rename", refused)
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+
+    def test_a_refused_rename_with_nothing_in_the_way_is_a_real_error(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_links(*_args: object, **_kwargs: object) -> None:
+            raise OSError("hard links are not supported here")
+
+        def refused(_self: Path, _target: Path) -> Path:
+            raise PermissionError
+
+        monkeypatch.setattr("vault.storage.blobs.os.link", no_links)
+        monkeypatch.setattr(Path, "rename", refused)
+        with pytest.raises(PermissionError):
+            store.put(io.BytesIO(HELLO), "txt")
+
+    def test_a_real_blob_under_another_extension_still_wins_over_the_odd_entry(
+        self, store: BlobStore
+    ) -> None:
+        winner = put(store, HELLO, "md")
+        store.path_for(HELLO_SHA, "txt").mkdir()  # an odd entry next to the real blob
+        again = store.put(io.BytesIO(HELLO), "txt")
+        assert (again.created, again.path) == (False, winner)
+
+
+class TestEveryBlobIsReadOnlyAfterACrash:
+    def crashed_before_marking(self, store: BlobStore, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Kill an import between linking the blob and marking it read-only."""
+
+        def killed(_path: Path) -> None:
+            raise KeyboardInterrupt
+
+        with monkeypatch.context() as patch:
+            patch.setattr("vault.storage.blobs._read_only", killed)
+            with pytest.raises(KeyboardInterrupt):
+                store.put(io.BytesIO(HELLO), "txt")
+        path = store.path_for(HELLO_SHA, "txt")
+        assert path.read_bytes() == HELLO
+        assert not is_read_only(path)  # the state the crash leaves behind
+        return path
+
+    def test_start_up_seals_a_blob_that_a_crash_left_writable(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = self.crashed_before_marking(store, monkeypatch)
+        assert store.seal() == 1
+        assert is_read_only(path)
+        assert store.seal() == 0  # nothing left to do
+        assert store.verify(HELLO_SHA)
+
+    def test_sealing_reaches_every_blob_and_keeps_the_content(self, store: BlobStore) -> None:
+        paths = [put(store, f"file {number}".encode()) for number in range(5)]
+        for path in paths[1:4]:
+            path.chmod(0o644)
+        assert store.seal() == 3
+        assert all(is_read_only(path) for path in paths)
+        assert [path.read_bytes() for path in paths] == [f"file {n}".encode() for n in range(5)]
+
+    def test_sealing_an_empty_or_missing_store_is_fine(self, store: BlobStore) -> None:
+        assert store.seal() == 0
+
+    def test_importing_the_same_bytes_again_also_seals_the_blob(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = self.crashed_before_marking(store, monkeypatch)
+        again = store.put(io.BytesIO(HELLO), "md")
+        assert (again.created, again.path) == (False, path)
+        assert is_read_only(path)
 
 
 class TestSafety:
@@ -243,6 +431,7 @@ class TestFileSystemsWithoutHardLinks:
 
         def taken(self: Path, target: Path) -> Path:
             if self.parent.name == ".tmp":
+                target.write_bytes(HELLO)  # another process won the race
                 raise FileExistsError
             return original(self, target)
 
