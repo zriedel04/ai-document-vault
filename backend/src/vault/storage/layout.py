@@ -79,7 +79,8 @@ class VaultPaths:
 
         A fixed list of names misses what SQLite or a person puts there under another name (a
         super-journal, a copied backup, a stray file), so the folder's own contents are listed
-        too. Files deeper inside the four subfolders inherit the subfolder's list.
+        too. These are checked first because the error can then give specific advice (for the
+        token, delete it); everything deeper is checked by :func:`acl.verify_tree`.
         """
         entries = {p for p in self.trusted_entries if p.exists()}
         entries.update(self.root.iterdir())
@@ -146,6 +147,7 @@ def ensure_vault(path: Path) -> VaultPaths:
         # from another folder keeps it). New ones inherit the private folder's.
         try:
             acl.verify_private(paths.entries_to_verify())
+            acl.verify_tree(paths.root)
         except acl.VaultAccessError as error:
             raise VaultPathError(str(error)) from error
     for folder in paths.folders:

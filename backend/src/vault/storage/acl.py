@@ -13,9 +13,10 @@ The check is an allow-list: every entry that grants access must name the current
 few system principals, and the owner (who can rewrite the list) must be the current user or one of
 them. A list of "bad" groups would miss a second account or a domain group that was granted access
 by name, which is just as able to read the token and the documents. The same check is made on the
-files and folders of an existing vault that the program trusts (the token, the database, the
-subfolders), because a file moved in from elsewhere keeps its own access list instead of taking the
-folder's.
+files and folders of an existing vault (the token, the databases and their side files, and then
+everything below the vault folder, without following links), because a file moved in from
+elsewhere keeps its own access list instead of taking the folder's, and any account may open a
+file whose path it knows even when the folders above it are private.
 """
 
 from __future__ import annotations
@@ -45,6 +46,10 @@ USER_ALIASES: Final = frozenset({"LA", "LG"})
 OWNER_PRINCIPALS: Final = frozenset({"SY", "BA", "S-1-5-18", "S-1-5-32-544"})
 ACE = re.compile(r"\(([^()]*)\)")
 POWERSHELL_TIMEOUT_SECONDS: Final = 60
+# Reading one access list per file takes a while in a large vault, so the walk gets much longer.
+TREE_TIMEOUT_SECONDS: Final = 15 * 60
+TREE_EXAMPLES: Final = 3
+EXAMPLES_SHOWN: Final = 5
 
 # The folder arrives in an environment variable, never in the script text, so no path can be
 # read as PowerShell code. The scripts use .NET directly instead of Get-Acl and Set-Acl: those
@@ -67,6 +72,36 @@ READ_SCRIPT: Final = (
     "else{$acl=(New-Object System.IO.FileInfo($p)).GetAccessControl()};"
     "$acl.GetSecurityDescriptorSddlForm('Owner')+[char]9+"
     "$acl.GetSecurityDescriptorSddlForm('Access')}"
+)
+# Every file and folder below the vault folder (links are listed but not followed), grouped by
+# owner and access list: one line per distinct list with how many entries have it and a few example
+# paths relative to the vault folder. A vault has a handful of distinct lists, so the output stays
+# small however many files there are, and the program judges each list once.
+TREE_SCRIPT: Final = (
+    "$ErrorActionPreference='Stop';"
+    "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
+    "$form=(New-Object System.Security.AccessControl.RawSecurityDescriptor('O:'+$sid))"
+    ".GetSddlForm('Owner');"
+    "$sid+[char]9+$form;"
+    "$root=$env:VAULT_FOLDER.TrimEnd('\\');"
+    "$count=@{};$examples=@{};"
+    "$stack=New-Object System.Collections.Stack;$stack.Push($root);"
+    "while($stack.Count -gt 0){"
+    "$dir=$stack.Pop();"
+    "foreach($e in (New-Object System.IO.DirectoryInfo($dir)).EnumerateFileSystemInfos()){"
+    "$acl=$e.GetAccessControl();"
+    "$key=$acl.GetSecurityDescriptorSddlForm('Owner')+[char]9+"
+    "$acl.GetSecurityDescriptorSddlForm('Access');"
+    "if(-not $count.ContainsKey($key)){$count[$key]=0;"
+    "$examples[$key]=New-Object System.Collections.ArrayList};"
+    "$count[$key]=$count[$key]+1;"
+    f"if($examples[$key].Count -lt {TREE_EXAMPLES}){{"
+    "[void]$examples[$key].Add($e.FullName.Substring($root.Length+1))};"
+    "if(($e -is [System.IO.DirectoryInfo]) -and "
+    "-not ($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint)){"
+    "$stack.Push($e.FullName)}}};"
+    "foreach($key in $count.Keys){"
+    "[string]$count[$key]+[char]9+$key+[char]9+($examples[$key] -join '|')}"
 )
 MAKE_PRIVATE_SCRIPT: Final = (
     "$ErrorActionPreference='Stop';"
@@ -106,18 +141,24 @@ OWNER_FORM = re.compile(r"O:([A-Z]{2}|S-1-\d+(?:-\d+)+)")
 BAD_OUTPUT = "PowerShell returned an access list this program does not understand"
 
 
-def parse_access_lists(output: str, count: int) -> list[AccessList]:
-    """Split what the read script prints for ``count`` paths. Anything else is an error."""
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if len(lines) != count + 1:
-        raise VaultAccessError(BAD_OUTPUT)
-    user_sid, _, form = lines[0].partition("\t")
+def _user_line(line: str) -> tuple[str, str]:
+    """The current user's SID and the way SDDL writes it, from the first line of the output."""
+    user_sid, _, form = line.partition("\t")
     user = OWNER_FORM.fullmatch(form)
     if SID.fullmatch(user_sid) is None or user is None:
         raise VaultAccessError(BAD_OUTPUT)
     alias = user.group(1)
     if alias != user_sid and alias not in USER_ALIASES:
         raise VaultAccessError(BAD_OUTPUT)
+    return user_sid, alias
+
+
+def parse_access_lists(output: str, count: int) -> list[AccessList]:
+    """Split what the read script prints for ``count`` paths. Anything else is an error."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != count + 1:
+        raise VaultAccessError(BAD_OUTPUT)
+    user_sid, alias = _user_line(lines[0])
     result = []
     for line in lines[1:]:
         owner_form, tab, sddl = line.partition("\t")
@@ -126,6 +167,34 @@ def parse_access_lists(output: str, count: int) -> list[AccessList]:
             raise VaultAccessError(BAD_OUTPUT)
         result.append(AccessList(user_sid, alias, owner.group(1), sddl))
     return result
+
+
+class TreeGroup(NamedTuple):
+    """Entries below the vault folder that share one owner and access list."""
+
+    access: AccessList
+    entries: int  # how many files and folders have this owner and list
+    examples: tuple[str, ...]  # paths relative to the vault folder
+
+
+def parse_tree(output: str) -> list[TreeGroup]:
+    """Split what the tree script prints: the user line, then one line per distinct list."""
+    lines = [line.strip("\r\n") for line in output.splitlines() if line.strip()]
+    if not lines:
+        raise VaultAccessError(BAD_OUTPUT)
+    user_sid, alias = _user_line(lines[0].strip())
+    groups = []
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 4 or not fields[0].isdecimal() or int(fields[0]) < 1:
+            raise VaultAccessError(BAD_OUTPUT)
+        owner = OWNER_FORM.fullmatch(fields[1])
+        if owner is None:
+            raise VaultAccessError(BAD_OUTPUT)
+        examples = tuple(name for name in fields[3].split("|") if name)
+        access = AccessList(user_sid, alias, owner.group(1), fields[2])
+        groups.append(TreeGroup(access, int(fields[0]), examples))
+    return groups
 
 
 def parse_access_list(output: str) -> AccessList:
@@ -187,7 +256,9 @@ def _powershell() -> str:  # pragma: no cover - Windows only
     return str(Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 
-def _run(script: str, *paths: Path) -> str:  # pragma: no cover - Windows only
+def _run(
+    script: str, *paths: Path, timeout: int = POWERSHELL_TIMEOUT_SECONDS
+) -> str:  # pragma: no cover - Windows only
     command = [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script]
     environment = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
     # ``|`` cannot be part of a Windows path, so it separates them safely.
@@ -199,7 +270,7 @@ def _run(script: str, *paths: Path) -> str:  # pragma: no cover - Windows only
             env=environment,
             capture_output=True,
             text=True,
-            timeout=POWERSHELL_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
@@ -219,6 +290,10 @@ def read_accesses(paths: Sequence[Path]) -> list[AccessList]:  # pragma: no cove
 
 def read_access(folder: Path) -> AccessList:  # pragma: no cover - Windows only
     return read_accesses([folder])[0]
+
+
+def read_tree(root: Path) -> list[TreeGroup]:  # pragma: no cover - Windows only
+    return parse_tree(_run(TREE_SCRIPT, root, timeout=TREE_TIMEOUT_SECONDS))
 
 
 def make_private(folder: Path) -> None:  # pragma: no cover - Windows only
@@ -289,3 +364,29 @@ def verify_private(
             "folder's permissions); if it is `local-token`, delete it so a new one is made"
         )
         raise VaultAccessError(msg)
+
+
+def verify_tree(
+    root: Path,
+    *,
+    read: Callable[[Path], list[TreeGroup]] = read_tree,
+) -> None:
+    """Refuse to go on if anything below ``root`` can be used by other accounts.
+
+    A file whose full path is known can be opened by any account that has its own entry in the
+    file's access list, whatever the folders above say (Windows lets ordinary accounts traverse
+    folders they cannot list), so a tree moved in from elsewhere has to be checked file by file.
+    Nothing is changed. Only paths relative to the vault folder are reported, never content.
+    """
+    open_groups = [group for group in read(root) if not is_private(group.access)]
+    if not open_groups:
+        return
+    total = sum(group.entries for group in open_groups)
+    examples = [name for group in open_groups for name in group.examples][:EXAMPLES_SHOWN]
+    msg = (
+        f"{total} files or folders below the vault folder can be used by other accounts on this "
+        f"PC, for example: {', '.join(examples)}. They were not changed. Turn off inheritance "
+        "and keep only your account in their Security tab, or move them out and copy them back "
+        "in (a copy takes the folder's permissions)"
+    )
+    raise VaultAccessError(msg)

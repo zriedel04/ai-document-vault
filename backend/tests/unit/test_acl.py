@@ -17,13 +17,16 @@ import pytest
 from vault.storage import acl, layout
 from vault.storage.acl import (
     AccessList,
+    TreeGroup,
     VaultAccessError,
     is_private,
     parse_access_list,
     parse_access_lists,
+    parse_tree,
     sddl_is_private,
     secure_vault_folder,
     verify_private,
+    verify_tree,
 )
 
 OWNER = "S-1-5-21-111-222-333-1001"
@@ -282,6 +285,99 @@ class TestVerifyPrivate:
             verify_private(self.paths("a"), read=broken)
 
 
+def group(count: int, *examples: str, sddl: str = PRIVATE, owner: str = OWNER) -> TreeGroup:
+    return TreeGroup(access(sddl, owner=owner), count, examples)
+
+
+def tree_line(
+    count: int | str, owner: str = OWNER, sddl: str = PRIVATE, examples: str = "a"
+) -> str:
+    return f"{count}\t{owner and 'O:' + owner}\t{sddl}\t{examples}"
+
+
+class TestParseTree:
+    def test_an_empty_vault_is_just_the_user_line(self) -> None:
+        assert parse_tree(f"{HEADER}\r\n") == []
+
+    def test_one_group_per_distinct_access_list(self) -> None:
+        output = (
+            f"{HEADER}\r\n"
+            f"{tree_line(12000, examples='blobs\\a|blobs\\b|derived\\c')}\r\n"
+            f"{tree_line(2, owner='BA', sddl=OPEN, examples='moved.pdf')}\r\n"
+        )
+        first, second = parse_tree(output)
+        assert (first.entries, first.examples) == (12000, ("blobs\\a", "blobs\\b", "derived\\c"))
+        assert first.access == access(PRIVATE)
+        assert (second.entries, second.access.owner, second.access.sddl) == (2, "BA", OPEN)
+
+    def test_the_built_in_administrator_alias_is_taken_from_the_user_line(self) -> None:
+        parsed = parse_tree(f"{OWNER}\tO:LA\n{tree_line(1, owner='LA')}\n")
+        assert parsed[0].access.user_alias == "LA"
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "",
+            "\n\n",
+            "garbage",
+            f"{OWNER}\tO:{OWNER}\n3\tO:SY",  # too few fields
+            f"{HEADER}\n{tree_line(0)}",  # a group has at least one entry
+            f"{HEADER}\n{tree_line(-1)}",
+            f"{HEADER}\n{tree_line('x')}",
+            f"{HEADER}\n{tree_line('1.5')}",
+            f"{HEADER}\n{tree_line(1, owner='nonsense')}",
+            f"{HEADER}\n{tree_line(1, owner='')}",
+            f"{HEADER}\n{tree_line(1)}\textra",
+            f"{OTHER_USER}\tO:{OWNER}\n{tree_line(1)}",  # the user line is not consistent
+        ],
+    )
+    def test_anything_else_is_an_error(self, output: str) -> None:
+        with pytest.raises(VaultAccessError, match="does not understand"):
+            parse_tree(output)
+
+
+class TestVerifyTree:
+    def test_a_private_tree_passes(self) -> None:
+        verify_tree(Path("vault"), read=lambda _root: [group(30000, "blobs\\x"), group(3)])
+
+    def test_an_empty_tree_passes(self) -> None:
+        verify_tree(Path("vault"), read=lambda _root: [])
+
+    def test_a_single_open_file_deep_in_the_tree_stops_it(self) -> None:
+        deep = "blobs\\sha256\\ab\\cd\\abcd.pdf"
+        with pytest.raises(VaultAccessError) as caught:
+            verify_tree(
+                Path("vault"),
+                read=lambda _root: [group(40000, "blobs\\x"), group(1, deep, sddl=OPEN)],
+            )
+        assert deep in str(caught.value)
+        assert "1 files or folders" in str(caught.value)
+        assert "blobs\\x" not in str(caught.value)  # the private group is not mentioned
+
+    def test_a_file_with_another_owner_stops_it(self) -> None:
+        with pytest.raises(VaultAccessError, match="1 files or folders"):
+            verify_tree(Path("vault"), read=lambda _root: [group(1, "a", owner=OTHER_USER)])
+
+    def test_the_count_is_summed_and_the_examples_are_few(self) -> None:
+        groups = [
+            group(4, "a", "b", "c", sddl=OPEN),
+            group(5, "d", "e", "f", owner=OTHER_USER),
+        ]
+        with pytest.raises(VaultAccessError) as caught:
+            verify_tree(Path("vault"), read=lambda _root: groups)
+        message = str(caught.value)
+        assert "9 files or folders" in message
+        assert "a, b, c, d, e" in message
+        assert "f" not in message.split("for example:")[1].split(".")[0]
+
+    def test_a_reading_that_fails_is_not_trusted(self) -> None:
+        def broken(_root: Path) -> list[TreeGroup]:
+            raise VaultAccessError("timed out")
+
+        with pytest.raises(VaultAccessError, match="timed out"):
+            verify_tree(Path("vault"), read=broken)
+
+
 class FakeFolder:
     """Stands in for PowerShell: a folder whose list is read and replaced in memory."""
 
@@ -357,6 +453,13 @@ class TestSecureVaultFolder:
 class TestEnsureVaultOnWindows:
     """``ensure_vault`` calls the checks before it creates anything inside the folder."""
 
+    @pytest.fixture(autouse=True)
+    def trees(self, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+        """No PowerShell here: record the folders whose whole tree would be walked."""
+        walked: list[Path] = []
+        monkeypatch.setattr(acl, "verify_tree", walked.append)
+        return walked
+
     @pytest.fixture
     def verified(self, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         """Pretend to be on Windows with nothing to run; record what is verified."""
@@ -383,6 +486,31 @@ class TestEnsureVaultOnWindows:
         assert seen == [(True, [])]  # new, and still empty when it was secured
         layout.ensure_vault(tmp_path / "AIVault")
         assert seen[1][0] is False  # the second start finds it existing
+
+    def test_the_whole_tree_is_walked_after_the_named_entries(
+        self, tmp_path: Path, verified: list[list[str]], trees: list[Path]
+    ) -> None:
+        root = tmp_path / "AIVault"
+        layout.ensure_vault(root)
+        assert trees == [root]
+        layout.ensure_vault(root)
+        assert trees == [root, root]  # at every start, not only the first
+
+    def test_an_open_file_deep_in_the_tree_stops_the_start_before_the_subfolders_are_made(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(_root: Path) -> None:
+            raise VaultAccessError("1 files or folders below the vault folder: blobs\\x.pdf")
+
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+        monkeypatch.setattr(acl, "secure_vault_folder", lambda _root, *, created: None)
+        monkeypatch.setattr(acl, "verify_private", lambda _paths: None)
+        monkeypatch.setattr(acl, "verify_tree", refuse)
+        root = tmp_path / "AIVault"
+        root.mkdir()
+        with pytest.raises(layout.VaultPathError, match=r"blobs\\x\.pdf"):
+            layout.ensure_vault(root)
+        assert not (root / "blobs").exists()
 
     def test_a_new_vault_has_no_existing_entries_to_verify(
         self, tmp_path: Path, verified: list[list[str]]
@@ -556,6 +684,41 @@ class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI j
         stray.write_bytes(b"x")
         self.grant(stray, "S-1-5-32-545", flags="")
         with pytest.raises(layout.VaultPathError, match=r"vault\.db-mj1A2B3C4D"):
+            layout.ensure_vault(root)
+
+    def test_a_second_start_accepts_a_tree_of_nested_files_it_made(self, tmp_path: Path) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        for number in range(30):
+            folder = paths.blobs / "sha256" / f"{number:02x}" / "cd"
+            folder.mkdir(parents=True)
+            (folder / f"{number:064x}.pdf").write_bytes(b"x")
+        layout.ensure_vault(root)  # every file inherited the private list
+
+    def test_an_open_file_deep_in_the_blobs_stops_the_start(self, tmp_path: Path) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        deep = paths.blobs / "sha256" / "ab" / "cd" / "document.pdf"
+        deep.parent.mkdir(parents=True)
+        deep.write_bytes(b"x")
+        self.grant(deep, "S-1-5-32-545", flags="")  # Users may open it by its path
+        with pytest.raises(layout.VaultPathError) as caught:
+            layout.ensure_vault(root)
+        assert "document.pdf" in str(caught.value)
+        assert str(tmp_path) not in str(caught.value)  # relative to the vault folder
+
+    def test_a_tree_moved_in_from_elsewhere_keeps_its_lists_and_stops_the_start(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "AIVault"
+        paths = layout.ensure_vault(root)
+        outside = tmp_path / "old-vault" / "sha256" / "ab"
+        outside.mkdir(parents=True)
+        moved = outside / "file.pdf"
+        moved.write_bytes(b"x")
+        self.grant(moved, "S-1-5-19", flags="")  # a named second account
+        (tmp_path / "old-vault").rename(paths.blobs / "restored")  # a move keeps each file's list
+        with pytest.raises(layout.VaultPathError, match=r"file\.pdf"):
             layout.ensure_vault(root)
 
     def test_an_open_database_file_stops_the_start(self, tmp_path: Path) -> None:
