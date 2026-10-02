@@ -58,9 +58,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if status != 200 or "text/html" not in kind or 'id="root"' not in body:
             failures.append(f"{path}: expected the app's index.html, got {status} {kind}")
 
-    status, _, _ = fetch(f"{base}/api/does-not-exist")
-    if status != 404:
-        failures.append(f"/api/does-not-exist: expected 404, got {status}")
+    # Every /api path but the open ones needs the token, so without one an unknown path is 401
+    # (the server does not say which paths exist), and so is a real one.
+    for path in ("/api/does-not-exist", "/api/session"):
+        status, _, _ = fetch(f"{base}{path}")
+        if status != 401:
+            failures.append(f"{path}: expected 401 without a token, got {status}")
     status, _, _ = fetch(f"{base}/missing.js")
     if status != 404:
         failures.append(f"/missing.js: expected 404, got {status}")
