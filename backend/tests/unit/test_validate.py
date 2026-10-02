@@ -1,0 +1,312 @@
+import os
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from vault.ingest.validate import (
+    DEFAULT_LIMITS,
+    EXTENSIONS,
+    HEAD_BYTES,
+    Kind,
+    Limits,
+    Reason,
+    sniff,
+    validate_file,
+)
+
+PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 24
+EXE = b"MZ\x90\x00" + b"\x00" * 60 + b"This program cannot be run in DOS mode."
+OLE = bytes.fromhex("d0cf11e0a1b11ae1") + b"\x00" * 32
+TEXT = "Hello, résumé — 履歴書\nSecond line\n".encode()
+CANARY = "canary-file-name-xyzzy"
+
+
+def write(folder: Path, name: str, data: bytes) -> Path:
+    path = folder / name
+    path.write_bytes(data)
+    return path
+
+
+def make_docx(
+    path: Path,
+    *,
+    names: tuple[str, ...] = ("[Content_Types].xml", "word/document.xml"),
+    body: bytes = b"<w:document/>",
+) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in names:
+            archive.writestr(name, body)
+    return path
+
+
+class TestAccepted:
+    @pytest.mark.parametrize(
+        ("name", "data", "kind", "extension", "mime"),
+        [
+            ("a.pdf", PDF, Kind.PDF, "pdf", "application/pdf"),
+            ("a.PDF", PDF, Kind.PDF, "pdf", "application/pdf"),
+            ("a.png", PNG, Kind.PNG, "png", "image/png"),
+            ("a.jpg", JPEG, Kind.JPG, "jpg", "image/jpeg"),
+            ("a.JPEG", JPEG, Kind.JPG, "jpg", "image/jpeg"),  # stored as jpg
+            ("a.txt", TEXT, Kind.TEXT, "txt", "text/plain"),
+            ("a.md", TEXT, Kind.TEXT, "md", "text/markdown"),
+            ("résumé 履歴書 🙂.txt", TEXT, Kind.TEXT, "txt", "text/plain"),
+            ("x" * 200 + ".txt", TEXT, Kind.TEXT, "txt", "text/plain"),
+        ],
+    )
+    def test_each_supported_kind(
+        self, tmp_path: Path, name: str, data: bytes, kind: Kind, extension: str, mime: str
+    ) -> None:
+        verdict = validate_file(write(tmp_path, name, data))
+        assert verdict.ok
+        assert (verdict.detected, verdict.extension, verdict.mime) == (kind, extension, mime)
+
+    def test_a_docx(self, tmp_path: Path) -> None:
+        verdict = validate_file(make_docx(tmp_path / "a.docx"))
+        assert (verdict.ok, verdict.detected, verdict.extension) == (True, Kind.DOCX, "docx")
+
+    def test_every_allowed_extension_has_a_mime_type_and_a_test(self) -> None:
+        assert set(EXTENSIONS) == {"pdf", "docx", "png", "jpg", "jpeg", "txt", "md"}
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            TEXT,
+            b"\xef\xbb\xbf" + TEXT,  # UTF-8 with a byte order mark
+            "UTF-16 text\n".encode("utf-16"),  # full of NUL bytes, but marked as text
+            "caf\xe9 au lait\n".encode("latin-1"),  # not UTF-8, still text
+            b"tabs\tand\r\nform\x0cfeeds\n",
+            b"a",
+        ],
+    )
+    def test_text_in_the_usual_encodings(self, tmp_path: Path, data: bytes) -> None:
+        assert validate_file(write(tmp_path, "a.txt", data)).ok
+
+    def test_a_pdf_may_start_after_white_space(self, tmp_path: Path) -> None:
+        assert validate_file(write(tmp_path, "a.pdf", b"\r\n  " + PDF)).ok
+
+    def test_a_file_exactly_at_the_size_limit_is_accepted(self, tmp_path: Path) -> None:
+        path = write(tmp_path, "a.txt", b"x" * 10)
+        assert validate_file(path, Limits(max_bytes=10)).ok
+
+
+class TestRefused:
+    @pytest.mark.parametrize(
+        ("name", "data", "detected"),
+        [
+            ("a.pdf", PNG, Kind.PNG),  # a picture renamed to a PDF
+            ("a.png", PDF, Kind.PDF),
+            ("a.jpg", PNG, Kind.PNG),
+            ("a.png", JPEG, Kind.JPG),
+            ("a.pdf", EXE, Kind.BINARY),  # a program renamed to a PDF
+            ("a.txt", EXE, Kind.BINARY),
+            ("a.docx", EXE, Kind.BINARY),
+            ("a.png", EXE, Kind.BINARY),
+            ("a.pdf", TEXT, Kind.TEXT),  # text pretending to be a PDF
+            ("a.docx", TEXT, Kind.TEXT),
+            ("a.txt", PDF, Kind.PDF),  # a PDF renamed to .txt
+            ("a.md", PNG, Kind.PNG),
+            ("a.txt", b"PK\x03\x04" + b"\x00" * 30, Kind.ZIP),
+            ("a.pdf", bytes([0] * 100), Kind.BINARY),
+            ("a.txt", bytes(range(256)) * 4, Kind.BINARY),
+            ("a.pdf", b"x" * 2000 + PDF, Kind.TEXT),  # "%PDF-" far from the start
+            ("a.pdf", b"text then %PDF-1.7", Kind.TEXT),
+        ],
+    )
+    def test_the_bytes_decide_not_the_name(
+        self, tmp_path: Path, name: str, data: bytes, detected: Kind
+    ) -> None:
+        verdict = validate_file(write(tmp_path, name, data))
+        assert not verdict.ok
+        assert verdict.reason is Reason.CONTENT_MISMATCH
+        assert verdict.detected is detected
+
+    def test_a_zip_that_is_not_a_docx(self, tmp_path: Path) -> None:
+        other = make_docx(tmp_path / "a.docx", names=("[Content_Types].xml", "xl/workbook.xml"))
+        assert validate_file(other).reason is Reason.CONTENT_MISMATCH
+        no_types = make_docx(tmp_path / "b.docx", names=("word/document.xml",))
+        assert validate_file(no_types).reason is Reason.CONTENT_MISMATCH
+
+    def test_a_docx_named_pdf_or_txt(self, tmp_path: Path) -> None:
+        for name in ("a.pdf", "a.txt", "a.png"):
+            path = make_docx(tmp_path / name)
+            assert validate_file(path).reason is Reason.CONTENT_MISMATCH, name
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "a.exe",
+            "a.csv",
+            "a.xlsx",
+            "a.pptx",
+            "a.doc",
+            "a",
+            "a.",
+            ".pdf",
+            "a.pdf.exe",
+            "a.pdf\n",
+            "a.pdf ",
+            "a.p df",
+            "a.tar.gz",
+            "a.html",
+            "a.svg",
+            "a.zip",
+            "a.bat",
+        ],
+    )
+    def test_an_extension_that_is_not_on_the_list(self, tmp_path: Path, name: str) -> None:
+        if os.name == "nt" and name.endswith((" ", ".")):
+            pytest.skip("Windows drops a trailing space or dot from a file name")
+        try:
+            path = write(tmp_path, name, PDF)
+        except OSError:
+            pytest.skip("this file system cannot hold that name")
+        assert validate_file(path).reason is Reason.UNSUPPORTED_EXTENSION
+
+    def test_legacy_or_password_protected_office_files(self, tmp_path: Path) -> None:
+        verdict = validate_file(write(tmp_path, "a.docx", OLE))
+        assert verdict.reason is Reason.LEGACY_OR_ENCRYPTED_OFFICE
+        assert validate_file(write(tmp_path, "b.pdf", OLE)).reason is Reason.CONTENT_MISMATCH
+
+    def test_an_empty_file(self, tmp_path: Path) -> None:
+        for name in ("a.txt", "a.pdf", "a.docx"):
+            assert validate_file(write(tmp_path, name, b"")).reason is Reason.EMPTY
+
+    def test_a_file_over_the_limit(self, tmp_path: Path) -> None:
+        path = write(tmp_path, "a.txt", b"x" * 11)
+        assert validate_file(path, Limits(max_bytes=10)).reason is Reason.TOO_LARGE
+        assert validate_file(path).ok  # the default is far larger
+
+    def test_the_size_is_checked_before_the_content(self, tmp_path: Path) -> None:
+        path = write(tmp_path, "a.exe", b"x" * 11)
+        assert validate_file(path, Limits(max_bytes=10)).reason is Reason.TOO_LARGE
+
+    def test_not_a_file(self, tmp_path: Path) -> None:
+        assert validate_file(tmp_path).reason is Reason.NOT_A_FILE
+        assert validate_file(tmp_path / "missing.pdf").reason is Reason.NOT_A_FILE
+        folder = tmp_path / "folder.pdf"
+        folder.mkdir()
+        assert validate_file(folder).reason is Reason.NOT_A_FILE
+
+    def test_a_file_that_cannot_be_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = write(tmp_path, "a.txt", TEXT)
+
+        def denied(*_args: object, **_kwargs: object) -> None:
+            raise PermissionError("access is denied")
+
+        monkeypatch.setattr(Path, "open", denied)
+        assert validate_file(path).reason is Reason.UNREADABLE
+
+
+class TestZipLimits:
+    def docx(self, tmp_path: Path, **kwargs: object) -> Path:
+        return make_docx(tmp_path / "a.docx", **kwargs)  # type: ignore[arg-type]
+
+    def test_too_many_entries(self, tmp_path: Path) -> None:
+        names = ("[Content_Types].xml", "word/document.xml", *(f"p/{i}.xml" for i in range(10)))
+        path = self.docx(tmp_path, names=names)
+        assert validate_file(path, Limits(max_zip_entries=5)).reason is Reason.UNSAFE_ARCHIVE
+        assert validate_file(path, Limits(max_zip_entries=12)).ok
+
+    def test_too_large_when_unpacked(self, tmp_path: Path) -> None:
+        path = self.docx(tmp_path, body=b"a" * 1000)
+        limits = Limits(max_zip_uncompressed_bytes=1500, max_zip_ratio=10**6)
+        assert validate_file(path, limits).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_compression_bomb(self, tmp_path: Path) -> None:
+        path = self.docx(tmp_path, body=b"\x00" * 2_000_000)  # a few KiB on disk
+        assert path.stat().st_size < 10_000
+        assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE  # the default ratio
+        assert validate_file(path, Limits(max_zip_ratio=10**6)).ok
+
+    def test_the_default_limits_accept_an_ordinary_document(self, tmp_path: Path) -> None:
+        body = b"<w:p>some ordinary paragraph text</w:p>" * 20
+        assert validate_file(self.docx(tmp_path, body=body)).ok
+        assert DEFAULT_LIMITS.max_zip_ratio >= 100
+
+    @pytest.mark.parametrize(
+        "name",
+        ["../evil.xml", "/etc/passwd", "a/../../b.xml", "..\\evil.xml", "C:/x.xml", "\\abs.xml"],
+    )
+    def test_member_names_that_climb_out(self, tmp_path: Path, name: str) -> None:
+        path = self.docx(tmp_path, names=("[Content_Types].xml", "word/document.xml", name))
+        assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_a_name_with_dots_inside_is_fine(self, tmp_path: Path) -> None:
+        names = ("[Content_Types].xml", "word/document.xml", "word/media/a..b.png", "..x/y.xml")
+        assert validate_file(self.docx(tmp_path, names=names)).ok
+
+    def test_an_encrypted_entry(self, tmp_path: Path) -> None:
+        path = self.docx(tmp_path)
+        data = bytearray(path.read_bytes())
+        # Set the "encrypted" bit in the central directory's flags (offset 8 of each record).
+        index = data.find(b"PK\x01\x02")
+        while index != -1:
+            data[index + 8] |= 0x1
+            index = data.find(b"PK\x01\x02", index + 1)
+        path.write_bytes(bytes(data))
+        assert validate_file(path).reason is Reason.ENCRYPTED_ARCHIVE
+
+    def test_a_truncated_or_garbled_zip(self, tmp_path: Path) -> None:
+        good = self.docx(tmp_path).read_bytes()
+        for name, data in {
+            "cut.docx": good[: len(good) // 2],
+            "start-only.docx": good[:30],
+            "garbled.docx": b"PK\x03\x04" + bytes(range(200)),
+        }.items():
+            verdict = validate_file(write(tmp_path, name, data))
+            assert verdict.reason is Reason.UNREADABLE_ARCHIVE, name
+
+
+class TestSniff:
+    def test_each_signature(self) -> None:
+        assert sniff(PDF) is Kind.PDF
+        assert sniff(PNG) is Kind.PNG
+        assert sniff(JPEG) is Kind.JPG
+        assert sniff(b"PK\x03\x04rest") is Kind.ZIP
+        assert sniff(OLE) is Kind.OLE
+        assert sniff(TEXT) is Kind.TEXT
+        assert sniff(EXE) is Kind.BINARY
+        assert sniff(b"") is Kind.TEXT
+
+    def test_a_signature_must_be_at_the_start(self) -> None:
+        assert sniff(b" " + PNG) is not Kind.PNG
+        assert sniff(b"x" + JPEG) is not Kind.JPG
+        assert sniff(b"x" + b"PK\x03\x04") is not Kind.ZIP
+
+    def test_the_pdf_header_needs_a_version(self) -> None:
+        assert sniff(b"%PDF-1.4") is Kind.PDF
+        assert sniff(b"%PDF-2.0") is Kind.PDF
+        assert sniff(b"%PDF-") is Kind.TEXT
+        assert sniff(b"%PDF-x.y") is Kind.TEXT
+        assert sniff(b"%PDF-9.9") is Kind.TEXT
+        assert sniff(b"x" * 20 + b"%PDF-1.4") is Kind.TEXT
+
+    def test_one_nul_byte_without_a_byte_order_mark_is_binary(self) -> None:
+        assert sniff(b"x" * 100 + b"\x00") is Kind.BINARY
+        assert sniff("x".encode("utf-16")) is Kind.TEXT  # a byte order mark says it is text
+
+    def test_a_little_binary_is_tolerated_a_lot_is_not(self) -> None:
+        assert sniff(b"x" * 100 + b"\x01\x02") is Kind.TEXT  # about 2 percent
+        assert sniff(b"x" * 90 + b"\x01" * 10) is Kind.BINARY
+
+    def test_only_the_head_of_a_file_is_examined(self, tmp_path: Path) -> None:
+        # The assumption, stated: text that turns binary after the first HEAD_BYTES passes here
+        # and is caught when it is extracted.
+        path = write(tmp_path, "a.txt", b"x" * HEAD_BYTES + b"\x00" * 1000)
+        assert validate_file(path).ok
+        path = write(tmp_path, "b.txt", b"x" * (HEAD_BYTES - 10) + b"\x00" * 1000)
+        assert validate_file(path).reason is Reason.CONTENT_MISMATCH  # the NULs start inside it
+
+
+class TestVerdictsAreSafeToShow:
+    def test_a_verdict_never_contains_the_file_name_or_content(self, tmp_path: Path) -> None:
+        for name, data in ((f"{CANARY}.pdf", PNG), (f"{CANARY}.txt", TEXT), (f"{CANARY}.exe", PDF)):
+            verdict = validate_file(write(tmp_path, name, data))
+            assert CANARY not in repr(verdict)
+            assert "Hello" not in repr(verdict)
