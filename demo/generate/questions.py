@@ -233,7 +233,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which assignment sheet limits the length of the project proposal?",
+        "Which assignment sheet limits the length of the project proposal, and what happens if it is longer?",
         "The project proposal assignment sheet: no more than two pages; each extra page loses 5 points.",
         (
             s(ASSIGN1, "no more than two pages", 1),
@@ -294,7 +294,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which announcement says how long each team's prototype demo is?",
+        "Which announcement says how long each team's prototype demo is and how the time is split?",
         "The class announcement about demo day: 12 minutes, 8 to present and 4 for questions.",
         (
             s(

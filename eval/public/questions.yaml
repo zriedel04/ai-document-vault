@@ -100,7 +100,8 @@ questions:
     page: 2
     quote: Submit the proposal as a single PDF file through the course portal.
 - id: q011
-  question: Which assignment sheet limits the length of the project proposal?
+  question: Which assignment sheet limits the length of the project proposal, and what happens if it is
+    longer?
   category: lookup
   answerable: true
   answer: 'The project proposal assignment sheet: no more than two pages; each extra page loses 5 points.'
@@ -179,7 +180,7 @@ questions:
     page: null
     quote: 'Tue Dec 8: Calculus II final at 9:00 AM'
 - id: q017
-  question: Which announcement says how long each team's prototype demo is?
+  question: Which announcement says how long each team's prototype demo is and how the time is split?
   category: lookup
   answerable: true
   answer: 'The class announcement about demo day: 12 minutes, 8 to present and 4 for questions.'
