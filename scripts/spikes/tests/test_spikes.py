@@ -86,6 +86,7 @@ class VecTest(unittest.TestCase):
         self.assertEqual(rows["exact-search-check"]["same_answer_as_python"], 1.0)
         for name in ("vectors-50", "vectors-120"):
             self.assertEqual(rows[name]["dim"], 8)
+            self.assertEqual(rows[name]["queries_timed"], 4)  # the p95 rests on this many
             self.assertGreater(rows[name]["insert_vectors_per_second"], 0)
             self.assertIn("query_ms_p95", rows[name])
 

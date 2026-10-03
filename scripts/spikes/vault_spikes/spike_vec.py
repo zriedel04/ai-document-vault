@@ -44,6 +44,7 @@ METRICS: dict[str, Kind] = {
     "vectors": Kind.COUNT,
     "same_answer_as_python": Kind.RATIO,
     "dim": Kind.COUNT,
+    "queries_timed": Kind.COUNT,
     "insert_vectors_per_second": Kind.AMOUNT,
     "database_mib": Kind.AMOUNT,
     "query_ms_p50": Kind.AMOUNT,
@@ -236,6 +237,7 @@ def run_vec_spike(
                     raise OwnRuntimeError(msg)
             metrics: dict[str, int | float] = {
                 "dim": dim,
+                "queries_timed": queries,
                 "insert_vectors_per_second": per_second(size, insert_seconds),
                 "database_mib": store.size_mib(),
                 "query_ms_p50": percentile(timings, 0.5),
