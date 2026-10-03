@@ -68,6 +68,26 @@ class CliTest(unittest.TestCase):
             self.assertNotIn(PRIVATE_TEXT, text)
         self.assertEqual(json.loads(written)["rows"][0]["metrics"]["cer_mean"], 0.0)
 
+    def test_a_successful_run_does_not_print_the_output_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = root / "images"
+            images.mkdir()
+            (images / "a.png").write_text("alpha", encoding="utf-8")
+            (images / "a.txt").write_text("alpha", encoding="utf-8")
+            private = root / "Clients" / "Patient-Name"
+            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+                code, out, err = run(
+                    "ocr", "--engine", "rapidocr", "--images", str(images), "--out", str(private)
+                )
+            self.assertEqual(code, 0, err)
+            self.assertTrue((private / "ocr-rapidocr-ppocrv5.json").is_file())
+        for text in (out, err):
+            self.assertNotIn("Patient-Name", text)
+            self.assertNotIn("Clients", text)
+            self.assertNotIn(folder, text)
+        self.assertIn("report: ocr-rapidocr-ppocrv5.json and ocr-rapidocr-ppocrv5.md", out)
+
     def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
         # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and
         # merge, which reads reports from disk, could not combine the two engines.

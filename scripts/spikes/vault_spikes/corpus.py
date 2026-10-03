@@ -191,8 +191,23 @@ def load_manifest(path: Path) -> list[Document]:
 
 
 def canonical_paths(documents: list[Document]) -> dict[str, str]:
-    """Map every document to the first of its exact duplicates, which are interchangeable."""
-    return {doc.path: doc.duplicate_of or doc.path for doc in documents}
+    """Map every document to the first of its exact duplicates, which are interchangeable.
+
+    A duplicate that names a file the manifest does not list, or that is part of a cycle, is its
+    own original: there is nothing else to stand in for it.
+    """
+    known = {doc.path: doc for doc in documents}
+    canonical: dict[str, str] = {}
+    for doc in documents:
+        path, seen = doc.path, {doc.path}
+        while (target := known[path].duplicate_of) is not None and target in known:
+            if target in seen:
+                path = doc.path
+                break
+            seen.add(target)
+            path = target
+        canonical[doc.path] = path
+    return canonical
 
 
 def safe_file(folder: Path, relative: str) -> Path:
@@ -313,11 +328,20 @@ def build_corpus(
     max_chars: int = DEFAULT_MAX_CHARS,
     overlap: int = DEFAULT_OVERLAP,
 ) -> Corpus:
-    """Chunk every readable document. ``skipped`` counts the ones that could not be read."""
+    """Chunk every readable document. ``skipped`` counts the ones that could not be read.
+
+    An exact duplicate is not chunked: the import pipeline stops at an exact-duplicate match, and
+    two identical copies of a passage would take two of the ten places that Recall@10 and MRR
+    score. It is ``readable`` (a question may cite it) when its original is, and scoring treats
+    the two as one document (``canonical_paths``).
+    """
+    canonical = canonical_paths(documents)
     chunks: list[Chunk] = []
     readable: set[str] = set()
     skipped = 0
     for doc in documents:
+        if canonical[doc.path] != doc.path:
+            continue
         pages = read_pages(safe_file(corpus_dir, doc.path), doc, pdf_pages)
         if pages is None:
             skipped += 1
@@ -327,4 +351,13 @@ def build_corpus(
             chunks.extend(
                 Chunk(doc.path, number, piece) for piece in split_text(text, max_chars, overlap)
             )
+    for doc in documents:
+        if canonical[doc.path] != doc.path:
+            # The same bytes as the original, so it can be read exactly when the original can.
+            # It is still a listed file, so a missing or linked one is refused like any other.
+            safe_file(corpus_dir, doc.path)
+            if canonical[doc.path] in readable:
+                readable.add(doc.path)
+            else:
+                skipped += 1
     return Corpus(chunks, frozenset(readable), skipped)

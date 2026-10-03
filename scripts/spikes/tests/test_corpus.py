@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 from xml.sax.saxutils import escape
@@ -191,6 +192,40 @@ class ReadingTest(unittest.TestCase):
     def test_without_a_pdf_reader_pdfs_are_skipped_and_counted(self) -> None:
         corpus = c.build_corpus(self.root, self.documents)
         self.assertEqual(corpus.skipped, 2)
+
+    def test_an_exact_duplicate_is_not_chunked_but_can_still_be_cited(self) -> None:
+        corpus = c.build_corpus(self.root, self.documents, lambda _path: ["page"])
+        self.assertEqual([x for x in corpus.chunks if x.doc_path == "a/copy.txt"], [])
+        self.assertTrue([x for x in corpus.chunks if x.doc_path == "a/syllabus.txt"])
+        self.assertIn("a/copy.txt", corpus.readable)
+        texts = [x.text for x in corpus.chunks]
+        self.assertEqual(len(texts), len(set(texts)), "no passage is embedded twice")
+
+    def test_a_duplicate_of_an_unreadable_original_is_unreadable_and_counted(self) -> None:
+        documents = [
+            replace(d, needs_ocr=True) if d.path == "a/syllabus.txt" else d for d in self.documents
+        ]
+        corpus = c.build_corpus(self.root, documents, lambda _path: ["page"])
+        self.assertNotIn("a/syllabus.txt", corpus.readable)
+        self.assertNotIn("a/copy.txt", corpus.readable)
+        self.assertEqual(corpus.skipped, 3)  # the scan, the original and its copy
+
+    def test_a_listed_duplicate_that_is_missing_is_still_refused(self) -> None:
+        (self.root / "a" / "copy.txt").unlink()
+        with self.assertRaises(c.SpikeInputError):
+            c.build_corpus(self.root, self.documents, lambda _path: ["page"])
+
+    def test_duplicates_resolve_to_one_original_however_they_are_listed(self) -> None:
+        def doc(path: str, original: str | None) -> c.Document:
+            return c.Document(path, "text", None, False, original)
+
+        chain = [doc("c.txt", "b.txt"), doc("b.txt", "a.txt"), doc("a.txt", None)]
+        self.assertEqual(set(c.canonical_paths(chain).values()), {"a.txt"})
+        unknown = [doc("x.txt", "not-listed.txt")]
+        self.assertEqual(c.canonical_paths(unknown), {"x.txt": "x.txt"})
+        cycle = [doc("p.txt", "q.txt"), doc("q.txt", "p.txt")]
+        self.assertEqual(c.canonical_paths(cycle), {"p.txt": "p.txt", "q.txt": "q.txt"})
+        self.assertEqual(c.canonical_paths([doc("s.txt", "s.txt")]), {"s.txt": "s.txt"})
 
     def test_a_listed_path_cannot_leave_the_corpus_folder(self) -> None:
         outside = self.root.parent / "outside.txt"

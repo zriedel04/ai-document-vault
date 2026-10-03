@@ -156,12 +156,17 @@ def require_embedding_inputs(corpus: Path, questions: Path) -> None:
 
 
 def show(report: Report, written: tuple[Path, Path]) -> None:
-    """Print the numbers of the report (never anything else) and where it was written."""
+    """Print the numbers of the report (never anything else) and the names of the files written.
+
+    Only the two file names are printed, never the folder: ``--out`` is whatever the caller typed
+    (``D:\\Clients\\Patient-Name`` is a possible value), while a file name is built by this package
+    from a fixed stem that ``Report.write`` checks.
+    """
     for row in report.rows:
         print(row.candidate)
         for name, value in row.metrics.items():
             print(f"  {name}: {value}")
-    print(f"report: {written[0]} and {written[1]}")
+    print(f"report: {written[0].name} and {written[1].name}, in the --out folder")
 
 
 def run(args: argparse.Namespace) -> int:
