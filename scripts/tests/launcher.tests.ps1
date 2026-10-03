@@ -113,8 +113,13 @@ finally {
 $shell = (Get-Process -Id $PID).Path
 $null = & $shell -NoProfile -File $launcher
 Assert-That 'no command shows the usage and exits with 2' ($LASTEXITCODE -eq 2)
+# Windows PowerShell 5.1 turns a native program's error output into an exception while the
+# preference is Stop, so look at the exit code with the preference relaxed.
+$ErrorActionPreference = 'Continue'
 $null = & $shell -NoProfile -File $launcher 'bogus' 2>&1
-Assert-That 'an unknown command is refused' ($LASTEXITCODE -ne 0)
+$bogusExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Assert-That 'an unknown command is refused' ($bogusExit -ne 0)
 
 # --- the token is never printed -----------------------------------------------------------------
 $printing = Select-String -LiteralPath $launcher -Pattern '^\s*(Write-Host|Write-Output|Write-Warning|Write-Verbose|Write-Information|\[Console\])' |
