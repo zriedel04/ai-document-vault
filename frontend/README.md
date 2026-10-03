@@ -20,6 +20,10 @@ Run from this folder. Node 22.13 or newer on an even-numbered line is required (
 
 In normal use the backend serves `dist/` and the API from the same address, so there is no CORS setup and the app calls `/api/...` on its own origin. During development, Vite serves the app and proxies `/api` to the backend, which gives the browser the same single origin. Start both: `uv run python -m vault` in `backend/` and `npm run dev` here.
 
+## Access token
+
+Every `/api` call except `/api/health` needs the install's token as `Authorization: Bearer` (ADR 0016). The launcher opens the app at `http://127.0.0.1:8765/#token=<token>`. `src/api/token.ts` takes the token from that fragment before anything else runs, stores it in `sessionStorage` (this tab only; another local port cannot read it) and removes the fragment from the address bar. The API client (`src/api/client.ts`) then adds the header to each request, to the page's own origin only. With no stored token the page asks nothing of the API that needs one and shows a notice with a password field, where the token from the file `local-token` in the vault folder can be pasted. In development, open `http://localhost:5173/#token=<token>` once or paste the token. A token the server refuses shows the same notice.
+
 ## Typed API client
 
 `openapi.json` is the backend's OpenAPI schema, and `src/api/schema.d.ts` is generated from it by `openapi-typescript`. Both are committed, and CI regenerates them and fails if they differ, so the client cannot drift from the backend. After changing an API route or model:

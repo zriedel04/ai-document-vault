@@ -3,6 +3,8 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
+import { forgetToken } from "../api/token";
+
 // Mantine and the router use these browser APIs, which jsdom does not provide.
 Object.defineProperty(window, "matchMedia", {
   writable: true,
@@ -31,4 +33,6 @@ vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  window.sessionStorage.clear();
+  forgetToken();
 });
