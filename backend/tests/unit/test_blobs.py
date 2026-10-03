@@ -403,6 +403,33 @@ class TestEveryBlobIsReadOnlyAfterACrash:
         assert all(is_read_only(path) for path in paths)
         assert [path.read_bytes() for path in paths] == [f"file {n}".encode() for n in range(5)]
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows files have only a read-only attribute")
+    @pytest.mark.parametrize(
+        "mode",
+        [0o644, 0o664, 0o446, 0o646, 0o666, 0o200, 0o755, 0o4444, 0o440, 0o400, 0o000],
+    )
+    def test_a_blob_is_sealed_only_when_it_is_exactly_read_only(
+        self, store: BlobStore, mode: int
+    ) -> None:
+        # Any other mode is repaired: a write bit of the group or anyone else (a restored file
+        # may be 0o664 or 0o446), an execute or set-id bit, or a missing read bit.
+        path = put(store, HELLO)
+        path.chmod(mode)
+        assert store.seal() == 1
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+        assert store.seal() == 0
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows files have only a read-only attribute")
+    @pytest.mark.parametrize("mode", [0o446, 0o664, 0o755])
+    def test_importing_the_same_bytes_again_repairs_the_mode_too(
+        self, store: BlobStore, mode: int
+    ) -> None:
+        path = put(store, HELLO)
+        path.chmod(mode)
+        again = store.put(io.BytesIO(HELLO), "txt")
+        assert (again.created, again.path) == (False, path)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+
     def test_sealing_an_empty_or_missing_store_is_fine(self, store: BlobStore) -> None:
         assert store.seal() == 0
 

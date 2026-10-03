@@ -170,6 +170,14 @@ def _read_only(path: Path) -> None:
     path.chmod(READ_ONLY)
 
 
+def _is_sealed(path: Path) -> bool:
+    """Is the blob exactly read-only (``0o444``)? Any other mode is repaired, whichever bit is
+    the difference: a write bit of the owner, the group or anyone else (a restored file may be
+    ``0o664`` or ``0o446``), an execute or set-id bit, or no read bit at all. On Windows a file is
+    ``0o444`` or ``0o666``, so the same rule is the read-only attribute."""
+    return stat.S_IMODE(_real_file_mode(path)) == READ_ONLY
+
+
 def _writable(path: Path) -> None:
     path.chmod(_real_file_mode(path) | WRITABLE)
 
@@ -294,7 +302,7 @@ class BlobStore:
 
     @staticmethod
     def _seal_file(path: Path) -> None:
-        if _real_file_mode(path) & WRITABLE:
+        if not _is_sealed(path):
             _read_only(path)
 
     @contextmanager
@@ -413,7 +421,7 @@ class BlobStore:
         (An edit is found by ``verify``; sealing only closes the door.)"""
         sealed = 0
         for _, path in self.scan().blobs:
-            if _real_file_mode(path) & WRITABLE:
+            if not _is_sealed(path):
                 _read_only(path)
                 sealed += 1
         return sealed
