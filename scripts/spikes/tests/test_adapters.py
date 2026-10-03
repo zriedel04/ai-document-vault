@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -112,6 +114,45 @@ class ValidationTest(unittest.TestCase):
             adapters.RapidOcrEngine().recognise(Path("x.png"))
         with self.assertRaises(RuntimeError):
             adapters.TesseractEngine().recognise(Path("x.png"))
+
+
+class RapidOcrModelTest(unittest.TestCase):
+    """The engine is reported as PP-OCRv5, and RapidOCR's own default is another model."""
+
+    @staticmethod
+    def fake_rapidocr() -> tuple[types.ModuleType, mock.MagicMock]:
+        class OCRVersion(enum.Enum):
+            PPOCRV4 = "PP-OCRv4"
+            PPOCRV5 = "PP-OCRv5"
+            PPOCRV6 = "PP-OCRv6"
+
+        class ModelType(enum.Enum):
+            SMALL = "small"
+            MOBILE = "mobile"
+            SERVER = "server"
+
+        module = types.ModuleType("rapidocr")
+        engine = mock.MagicMock()
+        module.RapidOCR = engine  # type: ignore[attr-defined]
+        module.OCRVersion = OCRVersion  # type: ignore[attr-defined]
+        module.ModelType = ModelType  # type: ignore[attr-defined]
+        return module, engine
+
+    def test_detection_and_recognition_are_configured_as_pp_ocr_v5(self) -> None:
+        module, engine = self.fake_rapidocr()
+        with mock.patch.dict(sys.modules, {"rapidocr": module}):
+            adapters.RapidOcrEngine().load()
+        engine.assert_called_once()
+        params = engine.call_args.kwargs["params"]
+        for task in ("Det", "Rec"):
+            self.assertEqual(params[f"{task}.ocr_version"].value, "PP-OCRv5", task)
+            self.assertEqual(params[f"{task}.model_type"].value, "mobile", task)
+        self.assertEqual(adapters.RapidOcrEngine.name, "rapidocr-ppocrv5")
+
+    def test_the_declared_floor_is_a_release_that_takes_these_parameters(self) -> None:
+        # 3.4.0 is the oldest release checked with these keys (3.0.0 has no such constructor).
+        text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('"rapidocr>=3.4"', text)
 
 
 class TesseractTest(unittest.TestCase):

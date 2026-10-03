@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -245,7 +245,37 @@ def read_pages(path: Path, doc: Document, pdf_pages: PdfPages | None = None) -> 
     return None
 
 
-def split_text(text: str, max_chars: int = 800, overlap: int = 100) -> list[str]:
+DEFAULT_MAX_CHARS = 800
+DEFAULT_OVERLAP = 100
+
+
+def overlap_for(
+    questions: Sequence[Question],
+    max_chars: int = DEFAULT_MAX_CHARS,
+    base: int = DEFAULT_OVERLAP,
+) -> int:
+    """The chunk overlap that keeps every evidence quote whole in some chunk.
+
+    Two chunks that overlap by at least the length of a quote cannot both miss it: wherever a
+    boundary falls, one chunk holds all of it. The longest quote (with a quarter more for the
+    extra spaces and line breaks the page text may have) sets the overlap, never below ``base``
+    and never above half a chunk. A quote longer than that is still reported by
+    ``sources_missing_from`` when it falls across a boundary.
+    """
+    longest = max(
+        (
+            len(" ".join(source.quote.split()))
+            for q in questions
+            for source in (*q.sources, *q.alternatives)
+        ),
+        default=0,
+    )
+    return min(max(base, -(-longest * 5 // 4) + 1), max_chars // 2)
+
+
+def split_text(
+    text: str, max_chars: int = DEFAULT_MAX_CHARS, overlap: int = DEFAULT_OVERLAP
+) -> list[str]:
     """Cut ``text`` into windows of at most ``max_chars``, ending at whitespace where possible."""
     if max_chars <= 0 or not 0 <= overlap < max_chars:
         msg = "need max_chars > 0 and 0 <= overlap < max_chars"
@@ -278,8 +308,8 @@ def build_corpus(
     corpus_dir: Path,
     documents: list[Document],
     pdf_pages: PdfPages | None = None,
-    max_chars: int = 800,
-    overlap: int = 100,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    overlap: int = DEFAULT_OVERLAP,
 ) -> Corpus:
     """Chunk every readable document. ``skipped`` counts the ones that could not be read."""
     chunks: list[Chunk] = []

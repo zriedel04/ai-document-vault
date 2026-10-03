@@ -266,6 +266,7 @@ class EmbeddingTest(unittest.TestCase):
         self.assertEqual(metrics["questions_left_out"], 1)  # the scan question
         self.assertEqual(metrics["sources_not_in_any_chunk"], 0)
         self.assertEqual(metrics["chunks"], 2)
+        self.assertEqual(metrics["chunk_overlap_chars"], 100)  # the default; set by the caller
         self.assertEqual(metrics["dimensions"], 3)
         self.assertEqual(metrics["load_seconds"], 1.0)
         # 2 chunks in 1 second of fake time: 2 per second, so 7200 chunks take one hour.

@@ -17,7 +17,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
-from vault_spikes.corpus import SpikeInputError, build_corpus, load_manifest, load_questions
+from vault_spikes.corpus import (
+    SpikeInputError,
+    build_corpus,
+    load_manifest,
+    load_questions,
+    overlap_for,
+)
 from vault_spikes.report import Report, SpikeSchema, SpikeText, merge, with_package
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
@@ -190,10 +196,13 @@ def run(args: argparse.Namespace) -> int:
         embedder = adapters.SentenceTransformerEmbedder(args.candidate, args.device)
         pdf_pages = adapters.pdf_pages_for_corpus if available()["pypdfium2"] else None
         documents = load_manifest(args.corpus / "manifest.json")
+        questions = load_questions(args.questions)
+        overlap = overlap_for(questions)
         inputs = EmbeddingInputs(
-            build_corpus(args.corpus, documents, pdf_pages),
+            build_corpus(args.corpus, documents, pdf_pages, overlap=overlap),
             documents,
-            load_questions(args.questions),
+            questions,
+            overlap,
         )
         report = run_embedding_spike(
             embedder,

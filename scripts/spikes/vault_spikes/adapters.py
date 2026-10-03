@@ -159,9 +159,19 @@ class RapidOcrEngine:
 
     def load(self) -> None:
         _need("rapidocr", "ocr")
-        from rapidocr import RapidOCR
+        from rapidocr import ModelType, OCRVersion, RapidOCR
 
-        self.engine = RapidOCR()
+        # The package default is not PP-OCRv5 (it is PP-OCRv4 before 3.9 and PP-OCRv6 from 3.9), so
+        # the detection and recognition models are named here. Otherwise the numbers below would
+        # be another model's, reported under this model's name. Classification stays the default.
+        self.engine = RapidOCR(
+            params={
+                "Det.ocr_version": OCRVersion.PPOCRV5,
+                "Det.model_type": ModelType.MOBILE,
+                "Rec.ocr_version": OCRVersion.PPOCRV5,
+                "Rec.model_type": ModelType.MOBILE,
+            }
+        )
 
     def recognise(self, image: Path) -> str:
         if self.engine is None:

@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from vault_spikes.corpus import Chunk, Corpus, Document, Question, canonical_paths
+from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Question, canonical_paths
 from vault_spikes.metrics import mean, peak_memory_mib, per_second
 from vault_spikes.report import Environment, Report, collect_environment
 from vault_spikes.retrieval import K, rank_by_similarity, score_all, sources_missing_from
@@ -30,7 +30,9 @@ METHOD = (
     "process so the peak memory is that candidate's. The model is downloaded beforehand with "
     "`fetch-model` and loaded only from the local cache, so the load time never includes a "
     "download. The corpus is cut "
-    "into chunks of at most 800 characters; throughput is chunks embedded per second in batches. "
+    "into chunks of at most 800 characters that overlap by at least the longest evidence quote, "
+    "so no quote is split between two chunks (the overlap is reported); throughput is chunks "
+    "embedded per second in batches. "
     "Each answerable public question is embedded and its top 10 chunks are ranked by cosine "
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
     "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
@@ -52,6 +54,7 @@ METRICS = frozenset(
         "dimensions",
         "load_seconds",
         "chunks",
+        "chunk_overlap_chars",
         "mean_chunk_chars",
         "chunks_per_second",
         "hours_for_vault_of_chunks",
@@ -86,6 +89,7 @@ class EmbeddingInputs:
     corpus: Corpus
     documents: list[Document]
     questions: list[Question]
+    chunk_overlap_chars: int = DEFAULT_OVERLAP
 
 
 def run_embedding_spike(
@@ -145,6 +149,7 @@ def run_embedding_spike(
         "dimensions": len(vectors[0]),
         "load_seconds": load_seconds,
         "chunks": len(texts),
+        "chunk_overlap_chars": inputs.chunk_overlap_chars,
         "mean_chunk_chars": mean([len(t) for t in texts]),
         "chunks_per_second": chunks_per_second,
         "hours_for_vault_of_chunks": vault_chunks / chunks_per_second / 3600,

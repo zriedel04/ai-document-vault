@@ -9,9 +9,6 @@ from vault_spikes.corpus import Chunk, Question, Source
 from vault_spikes.metrics import cosine, mean
 
 K = 10
-# A quote that a chunk boundary cuts in two is matched by either half, but only for a quote long
-# enough that half of it still identifies the passage.
-SPLIT_QUOTE_MIN_WORDS = 8
 
 
 @dataclass(frozen=True)
@@ -31,22 +28,16 @@ def covers(chunk: Chunk, source: Source, canonical: Mapping[str, str]) -> bool:
     """Does this chunk hold the passage the source names?
 
     The chunk must come from the same document (exact duplicates count as one document) and its
-    text must contain the source's quote, with whitespace and line breaks ignored. A long quote
-    that a chunk boundary splits is matched by the chunk that holds either half of it. Which page
-    the quote is on does not matter: the quote itself identifies the passage.
+    text must contain the whole quote, with whitespace and line breaks ignored. Half a quote is not
+    the passage: a chunk with only the start of a sentence says nothing of how it ends. Quotes are
+    kept whole in some chunk by the chunker's overlap (``corpus.overlap_for``), and a passage no
+    chunk holds is counted and reported by ``sources_missing_from``, not silently scored. Which
+    page the quote is on does not matter: the quote itself identifies the passage.
     """
     if canonical.get(chunk.doc_path, chunk.doc_path) != canonical.get(source.path, source.path):
         return False
-    text = _normalise(chunk.text)
-    words = _normalise(source.quote).split()
-    if not words:
-        return False
-    if " ".join(words) in text:
-        return True
-    if len(words) < SPLIT_QUOTE_MIN_WORDS:
-        return False
-    half = (len(words) + 1) // 2
-    return " ".join(words[:half]) in text or " ".join(words[-half:]) in text
+    words = _normalise(source.quote)
+    return bool(words) and words in _normalise(chunk.text)
 
 
 def finds_a_document(question: Question, canonical: Mapping[str, str]) -> bool:
@@ -146,8 +137,8 @@ def sources_missing_from(
     """How many required passages no chunk of the corpus holds at all.
 
     Such a passage can never be retrieved, whatever the model does (a quote that is mistyped, text
-    the reader cannot extract, a passage cut in several places), so the count is reported next to
-    the scores instead of silently lowering them.
+    the reader cannot extract, a quote longer than the chunk overlap that a boundary cut), so the
+    count is reported next to the scores instead of silently lowering them.
     """
     return sum(
         1

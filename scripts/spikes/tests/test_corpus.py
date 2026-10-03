@@ -340,12 +340,24 @@ class RetrievalScoreTest(unittest.TestCase):
         q = question((src("a", "first passage"), src("a", "second passage")))
         self.assertEqual(self.score(q, [chunk("a", "first passage only")])[0], 0.5)
 
-    def test_a_long_quote_cut_by_a_chunk_boundary_is_found_by_either_half(self) -> None:
-        quote = "one two three four five six seven eight nine ten"
+    def test_half_a_quote_is_not_the_passage(self) -> None:
+        # A chunk with the generic start of a sentence, or with its end, does not hold the passage.
+        quote = "the project report is due on the first Monday of December at noon"
         q = question((src("a", quote),))
-        self.assertEqual(self.score(q, [chunk("a", "one two three four five six")])[0], 1.0)
-        self.assertEqual(self.score(q, [chunk("a", "six seven eight nine ten")])[0], 1.0)
-        self.assertEqual(self.score(q, [chunk("a", "three four five six seven")])[0], 0.0)
+        self.assertEqual(
+            self.score(q, [chunk("a", "the project report is due on the first")])[0], 0.0
+        )
+        self.assertEqual(self.score(q, [chunk("a", "first Monday of December at noon")])[0], 0.0)
+        self.assertEqual(self.score(q, [chunk("a", f"see: {quote}.")]), (1.0, 1.0))
+
+    def test_two_halves_in_two_chunks_do_not_stand_in_for_the_whole_either(self) -> None:
+        quote = "one two three four five six seven eight nine ten"
+        q = question((src("a", quote),), (src("alt", "an alternative way of saying it"),))
+        halves = [
+            chunk("a", "one two three four five six"),
+            chunk("a", "five six seven eight nine ten"),
+        ]
+        self.assertEqual(self.score(q, halves), (0.0, 0.0))
 
     def test_a_short_quote_must_be_whole(self) -> None:
         q = question((src("a", "Total $187.92"),))
@@ -421,6 +433,46 @@ class RetrievalScoreTest(unittest.TestCase):
         chunks = [chunk("d0"), chunk("d1"), chunk("d2")]
         ranked = rv.rank_by_similarity([1.0, 0.0], vectors, chunks, k=2)
         self.assertEqual([x.doc_path for x in ranked], ["d0", "d2"])
+
+
+class OverlapTest(unittest.TestCase):
+    @staticmethod
+    def with_quotes(*lengths: int, alternative: bool = False) -> list[c.Question]:
+        sources = tuple(src("a", "x" * length) for length in lengths)
+        if alternative:
+            return [question((src("a", "short"),), sources)]
+        return [question(sources)] if sources else []
+
+    def test_the_overlap_follows_the_longest_quote_within_limits(self) -> None:
+        self.assertEqual(c.overlap_for([]), c.DEFAULT_OVERLAP)
+        self.assertEqual(c.overlap_for(self.with_quotes(40, 60)), c.DEFAULT_OVERLAP)
+        self.assertEqual(c.overlap_for(self.with_quotes(40, 200)), 251)  # a quarter more, plus one
+        self.assertEqual(c.overlap_for(self.with_quotes(200, alternative=True)), 251)
+        self.assertEqual(c.overlap_for(self.with_quotes(5000)), c.DEFAULT_MAX_CHARS // 2)
+        self.assertEqual(c.overlap_for(self.with_quotes(5000), max_chars=100), 50)
+
+    def test_whitespace_in_a_quote_counts_once(self) -> None:
+        spaced = [question((src("a", "word   " * 40),))]  # 40 words: 199 characters when joined
+        self.assertEqual(c.overlap_for(spaced), 250)
+
+    def test_no_quote_is_cut_between_chunks_with_that_overlap_but_is_with_the_default(self) -> None:
+        words = [f"w{i:03d}" for i in range(600)]
+        text = " ".join(words)
+        size = 34  # about 170 characters, more than the default overlap of 100
+        quotes = [" ".join(words[i : i + size]) for i in range(len(words) - size)]
+        questions = [question((src("a", quotes[0]),))]
+        overlap = c.overlap_for([question((src("a", quotes[0]),))])
+        wide = c.split_text(text, overlap=overlap)
+        narrow = c.split_text(text)
+        self.assertEqual(len(questions), 1)
+        self.assertTrue(all(any(q in piece for piece in wide) for q in quotes))
+        self.assertFalse(all(any(q in piece for piece in narrow) for q in quotes))
+
+    def test_the_embedding_command_uses_the_overlap_for_the_quotes(self) -> None:
+        # The metric that records it is part of what the spike may report.
+        from vault_spikes import spike_embedding
+
+        self.assertIn("chunk_overlap_chars", spike_embedding.METRICS)
 
 
 if __name__ == "__main__":
