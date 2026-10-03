@@ -6,8 +6,11 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
 import { createApi } from "./api/client";
+import { takeTokenFromUrl } from "./api/token";
 import { createAppRouter } from "./router";
 
+// First thing: store a token handed over in the address and remove it from the address bar.
+takeTokenFromUrl();
 const api = createApi();
 const router = createAppRouter();
 const root = document.getElementById("root");

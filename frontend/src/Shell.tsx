@@ -5,6 +5,7 @@ import { Outlet, useLocation } from "@tanstack/react-router";
 import { useHealthState } from "./api/health-context";
 import { ColorSchemeToggle } from "./components/ColorSchemeToggle";
 import { HealthBadge } from "./components/HealthBadge";
+import { TokenBanner } from "./components/TokenBanner";
 import { RouterNavLink } from "./components/router-nav-link";
 import { NAV_ITEMS, isInSection } from "./nav";
 
@@ -49,6 +50,7 @@ export function Shell() {
       </AppShell.Navbar>
 
       <AppShell.Main>
+        <TokenBanner />
         <Outlet />
       </AppShell.Main>
     </AppShell>
