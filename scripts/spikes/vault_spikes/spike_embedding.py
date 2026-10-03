@@ -41,7 +41,13 @@ METHOD = (
     "The corpus is cut "
     "into chunks of at most 800 characters that overlap by at least the longest evidence quote, "
     "so no quote is split between two chunks (the overlap is reported); throughput is chunks "
-    "embedded per second in batches. "
+    "embedded per second in batches of `batch_size`, which is reported with every row because it "
+    "changes throughput and memory, so rows compare only when it is the same. These are plain "
+    "windows over the page text, not the application's planned structure-aware chunks of about "
+    "400 to 600 tokens with the document title and section path in front (the chunker is not "
+    "built yet). 800 characters is roughly 200 tokens, so chunks per second and the projection "
+    "for a vault of N chunks hold for chunks of this size and do not carry over to the planned "
+    "ones, and the comparison of the candidates holds for this representation. "
     "Each answerable evaluation question is embedded and its top 10 chunks are ranked by cosine "
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
     "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
@@ -65,6 +71,7 @@ METRICS: dict[str, Kind] = {
     "chunks": Kind.COUNT,
     "chunk_overlap_chars": Kind.COUNT,
     "mean_chunk_chars": Kind.AMOUNT,
+    "batch_size": Kind.COUNT,
     "chunks_per_second": Kind.AMOUNT,
     "hours_for_vault_of_chunks": Kind.AMOUNT,
     "vault_chunks_assumed": Kind.COUNT,
@@ -159,6 +166,7 @@ def run_embedding_spike(
         "chunks": len(texts),
         "chunk_overlap_chars": inputs.chunk_overlap_chars,
         "mean_chunk_chars": mean([len(t) for t in texts]),
+        "batch_size": batch_size,
         "chunks_per_second": chunks_per_second,
         "hours_for_vault_of_chunks": vault_chunks / chunks_per_second / 3600,
         "vault_chunks_assumed": vault_chunks,

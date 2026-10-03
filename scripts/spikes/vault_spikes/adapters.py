@@ -154,6 +154,7 @@ def gpu_name() -> str | None:
 
 class RapidOcrEngine:
     name = "rapidocr-ppocrv5"
+    runs_in_process = True
 
     def __init__(self) -> None:
         self.engine: Callable[[str], object] | None = None
@@ -187,6 +188,9 @@ class TesseractEngine:
     """Tesseract through its command line: no Python package, but a separate Windows install."""
 
     name = "tesseract"
+    # Each image is read by a separate tesseract process, so this process's memory is the small
+    # wrapper's and says nothing about the engine; the OCR spike leaves the figure out.
+    runs_in_process = False
 
     def __init__(self, executable: str | None = None, language: str = "eng") -> None:
         self.executable = executable

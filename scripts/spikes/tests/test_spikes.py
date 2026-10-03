@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from unittest import mock
 
+from vault_spikes import adapters
 from vault_spikes import corpus as c
 from vault_spikes import spike_embedding as emb
 from vault_spikes import spike_ocr as ocr
@@ -305,6 +307,7 @@ class EmbeddingTest(unittest.TestCase):
         self.assertEqual(metrics["questions_scored"], 2)
         self.assertEqual(metrics["questions_left_out"], 1)  # the scan question
         self.assertEqual(metrics["sources_not_in_any_chunk"], 0)
+        self.assertEqual(metrics["batch_size"], 1)  # what the run used, so rows can be compared
         self.assertEqual(metrics["documents_skipped"], 1)  # the scan, so scores can be read fairly
         self.assertEqual(metrics["chunks"], 2)
         self.assertEqual(metrics["chunk_overlap_chars"], 100)  # the default; set by the caller
@@ -463,6 +466,28 @@ class OcrTest(unittest.TestCase):
             ocr.LabelledImage(Path("b.png"), "total 100"),
             ocr.LabelledImage(Path("c.png"), "receipt"),
         ]
+
+    def test_an_engine_that_runs_as_another_program_has_no_memory_figure(self) -> None:
+        # This process's working set is the wrapper's when the engine is a separate program;
+        # reporting it next to an in-process engine's real figure would mislead.
+        outside = FakeOcr({"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"})
+        outside.runs_in_process = False  # type: ignore[attr-defined]
+        with mock.patch.object(ocr, "peak_memory_mib", return_value=123.0):
+            separate = ocr.run_ocr_spike(outside, self.samples(), environment=ENV, clock=Clock())
+            inside = FakeOcr({"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"})
+            inside.runs_in_process = True  # type: ignore[attr-defined]
+            local = ocr.run_ocr_spike(inside, self.samples(), environment=ENV, clock=Clock())
+            plain = ocr.run_ocr_spike(
+                FakeOcr({"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"}),
+                self.samples(),
+                environment=ENV,
+                clock=Clock(),
+            )
+        self.assertNotIn("peak_memory_mib", separate.rows[0].metrics)
+        self.assertEqual(local.rows[0].metrics["peak_memory_mib"], 123.0)
+        self.assertEqual(plain.rows[0].metrics["peak_memory_mib"], 123.0)  # in process by default
+        self.assertFalse(adapters.TesseractEngine.runs_in_process)
+        self.assertTrue(adapters.RapidOcrEngine.runs_in_process)
 
     def test_accuracy_and_speed_are_reported(self) -> None:
         engine = FakeOcr({"a.png": "hello world", "b.png": "total 108", "c.png": ""})

@@ -146,6 +146,24 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual(canonical["a/copy.txt"], "a/syllabus.txt")
         self.assertEqual(canonical["a/syllabus.txt"], "a/syllabus.txt")
 
+    def test_a_document_listed_twice_is_refused(self) -> None:
+        # Chunked twice, the copies would take several of the ten ranked places. Spellings that
+        # Windows treats as one file count as the same document.
+        for second in ("a/x.txt", "A/X.TXT", "a\\x.txt", "./a/x.txt", "a//x.txt", "a/./x.txt"):
+            manifest = {
+                "documents": [
+                    {"path": "a/x.txt", "kind": "text"},
+                    {"path": second, "kind": "text"},
+                ]
+            }
+            with self.subTest(second=second), self.assertRaises(c.SpikeInputError) as caught:
+                c.load_manifest(self.write("dup.json", json.dumps(manifest)))
+            self.assertIn("twice", str(caught.exception))
+        different = {
+            "documents": [{"path": "a/x.txt", "kind": "text"}, {"path": "a/y.txt", "kind": "text"}]
+        }
+        self.assertEqual(len(c.load_manifest(self.write("ok.json", json.dumps(different)))), 2)
+
     def test_malformed_manifests_are_input_errors(self) -> None:
         for name, text in {
             "not json": "{",

@@ -261,6 +261,18 @@ class CliTest(unittest.TestCase):
             ["qwen3-embedding-0.6b-cpu", "embeddinggemma-300m-cpu"],
         )
 
+    def test_sizes_that_cannot_work_are_refused_before_anything_runs(self) -> None:
+        for flag in ("--batch-size", "--vault-chunks"):
+            for value in ("0", "-4", "many", "1.5"):
+                with self.subTest(flag=flag, value=value), self.assertRaises(SystemExit) as caught:
+                    run("embedding", "--candidate", "qwen3-embedding-0.6b", flag, value)
+                self.assertEqual(caught.exception.code, 2)
+        for flag in ("--dim", "--queries"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                run("vec", flag, "0")
+        with self.assertRaises(SystemExit):
+            run("vec", "--sizes", "100", "0")
+
     def test_merge_can_be_repeated_but_never_replaces_one_of_its_inputs(self) -> None:
         env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
         with tempfile.TemporaryDirectory() as folder:

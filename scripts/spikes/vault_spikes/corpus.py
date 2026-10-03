@@ -8,6 +8,7 @@ same way, but the scripts never print or store any of its text.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import zipfile
 from collections.abc import Callable, Sequence
@@ -170,12 +171,21 @@ def load_manifest(path: Path) -> list[Document]:
         msg = "the manifest has no documents list"
         raise SpikeInputError(msg)
     documents: list[Document] = []
+    listed: set[str] = set()
     for raw in rows:
         row = _mapping(raw, "a document")
         doc_path, kind = row.get("path"), row.get("kind")
         if not isinstance(doc_path, str) or not isinstance(kind, str):
             msg = "a document needs a path and a kind"
             raise SpikeInputError(msg)
+        # One file listed twice would be chunked twice, and its copies would take several of the
+        # ten ranked places. Spellings Windows treats as one file count as one: case, the kind of
+        # slash, and a leading "./".
+        identity = posixpath.normpath(doc_path.replace("\\", "/")).casefold()
+        if identity in listed:
+            msg = "the manifest lists a document twice"
+            raise SpikeInputError(msg)
+        listed.add(identity)
         pages = row.get("pages")
         duplicate = row.get("exact_duplicate_of")
         documents.append(

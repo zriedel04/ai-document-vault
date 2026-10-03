@@ -67,6 +67,18 @@ KNOWN = {
 }
 
 
+def positive_int(text: str) -> int:
+    """A whole number of at least 1 (a batch of 0 would never advance, and a negative size is
+    meaningless); argparse reports the refusal."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     main = argparse.ArgumentParser(prog="vault_spikes", description=__doc__)
     commands = main.add_subparsers(dest="command", required=True)
@@ -77,9 +89,9 @@ def parser() -> argparse.ArgumentParser:
 
     vec = commands.add_parser("vec", help="sqlite-vec loading and search latency")
     common(vec)
-    vec.add_argument("--sizes", type=int, nargs="+", default=[10_000, 100_000])
-    vec.add_argument("--dim", type=int, default=1024)
-    vec.add_argument("--queries", type=int, default=30)
+    vec.add_argument("--sizes", type=positive_int, nargs="+", default=[10_000, 100_000])
+    vec.add_argument("--dim", type=positive_int, default=1024)
+    vec.add_argument("--queries", type=positive_int, default=30)
 
     emb = commands.add_parser("embedding", help="embedding throughput and retrieval quality")
     common(emb)
@@ -89,8 +101,8 @@ def parser() -> argparse.ArgumentParser:
     emb.add_argument(
         "--questions", type=Path, default=REPO_ROOT / "eval" / "public" / "questions.yaml"
     )
-    emb.add_argument("--batch-size", type=int, default=16)
-    emb.add_argument("--vault-chunks", type=int, default=100_000)
+    emb.add_argument("--batch-size", type=positive_int, default=16)
+    emb.add_argument("--vault-chunks", type=positive_int, default=100_000)
 
     fetch = commands.add_parser(
         "fetch-model", help="download an embedding model before it is measured (not timed)"

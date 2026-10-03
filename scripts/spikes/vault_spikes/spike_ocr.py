@@ -40,7 +40,10 @@ METHOD = (
     "reference text (whitespace collapsed) divided by the reference length; time is wall-clock per "
     "image after one untimed warm-up image. Images per minute counts the time lost in failed "
     "calls as well (a timeout can take minutes), and a second error figure counts each failed "
-    "image as a wrong one. Recognised text is compared in memory and never stored. The "
+    "image as a wrong one. Peak memory is this process's working set, so it is reported only "
+    "for an engine that runs inside it (RapidOCR); Tesseract runs as a separate program per "
+    "image and has no memory figure here (read its peak working set in Task Manager while it "
+    "runs, if it matters). Recognised text is compared in memory and never stored. The "
     "reference texts and the images stay outside the repository."
 )
 PACKAGES = ("rapidocr", "onnxruntime", "pillow")
@@ -173,7 +176,9 @@ def run_ocr_spike(
             "seconds_per_image_p50": median(seconds),
             "seconds_per_image_p95": percentile(seconds, 0.95),
         }
-    if (peak := peak_memory_mib()) is not None:
+    # The peak is this process's own. An engine that runs as a separate program (Tesseract) has no
+    # figure here rather than the wrapper's, which would sit next to RapidOCR's real one.
+    if getattr(engine, "runs_in_process", True) and (peak := peak_memory_mib()) is not None:
         metrics["peak_memory_mib"] = peak
     report.add(engine.name, **metrics)
     return report
