@@ -207,6 +207,24 @@ class EvalSetTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(len({q.question for q in QUESTIONS}), len(QUESTIONS), "unique questions")
 
+    def test_find_the_document_questions_can_be_scored_by_document(self) -> None:
+        # The embedding spike scores Hit@1 only for these (eval/README.md), so there must be
+        # enough of them to mean something, and each must be answerable from one document that a
+        # text-only run can read (a scan or a picture is left out of that run).
+        marked = [q for q in QUESTIONS if q.find_document]
+        self.assertGreaterEqual(len(marked), 5)
+        for q in marked:
+            with self.subTest(question=q.id):
+                self.assertTrue(q.answerable)
+                originals = {DOCS[src.path].exact_duplicate_of or src.path for src in q.sources}
+                self.assertEqual(len(originals), 1, f"{q.id}: evidence in more than one document")
+                for src in q.sources:
+                    self.assertNotIn(DOCS[src.path].kind, ("pdf_scan", "png", "jpg"), q.id)
+                self.assertTrue(q.question.startswith("Which "), q.id)
+                self.assertTrue(
+                    q.answer.startswith("The "), f"{q.id}: the answer names the document"
+                )
+
     def test_every_category_is_covered(self) -> None:
         by_category: dict[str, int] = {}
         for q in QUESTIONS:
