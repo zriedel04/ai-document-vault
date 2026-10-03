@@ -18,6 +18,20 @@ KNOWN = cli.KNOWN
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
 
+class FakeEmbedder:
+    name = "qwen3-embedding-0.6b-cpu"
+    loaded = False
+
+    def load(self) -> None:
+        FakeEmbedder.loaded = True
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+    def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+
 def run(*argv: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -89,62 +103,92 @@ class CliTest(unittest.TestCase):
             self.assertNotIn(folder, text)
         self.assertIn("report: ocr-rapidocr-ppocrv5.json and ocr-rapidocr-ppocrv5.md", out)
 
+    def embedding_run(self, root: Path, *extra: str) -> tuple[int, str, str]:
+        """One embedding run on a one-document corpus; the questions are the owner's own."""
+        (root / "corpus").mkdir(exist_ok=True)
+        (root / "corpus" / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
+        (root / "corpus" / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "documents": [
+                        {"path": "a.txt", "kind": "text", "pages": None, "needs_ocr": False}
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "questions.yaml").write_text(
+            "questions:\n- {id: q1, question: q, category: lookup, answerable: true,"
+            " sources: [{path: a.txt, quote: beta}]}\n",
+            encoding="utf-8",
+        )
+        with (
+            mock.patch.object(adapters, "SentenceTransformerEmbedder", lambda *_a: FakeEmbedder()),
+            mock.patch.object(adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"),
+        ):
+            return run(
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--corpus",
+                str(root / "corpus"),
+                "--questions",
+                str(root / "questions.yaml"),
+                "--out",
+                str(root / "out"),
+                *extra,
+            )
+
     def test_an_embedding_run_keeps_its_measurement_on_a_card_the_vocabulary_lacks(self) -> None:
-        class Embedder:
-            name = "qwen3-embedding-0.6b-cpu"
-
-            def load(self) -> None:
-                pass
-
-            def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-                return [[1.0, 0.0] for _ in texts]
-
-            def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
-                return [[1.0, 0.0] for _ in texts]
-
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / "corpus").mkdir()
-            (root / "corpus" / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
-            (root / "corpus" / "manifest.json").write_text(
-                json.dumps(
-                    {
-                        "documents": [
-                            {"path": "a.txt", "kind": "text", "pages": None, "needs_ocr": False}
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (root / "questions.yaml").write_text(
-                "questions:\n- {id: q1, question: q, category: lookup, answerable: true,"
-                " sources: [{path: a.txt, quote: beta}]}\n",
-                encoding="utf-8",
-            )
-            with (
-                mock.patch.object(adapters, "SentenceTransformerEmbedder", lambda *_a: Embedder()),
-                mock.patch.object(
-                    adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"
-                ),
-            ):
-                code, _, err = run(
-                    "embedding",
-                    "--candidate",
-                    "qwen3-embedding-0.6b",
-                    "--corpus",
-                    str(root / "corpus"),
-                    "--questions",
-                    str(root / "questions.yaml"),
-                    "--out",
-                    str(root / "out"),
-                )
+            code, _, err = self.embedding_run(root)
             self.assertEqual(code, 0, err)
             written = json.loads(
-                (root / "out" / "embedding-qwen3-embedding-0.6b-cpu.json").read_text(
+                (root / "out" / "embedding-qwen3-embedding-0.6b-cpu-private.json").read_text(
                     encoding="utf-8"
                 )
             )
         self.assertEqual(written["environment"]["gpu"], "unknown")
+
+    def test_the_public_and_the_private_run_of_a_candidate_keep_separate_reports(self) -> None:
+        # ADR 0013 needs both, and the same candidate on the same device used to write both to
+        # one name, so the second run replaced the first.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.embedding_run(root)
+            with mock.patch.object(cli, "is_public_dataset", return_value=True):
+                code, _, err = self.embedding_run(root)
+            self.assertEqual(code, 0, err)
+            names = sorted(path.name for path in (root / "out").glob("*.json"))
+            flags = {
+                name: json.loads((root / "out" / name).read_text(encoding="utf-8"))["rows"][0][
+                    "metrics"
+                ]["public_dataset"]
+                for name in names
+            }
+        self.assertEqual(
+            flags,
+            {
+                "embedding-qwen3-embedding-0.6b-cpu-private.json": False,
+                "embedding-qwen3-embedding-0.6b-cpu-public.json": True,
+            },
+        )
+
+    def test_a_run_that_would_replace_a_report_stops_before_it_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.embedding_run(root)
+            first = root / "out" / "embedding-qwen3-embedding-0.6b-cpu-private.json"
+            before = first.read_bytes()
+            FakeEmbedder.loaded = False
+            code, out, err = self.embedding_run(root)
+            self.assertEqual(first.read_bytes(), before)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("already in the output folder", err)
+        self.assertNotIn(folder, err)
+        # Stopped before the models were loaded, not after the hour they take.
+        self.assertFalse(FakeEmbedder.loaded)
 
     def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
         # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and
@@ -216,6 +260,24 @@ class CliTest(unittest.TestCase):
             [r["candidate"] for r in merged["rows"]],
             ["qwen3-embedding-0.6b-cpu", "embeddinggemma-300m-cpu"],
         )
+
+    def test_merge_can_be_repeated_but_never_replaces_one_of_its_inputs(self) -> None:
+        env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = Report("embedding", *KNOWN["embedding"].text, env)
+            report.add("qwen3-embedding-0.6b-cpu", chunks=1)
+            source = str(report.write(root / "in", stem="embedding-a")[0])
+            for _ in range(2):  # the second merge replaces the first, which is derived data
+                code, _, err = run("merge", source, "--out", str(root / "merged"))
+                self.assertEqual(code, 0, err)
+            # A measurement that carries the merge's own name must survive a merge into its folder.
+            own = report.write(root / "own", stem="embedding")[0]
+            before = own.read_bytes()
+            code, out, err = run("merge", str(own), "--out", str(root / "own"))
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("would overwrite one of the reports", err)
+            self.assertEqual(own.read_bytes(), before)
 
     def test_merge_refuses_a_report_with_text_of_its_own(self) -> None:
         env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})

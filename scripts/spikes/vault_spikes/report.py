@@ -448,18 +448,43 @@ class Report:
         lines += ["", "## Conclusion", "", CONCLUSION_PLACEHOLDER, ""]
         return "\n".join(lines)
 
-    def write(self, directory: Path, stem: str | None = None) -> tuple[Path, Path]:
-        """Write ``<stem>.json`` and ``<stem>.md`` into ``directory`` and return both paths."""
+    def write(
+        self, directory: Path, stem: str | None = None, *, overwrite: bool = False
+    ) -> tuple[Path, Path]:
+        """Write ``<stem>.json`` and ``<stem>.md`` into ``directory`` and return both paths.
+
+        A measurement can cost an hour on the owner's PC, so an existing file is never
+        overwritten silently: ``overwrite`` is for a file that is only derived from others (a
+        merged report). The CLI calls :func:`require_free` before a run starts, so a name clash
+        is found before the hour is spent, not after."""
         stem = self.spike if stem is None else stem
-        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,80}", stem):
-            msg = "the file name stem must be lower-case letters, digits, dots and hyphens"
-            raise OwnValueError(msg)
+        if not overwrite:
+            require_free(directory, stem)
+        elif not _STEM.fullmatch(stem):
+            raise OwnValueError(_STEM_MESSAGE)
         directory.mkdir(parents=True, exist_ok=True)
         json_path = directory / f"{stem}.json"
         md_path = directory / f"{stem}.md"
         json_path.write_text(json.dumps(self.to_json(), indent=2) + "\n", encoding="utf-8")
         md_path.write_text(self.to_markdown(), encoding="utf-8")
         return json_path, md_path
+
+
+_STEM = re.compile(r"[a-z0-9][a-z0-9._-]{0,80}")
+_STEM_MESSAGE = "the file name stem must be lower-case letters, digits, dots and hyphens"
+
+
+def require_free(directory: Path, stem: str) -> None:
+    """Refuse a bad stem, or a report of that name that is already in ``directory`` (a link
+    counts, even a dangling one, as ``Path.exists`` follows links and would miss it)."""
+    if not _STEM.fullmatch(stem):
+        raise OwnValueError(_STEM_MESSAGE)
+    if any(os.path.lexists(directory / f"{stem}{suffix}") for suffix in (".json", ".md")):
+        msg = (
+            "a report with this name is already in the output folder; "
+            "move it, or use another --out folder"
+        )
+        raise OwnValueError(msg)
 
 
 def merge(reports: list[Report]) -> Report:

@@ -23,8 +23,16 @@ from vault_spikes.corpus import (
     load_questions,
     overlap_for,
 )
-from vault_spikes.errors import OwnMessage
-from vault_spikes.report import Report, SpikeSchema, SpikeText, merge, with_gpu, with_package
+from vault_spikes.errors import OwnMessage, OwnValueError
+from vault_spikes.report import (
+    Report,
+    SpikeSchema,
+    SpikeText,
+    merge,
+    require_free,
+    with_gpu,
+    with_package,
+)
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
 from vault_spikes.spike_pdf import run_pdf_spike
@@ -180,6 +188,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "vec":
+        require_free(args.out, "vec")
         with tempfile.TemporaryDirectory() as folder:
             report = run_vec_spike(
                 lambda dim: SqliteVecStore(dim, Path(folder)),
@@ -199,6 +208,11 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "embedding":
         require_embedding_inputs(args.corpus, args.questions)
         embedder = adapters.SentenceTransformerEmbedder(args.candidate, args.device)
+        # The same candidate is measured on the public and on the private questions, and both
+        # reports are needed, so the data set is part of the name; checked before the long run.
+        public = is_public_dataset(args.corpus, args.questions)
+        stem = f"embedding-{embedder.name}-{'public' if public else 'private'}"
+        require_free(args.out, stem)
         pdf_pages = adapters.pdf_pages_for_corpus if available()["pypdfium2"] else None
         documents = load_manifest(args.corpus / "manifest.json")
         questions = load_questions(args.questions)
@@ -214,10 +228,10 @@ def run(args: argparse.Namespace) -> int:
             inputs,
             batch_size=args.batch_size,
             vault_chunks=args.vault_chunks,
-            public_dataset=is_public_dataset(args.corpus, args.questions),
+            public_dataset=public,
         )
         report.environment = with_gpu(report.environment, adapters.gpu_name())
-        show(report, report.write(args.out, stem=f"embedding-{embedder.name}"))
+        show(report, report.write(args.out, stem=stem))
         return 0
 
     if args.command == "ocr":
@@ -226,6 +240,7 @@ def run(args: argparse.Namespace) -> int:
             if args.engine == "rapidocr"
             else adapters.TesseractEngine(args.tesseract_path)
         )
+        require_free(args.out, f"ocr-{engine.name}")
         report = run_ocr_spike(engine, find_labelled_images(args.images, args.references))
         if isinstance(engine, adapters.TesseractEngine):
             # Rebuilt through the constructor, so the version is checked like any other.
@@ -239,6 +254,7 @@ def run(args: argparse.Namespace) -> int:
             if args.extractor == "pypdfium2"
             else adapters.PypdfiumPlumberExtractor()
         )
+        require_free(args.out, f"pdf-{extractor.name.replace('+', '-')}")
         pdfs = sorted(p for p in args.pdfs.iterdir() if p.suffix.lower() == ".pdf" and p.is_file())
         report = run_pdf_spike(extractor, pdfs, references_dir=args.references)
         show(report, report.write(args.out, stem=f"pdf-{extractor.name.replace('+', '-')}"))
@@ -249,7 +265,12 @@ def run(args: argparse.Namespace) -> int:
         for path in args.inputs
     ]
     combined = merge(reports)
-    show(combined, combined.write(args.out))
+    # A merged report is derived, so a new merge may replace the last one, but never an input.
+    target = (args.out / f"{combined.spike}.json").resolve()
+    if any(path.resolve() == target for path in args.inputs):
+        msg = "the merged report would overwrite one of the reports it was made from"
+        raise OwnValueError(msg)
+    show(combined, combined.write(args.out, overwrite=True))
     return 0
 
 

@@ -253,6 +253,14 @@ def corpus_inputs() -> emb.EmbeddingInputs:
 
 
 class EmbeddingTest(unittest.TestCase):
+    def test_the_method_does_not_call_the_questions_public(self) -> None:
+        # The same text heads a report on the owner's private questions, where "public" is false.
+        # Only the sentence that explains the `public_dataset` metric may use the word.
+        _, _, rest = emb.METHOD.partition("`public_dataset` metric")
+        sentences = emb.METHOD.replace(rest, "").replace("`public_dataset` metric", "")
+        self.assertNotIn("public", sentences.lower())
+        self.assertIn("Each answerable evaluation question", emb.METHOD)
+
     def test_a_gpu_candidate_reports_video_memory_next_to_host_memory(self) -> None:
         embedder = FakeEmbedder()
         embedder.name = "fake-model-cuda"

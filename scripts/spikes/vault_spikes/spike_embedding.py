@@ -2,7 +2,7 @@
 
 Decides ADR 0013. For each candidate the script measures load time, throughput in chunks per
 second, peak memory, a projection for a vault of a given size, and Recall@10, MRR and Hit@1 on
-the public eval questions. The models are injected (:class:`Embedder`), so the unit tests run the
+the eval questions. The models are injected (:class:`Embedder`), so the unit tests run the
 whole spike with a fake and CI never downloads a model.
 """
 
@@ -42,7 +42,7 @@ METHOD = (
     "into chunks of at most 800 characters that overlap by at least the longest evidence quote, "
     "so no quote is split between two chunks (the overlap is reported); throughput is chunks "
     "embedded per second in batches. "
-    "Each answerable public question is embedded and its top 10 chunks are ranked by cosine "
+    "Each answerable evaluation question is embedded and its top 10 chunks are ranked by cosine "
     "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
     "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
     "required passages found, MRR@10 the reciprocal rank of the first chunk holding an acceptable "

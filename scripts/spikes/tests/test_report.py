@@ -326,6 +326,35 @@ class OutputTest(unittest.TestCase):
         self.assertEqual((env.cpu, env.gpu), ("unknown", "unknown"))
         self.assertEqual(r.Environment.from_json(env.to_json()), env)
 
+    def test_a_report_is_never_written_over_an_existing_one(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            make().write(root, stem="a")
+            before = (root / "a.json").read_bytes()
+            (root / "b.md").write_text("only the markdown exists", encoding="utf-8")
+            stems = ["a", "b"]
+            try:
+                (root / "c.json").symlink_to(root / "nowhere")  # a dangling link is not "free"
+                stems.append("c")
+            except OSError:  # Windows without the privilege to make links
+                pass
+            for stem in stems:
+                with self.subTest(stem=stem), self.assertRaises(OwnValueError) as caught:
+                    make().write(root, stem=stem)
+                self.assertNotIn(folder, str(caught.exception))
+            self.assertEqual((root / "a.json").read_bytes(), before)
+            self.assertFalse((root / "nowhere").exists())
+            self.assertEqual(
+                (root / "b.md").read_text(encoding="utf-8"), "only the markdown exists"
+            )
+            # A derived report (a merge) may be replaced, but its name is still checked.
+            report = make()
+            report.add("model-a", chunks=7)
+            json_path, _ = report.write(root, stem="a", overwrite=True)
+            self.assertIn('"chunks": 7', json_path.read_text(encoding="utf-8"))
+            with self.assertRaises(ValueError):
+                report.write(root, stem="../x", overwrite=True)
+
     def test_file_stems_cannot_escape_the_folder(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             for stem in ("../x", "a/b", "", "A", "x\n", ".."):
