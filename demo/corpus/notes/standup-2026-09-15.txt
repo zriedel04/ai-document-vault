@@ -1,0 +1,7 @@
+Team Northwind standup, Tuesday, September 15, 2026
+Attendees: Alex, Jordan, Sam
+
+Alex: proposal draft is done and under review by the team.
+Jordan: chose SQLite for the prototype.
+Sam: finished the sketch of the search screen.
+Blockers: Jordan needs access to the course portal repository.

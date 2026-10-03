@@ -1,0 +1,371 @@
+{
+  "description": "Synthetic demo corpus. Every person, course and document is fictional.",
+  "generated_by": "demo/generate/build.py",
+  "documents": [
+    {
+      "path": "courses/cs350/syllabus.pdf",
+      "kind": "pdf_text",
+      "bytes": 3853,
+      "sha256": "43f28d47fbfb3561bd285274adc890c98eb356233eb271e54783840fab2f77c1",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/cse485/assignment-1-project-proposal.pdf",
+      "kind": "pdf_text",
+      "bytes": 3669,
+      "sha256": "d55185a287502f0c4ba6de5785311c67cee50a9f43468dd4576319c55cbe9cc9",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/cse485/assignment-2-requirements-spec.pdf",
+      "kind": "pdf_text",
+      "bytes": 3242,
+      "sha256": "7e5f5ee53527fa22ec246d36288f36b3c9277518d61cd299b62a7719d1044fc5",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/cse485/lecture-04-slide-notes.pdf",
+      "kind": "pdf_text",
+      "bytes": 4535,
+      "sha256": "d0f5bcd6ac96e7eb26db35f2090baa6fb518c04d231d19c3eab3cbb7189ecfd1",
+      "pages": 3,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/cse485/lecture-05-slide-notes.pdf",
+      "kind": "pdf_text",
+      "bytes": 3266,
+      "sha256": "77275f70a72cf042abf2fc41a678257b907a4a5299b64e5fb178a9b767545530",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/cse485/syllabus-copy.pdf",
+      "kind": "pdf_text",
+      "bytes": 7253,
+      "sha256": "3c574d57801f77cebc59416984e51765ebf302f87c43b63a5f64684dfb365ddb",
+      "pages": 3,
+      "needs_ocr": false,
+      "exact_duplicate_of": "courses/cse485/syllabus.pdf",
+      "note": "Byte-for-byte copy of syllabus.pdf"
+    },
+    {
+      "path": "courses/cse485/syllabus.pdf",
+      "kind": "pdf_text",
+      "bytes": 7253,
+      "sha256": "3c574d57801f77cebc59416984e51765ebf302f87c43b63a5f64684dfb365ddb",
+      "pages": 3,
+      "needs_ocr": false
+    },
+    {
+      "path": "courses/math241/syllabus.pdf",
+      "kind": "pdf_text",
+      "bytes": 4100,
+      "sha256": "1ac03b518920af8f1ed6766d4ab99d08328dfa338d6ebdee6beef478928453ec",
+      "pages": 2,
+      "needs_ocr": false
+    },
+    {
+      "path": "data/class-schedule.csv",
+      "kind": "csv",
+      "bytes": 157,
+      "sha256": "06f025157c9717ba05d03cdbf5deeb29d39140b5d4f6c55121be523ea6fb5d28",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "data/grades.csv",
+      "kind": "csv",
+      "bytes": 177,
+      "sha256": "e5675984781ed700c729eef6ba576053ef1f4c32487138a091a91e5dd1e871a2",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "data/project-budget.csv",
+      "kind": "csv",
+      "bytes": 118,
+      "sha256": "5b0c3773da324a63db09d0f97d1632bfacd92711d041bc792f5d6ce4474eddf5",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "data/team-hours.csv",
+      "kind": "csv",
+      "bytes": 102,
+      "sha256": "92e3fbc5e9fa22ad70ba58ff18c1b17f918e434ac7dd6f3bca412cd949a0c516",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "emails/advisor-extension-request.txt",
+      "kind": "txt",
+      "bytes": 514,
+      "sha256": "8100c0e6ec77e4e5beb063f72573c7df89fd5b59aca41db8d2c6a445a89e0292",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "emails/advisor-reply.txt",
+      "kind": "txt",
+      "bytes": 452,
+      "sha256": "8d38ed5821490dc0e5093af45f072c3ec394b1f338a0addcef7abcb5b6659f07",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "emails/class-announcement-demo-day.txt",
+      "kind": "txt",
+      "bytes": 474,
+      "sha256": "405bc85be95b6c5fc302934eafe78baf9c6d84ed3a66130600280bc0f95fa17b",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/api-design-notes.md",
+      "kind": "md",
+      "bytes": 487,
+      "sha256": "1a8704667f2e7ede8c8024eacafc8da2cff050b9211b1e1eff5f5044af5c38b0",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/final-report-outline.md",
+      "kind": "md",
+      "bytes": 394,
+      "sha256": "60c01d746f182501493e7a52a081a0cdeff576f6fdad5d316f7908deaa82a178",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/project-journal.md",
+      "kind": "md",
+      "bytes": 812,
+      "sha256": "346a03cc5c57936e1adbce47fbe491b1b52b2a43d97a48c733f8d4432051fc5b",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/reading-list.txt",
+      "kind": "txt",
+      "bytes": 382,
+      "sha256": "a23edac8ac1565dc5669ecf1f1c0266e3750b3ee76e836cc27831e42b45b3b90",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/standup-2026-09-08.txt",
+      "kind": "txt",
+      "bytes": 239,
+      "sha256": "7f1404894a6c5227f0447b3af61a890babc07f7e4c61bc1dc4f17784ec3a01aa",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/standup-2026-09-15-edited.txt",
+      "kind": "txt",
+      "bytes": 289,
+      "sha256": "76e720cf2f77f790e3c6e6458b8c58f13c92521c7e93218c733962e4506dce0c",
+      "pages": null,
+      "needs_ocr": false,
+      "near_duplicate_of": "notes/standup-2026-09-15.txt",
+      "note": "Edited copy of the September 15 standup with two small wording changes"
+    },
+    {
+      "path": "notes/standup-2026-09-15.txt",
+      "kind": "txt",
+      "bytes": 291,
+      "sha256": "4a839b581ee4af023838243f0e041c8f22bbe077f1d0a9246ce1fd89379dabdb",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/standup-2026-09-22.txt",
+      "kind": "txt",
+      "bytes": 324,
+      "sha256": "98244dafc1c953445af6936845235ff69cf80355d1b36b8d268be907e15f77a9",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/standup-2026-09-29.txt",
+      "kind": "txt",
+      "bytes": 267,
+      "sha256": "48cd8bf68919f1f6f1064bd19ea2ec722aaa0ff212ff6b15b5750d3a67b7755d",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/standup-2026-10-06.txt",
+      "kind": "txt",
+      "bytes": 323,
+      "sha256": "e170d34b55b39c4ac8b8cf9836129b76759d1ca5ccc4be08d869a72a5f9b3bad",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/study-plan.md",
+      "kind": "md",
+      "bytes": 399,
+      "sha256": "bdf5ee5920e00f8dfc12c3414e969db0477eb2689c7df32001b65788656b49ac",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "notes/team-contract.md",
+      "kind": "md",
+      "bytes": 552,
+      "sha256": "09ff409e5b1165d4dfb3ad2b38616b1ce6a7dad2bac7e3600f6b1ad950e3d910",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "project/design-review-feedback.docx",
+      "kind": "docx",
+      "bytes": 3105,
+      "sha256": "95c9f8d35127842bc62ebebc0c0d785cbddb21ed1adf07d2f4fb90db4287b9ad",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "project/project-proposal.docx",
+      "kind": "docx",
+      "bytes": 3152,
+      "sha256": "091564a162fcafb1f15e6c0041fb317ab42ea40c9eefd956604334e7fca8a548",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "project/requirements-v1.docx",
+      "kind": "docx",
+      "bytes": 3370,
+      "sha256": "67a23844407c14c35425ce70aaba4e9d99ce5b514ddbb0dbb5b7bf5ed9a0295a",
+      "pages": null,
+      "needs_ocr": false
+    },
+    {
+      "path": "project/requirements-v2-copy.docx",
+      "kind": "docx",
+      "bytes": 3556,
+      "sha256": "ac4e10d5e86daa324ab088d443044bb5ed0efa7979b9c82a0f62396b97f92df2",
+      "pages": null,
+      "needs_ocr": false,
+      "exact_duplicate_of": "project/requirements-v2.docx",
+      "note": "Byte-for-byte copy of requirements-v2.docx"
+    },
+    {
+      "path": "project/requirements-v2.docx",
+      "kind": "docx",
+      "bytes": 3556,
+      "sha256": "ac4e10d5e86daa324ab088d443044bb5ed0efa7979b9c82a0f62396b97f92df2",
+      "pages": null,
+      "needs_ocr": false,
+      "near_duplicate_of": "project/requirements-v1.docx",
+      "note": "Second version of the requirements: several numbers and requirements differ from v1"
+    },
+    {
+      "path": "receipts/bookstore-receipt.jpg",
+      "kind": "jpg",
+      "bytes": 48976,
+      "sha256": "f6b810b773bfe502aaa534e90f7773a8e5c73349fcc33e8a9a549a61e55047ea",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "receipts/coffee-receipt-copy.jpg",
+      "kind": "jpg",
+      "bytes": 37090,
+      "sha256": "aaf97b32bc62de81b1ba5ab6f9c9f8a204bde81cba34b73e71bb41a9f1a768a8",
+      "pages": null,
+      "needs_ocr": true,
+      "exact_duplicate_of": "receipts/coffee-receipt.jpg",
+      "note": "Byte-for-byte copy of coffee-receipt.jpg"
+    },
+    {
+      "path": "receipts/coffee-receipt.jpg",
+      "kind": "jpg",
+      "bytes": 37090,
+      "sha256": "aaf97b32bc62de81b1ba5ab6f9c9f8a204bde81cba34b73e71bb41a9f1a768a8",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "receipts/laptop-repair-receipt.jpg",
+      "kind": "jpg",
+      "bytes": 52857,
+      "sha256": "ca2c714a7cfa0e33449a8242f496991b54ab50794188dbc1ee15cede167b57a4",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "receipts/printing-receipt.jpg",
+      "kind": "jpg",
+      "bytes": 32835,
+      "sha256": "8beb93529a1ed95fd089c4b4789633af986c6d4e2d6cec0f4f69b2fce99e555b",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "scans/advisor-signoff-form-scan.pdf",
+      "kind": "pdf_scan",
+      "bytes": 121204,
+      "sha256": "6efe750d60b58c83a7d6a513aac07487a6fe8bee32e99b9252da383cde1cc5a8",
+      "pages": 1,
+      "needs_ocr": true,
+      "note": "Scanned-style PDF: an image only, no text layer"
+    },
+    {
+      "path": "scans/library-overdue-notice-scan.pdf",
+      "kind": "pdf_scan",
+      "bytes": 101467,
+      "sha256": "079d3686986f51885a9e56e832961be451f1c9559c77ed2876c40a88f8d10edf",
+      "pages": 1,
+      "needs_ocr": true,
+      "note": "Scanned-style PDF: an image only, no text layer"
+    },
+    {
+      "path": "scans/team-meeting-notes-scan.pdf",
+      "kind": "pdf_scan",
+      "bytes": 220697,
+      "sha256": "5d6e5424865c8e334a77f98c19a20ef9e8c18345643e529b4ddd8b1e5fb3ccd3",
+      "pages": 2,
+      "needs_ocr": true,
+      "note": "Scanned-style PDF: an image only, two pages"
+    },
+    {
+      "path": "screenshots/build-error.png",
+      "kind": "png",
+      "bytes": 39530,
+      "sha256": "b2fb70b19fb0a53ac5f1a60ad658f6a86196a6535423474fdbca3b3284ce92c7",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "screenshots/calendar-finals-week.png",
+      "kind": "png",
+      "bytes": 46530,
+      "sha256": "0a8eb465cb68e8ab96eb87ece641b63b3b23541d2453ef7f134a4c9ba255fe2a",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "screenshots/chat-with-advisor.png",
+      "kind": "png",
+      "bytes": 30957,
+      "sha256": "b9061a2aac29369a2791eec6159b46753599d0af7c91ac7fa9021e44c6011bea",
+      "pages": null,
+      "needs_ocr": true
+    },
+    {
+      "path": "screenshots/kanban-board.png",
+      "kind": "png",
+      "bytes": 28069,
+      "sha256": "09f863f21441cac58d6b223e378ee16700e1a661b491e102c8fb5e967c2be763",
+      "pages": null,
+      "needs_ocr": true
+    }
+  ]
+}

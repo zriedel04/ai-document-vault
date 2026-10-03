@@ -1,0 +1,43 @@
+[project]
+name = "demo-generate"
+version = "0.1.0"
+description = "Builds the synthetic demo corpus and public eval set. All content is fictional."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pillow>=11",
+    "reportlab>=4",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pyyaml>=6",
+    "ruff>=0.8",
+    "types-pyyaml>=6",
+]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "N", "RUF", "S", "SIM", "UP", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"content_*.py" = ["E501"]  # prose is data: one sentence per string
+"questions.py" = ["E501"]
+"render.py" = ["E501", "S311"]  # long XML literals; seeded noise is not cryptography
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["."]
+
+[[tool.mypy.overrides]]
+module = ["reportlab.*"]
+ignore_missing_imports = true  # reportlab ships no type information

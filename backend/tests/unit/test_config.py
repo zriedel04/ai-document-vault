@@ -154,6 +154,17 @@ def test_settings_are_immutable() -> None:
         settings.server.port = 1  # type: ignore[misc]
 
 
+@pytest.mark.parametrize("name", ["config.example.toml", "config.demo.toml"])
+def test_committed_config_files_load(name: str) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    assert load_settings(repo_root / name).server.host == "127.0.0.1"
+
+
+def test_demo_config_does_not_collide_with_the_default_port() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    assert load_settings(repo_root / "config.demo.toml").server.port != Settings().server.port
+
+
 def test_the_example_config_is_valid() -> None:
     example = Path(__file__).resolve().parents[3] / "config.example.toml"
     settings = load_settings(example)
