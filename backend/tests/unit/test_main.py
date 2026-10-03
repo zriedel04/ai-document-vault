@@ -85,3 +85,50 @@ def test_request_urls_never_reach_the_logs_of_a_real_server() -> None:
     text = "\n".join(SafeFormatter().format(record) for record in collector.records)
     assert "Diagnosis" not in text
     assert "/api/health" not in text
+
+
+def vault_settings(vault_dir: Any) -> Settings:
+    return Settings.model_validate({"vault": {"path": str(vault_dir)}})
+
+
+def test_start_up_recovers_the_blob_store_from_a_crash(vault_dir: Any) -> None:
+    # A crash left a finished blob writable, a half copy and a lock behind.
+    import io
+    import os
+    import stat
+
+    from vault.storage.blobs import BlobStore
+
+    create_app(vault_settings(vault_dir))  # makes the vault
+    store = BlobStore(vault_dir / "blobs")
+    blob = store.put(io.BytesIO(b"hello vault"), "txt").path
+    blob.chmod(0o644)
+    (vault_dir / "blobs" / ".tmp" / "half-copy").write_bytes(b"hel")
+    (vault_dir / "blobs" / ".tmp" / "lock.lock").write_bytes(b"")
+    app = create_app(vault_settings(vault_dir))
+    assert stat.S_IMODE(os.stat(blob).st_mode) & 0o222 == 0
+    assert list((vault_dir / "blobs" / ".tmp").iterdir()) == []
+    assert isinstance(app.state.blobs, BlobStore)
+    assert app.state.blobs.root == vault_dir / "blobs"
+
+
+def test_start_up_stops_when_the_temporary_folder_is_a_link(vault_dir: Any, tmp_path: Any) -> None:
+    import os
+
+    from vault.storage.blobs import BlobIntegrityError
+
+    create_app(vault_settings(vault_dir))
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "original.txt").write_bytes(b"keep me")
+    try:
+        os.symlink(outside, vault_dir / "blobs" / ".tmp", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this system cannot make symbolic links here")
+    with pytest.raises(BlobIntegrityError):
+        create_app(vault_settings(vault_dir))
+    assert (outside / "original.txt").read_bytes() == b"keep me"
+
+
+def test_without_a_vault_there_is_no_blob_store() -> None:
+    assert create_app(Settings()).state.blobs is None
