@@ -304,35 +304,65 @@ function Start-Backend {
         -WorkingDirectory $script:BackendDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $script:RunDir 'server.out.log') `
         -RedirectStandardError (Join-Path $script:RunDir 'server.err.log')
-    Write-Record $process $Facts
-    $url = "http://${HostName}:${Port}/api/health"
-    if ($HostName.Contains(':')) { $url = "http://[${HostName}]:${Port}/api/health" }
-    $deadline = (Get-Date).AddSeconds(60)
-    while ($true) {
-        if ($process.HasExited) {
-            Remove-Record
-            throw 'the server stopped while starting; see .run\server.err.log'
+    # Whatever stops start-up from completing (a record that cannot be written, a server that
+    # exits or never answers, Ctrl+C) must not leave a server running that "stop" cannot find.
+    $ready = $false
+    try {
+        Write-Record $process $Facts
+        $url = "http://${HostName}:${Port}/api/health"
+        if ($HostName.Contains(':')) { $url = "http://[${HostName}]:${Port}/api/health" }
+        $deadline = (Get-Date).AddSeconds(60)
+        while ($true) {
+            if ($process.HasExited) {
+                throw 'the server stopped while starting; see .run\server.err.log'
+            }
+            try {
+                $answer = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 2
+                if ($answer.StatusCode -eq 200) {
+                    $ready = $true
+                    return $process
+                }
+            }
+            catch {
+                # not listening yet
+            }
+            if ((Get-Date) -gt $deadline) {
+                throw 'the server did not answer within 60 seconds; see .run\server.err.log'
+            }
+            Start-Sleep -Milliseconds 500
         }
-        try {
-            $answer = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 2
-            if ($answer.StatusCode -eq 200) { return $process }
+    }
+    finally {
+        if (-not $ready) {
+            try {
+                Stop-Backend $process
+            }
+            catch {
+                # The start-up error keeps travelling; this says why the server is still there.
+                [Console]::Error.WriteLine("vault: $($_.Exception.Message)")
+            }
         }
-        catch {
-            # not listening yet
-        }
-        if ((Get-Date) -gt $deadline) {
-            Stop-Backend $process
-            throw 'the server did not answer within 60 seconds; see .run\server.err.log'
-        }
-        Start-Sleep -Milliseconds 500
     }
 }
 
 function Stop-Backend {
-    param([System.Diagnostics.Process]$Process)
+    <# End the server and forget it. The record stays if the process could not be ended, so
+       that "stop" can be tried again and the launcher never reports a server that is still
+       holding the port as stopped. #>
+    param([Parameter(Mandatory)][object]$Process)
     if (-not $Process.HasExited) {
-        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
-        $null = $Process.WaitForExit(10000)
+        try {
+            Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+        }
+        catch {
+            # It may have ended on its own just now; otherwise it was refused.
+            if (-not $Process.HasExited) {
+                throw 'the server could not be stopped (access was refused, or it keeps running); its record is kept, so run .\vault.ps1 stop to try again'
+            }
+        }
+        if (-not $Process.WaitForExit(10000)) {
+            throw 'the server did not exit within 10 seconds; its record is kept, so run .\vault.ps1 stop to try again'
+        }
     }
     Remove-Record
 }

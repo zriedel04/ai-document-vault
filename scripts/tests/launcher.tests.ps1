@@ -151,6 +151,68 @@ try {
     }
     Assert-That 'a port that nothing holds is free' (-not (Test-PortInUse '127.0.0.1' $taken))
 
+    # --- stopping and start-up failures ----------------------------------------------------------
+    $shellPath = (Get-Process -Id $PID).Path
+    function New-Sleeper {
+        Microsoft.PowerShell.Management\Start-Process -FilePath $shellPath -PassThru -WindowStyle Hidden `
+            -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 120'
+    }
+    $facts = [pscustomobject]@{ host = '127.0.0.1'; port = 8765; vault = 'C:\v' }
+
+    $sleeper = New-Sleeper
+    try {
+        Write-Record $sleeper $facts
+        Stop-Backend $sleeper
+        Assert-That 'a server that can be ended is ended and its record removed' `
+            ($sleeper.HasExited -and -not (Test-Path -LiteralPath $script:RecordFile))
+    }
+    finally {
+        if (-not $sleeper.HasExited) { $sleeper.Kill() }
+    }
+
+    # A process that refuses to end (stood in for by an object that says it is still running).
+    $stubborn = [pscustomobject]@{ Id = 2147480000; HasExited = $false }
+    $stubborn | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+    Write-Record $self $facts
+    $message = Get-ThrownMessage { Stop-Backend $stubborn }
+    Assert-That 'a refused stop is reported' (($null -ne $message) -and ($message -match 'could not be stopped'))
+    Assert-That 'and the record is kept, so stop can be tried again' (Test-Path -LiteralPath $script:RecordFile)
+
+    # A process that is ended but does not exit within the wait.
+    $sleeper = New-Sleeper
+    try {
+        $slow = [pscustomobject]@{ Id = $sleeper.Id; HasExited = $false }
+        $slow | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+        $message = Get-ThrownMessage { Stop-Backend $slow }
+        Assert-That 'a server that does not exit in time is reported' (($null -ne $message) -and ($message -match 'did not exit'))
+        Assert-That 'and its record is kept' (Test-Path -LiteralPath $script:RecordFile)
+    }
+    finally {
+        if (-not $sleeper.HasExited) { $sleeper.Kill() }
+    }
+    Remove-Record
+
+    # A record that cannot be written after the server has started: the server must not be left
+    # running. The functions are replaced inside this block only.
+    $script:started = $null
+    & {
+        function Get-BackendPython { return 'unused' }
+        function Start-Process {
+            $script:started = New-Sleeper
+            return $script:started
+        }
+        function Write-Record { throw 'the record file is locked' }
+        try {
+            $message = Get-ThrownMessage { Start-Backend ([pscustomobject]@{ host = '127.0.0.1'; port = $taken; vault = 'C:\v' }) }
+            Assert-That 'start-up fails with the reason when the record cannot be written' `
+                (($null -ne $message) -and ($message -match 'locked'))
+            Assert-That 'and the server that was started is ended' ($null -ne $script:started -and $script:started.HasExited)
+        }
+        finally {
+            if ($null -ne $script:started -and -not $script:started.HasExited) { $script:started.Kill() }
+        }
+    }
+
     # --- the lock around check-and-start -------------------------------------------------------
     $name = Get-LockName
     $probe = {
