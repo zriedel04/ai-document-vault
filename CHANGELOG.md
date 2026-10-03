@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- File validation (`vault.ingest.validate`): type by content, extension allowlist, size cap, and DOCX archive limits (checked before the zip directory is opened), and byte-order-marked text decoded and judged like any other, so spoofed, oversized and hostile files are refused before parsing.
 - Local security and database foundation: Host, Origin and token checks on every request, a `current_user` seam, vault folder rules (never inside a Git repository), SQLite in WAL mode through SQLAlchemy Core, and an Alembic baseline migration.
 - Frontend shell in `frontend/`: Vite, React, TypeScript and Mantine with Dashboard, Documents, Search, Ask and Settings placeholders, a light/dark toggle, a typed API client generated from the backend's OpenAPI schema and a backend health badge. The backend serves the built frontend from the same origin. ESLint, Prettier, `tsc`, Vitest, an npm licence check and `npm audit` run in CI.
 - Synthetic demo corpus in `demo/corpus/` (44 fictional documents: text and scanned PDFs, DOCX in two versions, TXT, Markdown, CSV, PNG, JPG, duplicates), its reproducible generator in `demo/generate/`, a 60-question public eval set in `eval/public/questions.yaml` with a validation test, and `config.demo.toml`.
