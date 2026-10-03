@@ -32,7 +32,7 @@ import zipfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import BinaryIO, Final
 
 HEAD_BYTES: Final = 8192
 # A PDF starts with "%PDF-1.x" or "%PDF-2.0", after at most some white space (the specification
@@ -63,6 +63,7 @@ ZIP64_LOCATOR_SIGNATURE: Final = b"PK\x06\x07"
 ZIP_END_SIZE: Final = 22
 ZIP64_END_SIZE: Final = 56
 ZIP64_LOCATOR_SIZE: Final = 20
+MALFORMED_ZIP64: Final = "ZIP64 locator without a ZIP64 end record"
 ZIP_MAX_COMMENT: Final = 1 << 16
 
 
@@ -142,8 +143,10 @@ def _refuse(reason: Reason, detected: Kind | None = None) -> Verdict:
     return Verdict(reason, detected)
 
 
-def sniff(head: bytes) -> Kind:
-    """What the first bytes of a file say it is."""
+def sniff(head: bytes, *, complete: bool = True) -> Kind:
+    """What the first bytes of a file say it is. ``complete`` says that ``head`` is the whole file,
+    so text with a byte order mark must end on a whole character; pass False for a head that was cut
+    from a longer file."""
     if PDF_HEADER.match(head):
         return Kind.PDF
     if head.startswith(PNG_SIGNATURE):
@@ -156,7 +159,11 @@ def sniff(head: bytes) -> Kind:
         return Kind.OLE
     for bom, encoding in TEXT_BOMS:
         if head.startswith(bom):
-            return Kind.TEXT if _decodes_as_text(head[len(bom) :], encoding) else Kind.BINARY
+            return (
+                Kind.TEXT
+                if _decodes_as_text(head[len(bom) :], encoding, complete=complete)
+                else Kind.BINARY
+            )
     if not head:
         return Kind.TEXT
     if b"\x00" in head:  # UTF-16 and UTF-32 text carry a byte order mark and was handled above
@@ -166,20 +173,56 @@ def sniff(head: bytes) -> Kind:
     return Kind.TEXT
 
 
-def _decodes_as_text(data: bytes, encoding: str) -> bool:
+def _decodes_as_text(data: bytes, encoding: str, *, complete: bool) -> bool:
     """Is ``data`` valid in ``encoding`` and free of NUL and a lot of control characters?
 
-    The head may end in the middle of a character, which is not an error. This is the same test as
-    for text without a byte order mark, made on characters instead of bytes.
+    A head cut from a longer file may end in the middle of a character, which is not an error; the
+    end of the whole file may not (``complete``). This is the same test as for text without a byte
+    order mark, made on characters instead of bytes.
     """
     try:
-        text = codecs.getincrementaldecoder(encoding)("strict").decode(data, final=False)
+        text = codecs.getincrementaldecoder(encoding)("strict").decode(data, final=complete)
     except UnicodeDecodeError:
         return False
     if "\x00" in text:
         return False
     controls = sum(1 for char in text if ord(char) in BINARY_BYTES)
     return controls <= MAX_BINARY_SHARE * len(text)
+
+
+def _zip64_claim(stream: BinaryIO, locator_start: int) -> tuple[int, int] | None:
+    """The entry count and directory size the ZIP64 records claim, None if there is no ZIP64
+    locator. Raises ``BadZipFile`` if there is a locator that does not lead to a ZIP64 end record.
+
+    This follows the locator the way ``zipfile`` does: the record is where the locator says it is,
+    and a record of the fixed 56 bytes right before the locator is used only when the locator's
+    offset does not lead to one. A ZIP64 "extensible data sector" between the record and the
+    locator is therefore found, and a crafted archive cannot put small counts in the classic record
+    and the real ones where a fixed-offset check does not look. A locator without a record is
+    refused here (the same error), because ``zipfile`` would refuse it only after reading the
+    central directory.
+    """
+    if locator_start < 0:
+        return None
+    stream.seek(locator_start)
+    locator = stream.read(ZIP64_LOCATOR_SIZE)
+    if len(locator) != ZIP64_LOCATOR_SIZE or locator[:4] != ZIP64_LOCATOR_SIGNATURE:
+        return None
+    _, disk, record_start, disks = struct.unpack("<4sLQL", locator)
+    if disk != 0 or disks > 1:
+        raise zipfile.BadZipFile(MALFORMED_ZIP64)
+    fixed_start = locator_start - ZIP64_END_SIZE
+    if fixed_start < 0 or record_start > fixed_start:
+        raise zipfile.BadZipFile(MALFORMED_ZIP64)
+    stream.seek(record_start)
+    wide = stream.read(ZIP64_END_SIZE)
+    if not wide.startswith(ZIP64_END_SIGNATURE) and record_start != fixed_start:
+        stream.seek(fixed_start)
+        wide = stream.read(ZIP64_END_SIZE)
+    if len(wide) != ZIP64_END_SIZE or not wide.startswith(ZIP64_END_SIGNATURE):
+        raise zipfile.BadZipFile(MALFORMED_ZIP64)
+    fields = struct.unpack("<4sQ2H2L4Q", wide)
+    return fields[8], fields[9]
 
 
 def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
@@ -209,16 +252,12 @@ def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
             if len(record) != ZIP_END_SIZE:
                 return Reason.UNREADABLE_ARCHIVE
         _, _, _, _, entries, directory_bytes, _, _ = struct.unpack("<4s4H2LH", record)
-        locator_start = start - ZIP64_LOCATOR_SIZE
-        if locator_start >= ZIP64_END_SIZE:
-            stream.seek(locator_start)
-            locator = stream.read(ZIP64_LOCATOR_SIZE)
-            if locator[:4] == ZIP64_LOCATOR_SIGNATURE:
-                stream.seek(locator_start - ZIP64_END_SIZE)
-                wide = stream.read(ZIP64_END_SIZE)
-                if wide[:4] == ZIP64_END_SIGNATURE:
-                    fields = struct.unpack("<4sQ2H2L4Q", wide)
-                    entries, directory_bytes = fields[8], fields[9]
+        try:
+            wide = _zip64_claim(stream, start - ZIP64_LOCATOR_SIZE)
+        except zipfile.BadZipFile:
+            return Reason.UNREADABLE_ARCHIVE
+        if wide is not None:
+            entries, directory_bytes = wide
     if entries > limits.max_zip_entries or directory_bytes > limits.max_zip_directory_bytes:
         return Reason.UNSAFE_ARCHIVE
     return None
@@ -287,7 +326,7 @@ def validate_file(path: Path, limits: Limits = DEFAULT_LIMITS) -> Verdict:
             return _refuse(Reason.UNSUPPORTED_EXTENSION)
         with path.open("rb") as stream:
             head = stream.read(HEAD_BYTES)
-        detected = sniff(head)
+        detected = sniff(head, complete=len(head) < HEAD_BYTES or len(head) >= size)
         if detected is Kind.OLE and expected is Kind.DOCX:
             return _refuse(Reason.LEGACY_OR_ENCRYPTED_OFFICE, detected)
         if detected is Kind.ZIP and expected is Kind.DOCX:
