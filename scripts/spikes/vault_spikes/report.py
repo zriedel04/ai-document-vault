@@ -33,9 +33,16 @@ METRIC = re.compile(r"[a-z][a-z0-9_]{0,48}")
 # pattern cannot tell a CPU name from a short sentence, so the owner reviews the environment lines
 # of a report before committing it (docs/spikes/README.md).
 MACHINE_TEXT = re.compile(r"[A-Za-z0-9 ._+()/,:?-]{1,100}")
-PYTHON_VERSION = re.compile(r"\d{1,2}\.\d{1,3}(?:\.\d{1,3})?[A-Za-z0-9.+-]{0,20}")
 PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}")
-PACKAGE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.!+_-]{0,40}|not installed")
+# A version is numbers with at most a pre-release, post-release, dev and local part from a closed
+# list (PEP 440 shapes such as ``2.8.0+cu128`` or ``1.0.0rc1``). A word in the version position is
+# free text (``patient-diagnosis-confidential``), so the only words allowed are the two sentinels
+# and the fixed local labels of the common builds.
+_RELEASE = r"(?:\d{1,4}!)?\d{1,10}(?:\.\d{1,10}){0,4}"
+_SUFFIX = r"(?:(?:a|b|rc)\d{1,4})?(?:\.post\d{1,4})?(?:\.dev\d{1,4})?"
+_LOCAL = r"(?:\+(?:\d{1,10}|cpu|cu\d{2,4}|rocm\d{1,3}(?:\.\d{1,3})?|mps|metal|dml))?"
+PYTHON_VERSION = re.compile(r"\d{1,2}\.\d{1,3}(?:\.\d{1,3})?(?:(?:a|b|rc)\d{1,3})?\+?")
+PACKAGE_VERSION = re.compile(rf"{_RELEASE}{_SUFFIX}{_LOCAL}|not installed|unknown")
 SECTIONS: Final = ("Question", "Environment", "Method", "Results", "Conclusion")
 CONCLUSION_PLACEHOLDER: Final = (
     "To be written after the owner has reviewed these results. Do not accept the ADR from this "
@@ -63,6 +70,12 @@ class SpikeSchema(NamedTuple):
     candidates: re.Pattern[str]
     metrics: frozenset[str]
     packages: frozenset[str]
+
+
+def package_version(text: str) -> str:
+    """A version as read from a library or a program, or ``unknown`` when it is not in a known
+    version shape (a local build label, a word): the report keeps no text it cannot vouch for."""
+    return text if PACKAGE_VERSION.fullmatch(text) else "unknown"
 
 
 def machine_text(text: str) -> str:
@@ -184,7 +197,7 @@ def collect_environment(packages: tuple[str, ...] = (), gpu: str | None = None) 
     versions: dict[str, str] = {}
     for name in packages:
         try:
-            versions[name] = metadata.version(name)
+            versions[name] = package_version(metadata.version(name))
         except metadata.PackageNotFoundError:
             versions[name] = "not installed"
     return Environment(

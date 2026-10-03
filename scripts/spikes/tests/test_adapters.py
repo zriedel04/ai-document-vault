@@ -152,7 +152,15 @@ class TesseractTest(unittest.TestCase):
                 self.assertEqual(self.version_of(stdout), "unknown")
 
     def test_what_it_returns_is_always_a_valid_package_version(self) -> None:
-        for stdout in ("tesseract 5.5.0\n", "tesseract v5.3.3.20231005\n", "x\n", ""):
+        # The last two are numbers too long for a version, which become unknown.
+        for stdout in (
+            "tesseract 5.5.0\n",
+            "tesseract v5.3.3.20231005\n",
+            "x\n",
+            "",
+            "tesseract 1.2.3.4.5.6.7\n",
+            "tesseract 12345678901234.1\n",
+        ):
             self.assertTrue(PACKAGE_VERSION.fullmatch(self.version_of(stdout)), stdout)
 
 

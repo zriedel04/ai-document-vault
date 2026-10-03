@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from vault_spikes import report as r
 
@@ -206,6 +207,10 @@ class OutputTest(unittest.TestCase):
             ("packages", {"numpy": "see the document"}),
             ("packages", {"patient record": "1.0"}),
             ("packages", {"numpy": "1.0\n"}),
+            ("python", "3.12.4\n"),
+            ("python", "3.12.4 "),
+            ("python", "3.12.confidential"),
+            ("python", "3.12.4+confidential"),
         ):
             data = make().to_json()
             env = dict(data["environment"])  # type: ignore[call-overload]
@@ -330,6 +335,66 @@ class EnvironmentTest(unittest.TestCase):
                 r.with_package(env, "tesseract", version)
         with self.assertRaises(ValueError):
             r.with_package(env, "patient record", "1.0")
+
+    def test_a_package_value_is_a_version_or_a_sentinel_never_a_word(self) -> None:
+        # Words that pass a loose shape check (letters, digits, dots) are still free text.
+        for word in (
+            "patient-diagnosis-confidential",
+            "confidential",
+            "1.0.confidential",
+            "2.8.0+confidential",
+            "2.8.0+cu128.patient",
+            "1.0.0-patient",
+            "v1.0",
+            "1.0 ",
+            "1.0\n",
+            "1.0\r",
+            "1.2.3.4.5.6",
+            "Unknown",
+            "not  installed",
+            "not installed\n",
+            "",
+        ):
+            with self.subTest(word=word):
+                self.assertIsNone(r.PACKAGE_VERSION.fullmatch(word))
+                with self.assertRaises(ValueError):
+                    r.with_package(make().environment, "torch", word)
+                data = make().to_json()
+                env = dict(data["environment"])  # type: ignore[call-overload]
+                env["packages"] = {"torch": word}
+                data["environment"] = env
+                with self.assertRaises(ValueError):
+                    r.Report.from_json(data, KNOWN)
+
+    def test_real_versions_and_the_sentinels_are_accepted(self) -> None:
+        for version in (
+            "2.8.0+cu128",
+            "2.8.0+cpu",
+            "2.8.0+rocm6.4",
+            "5.3.3.20231005",
+            "1.0.0rc1",
+            "1.0.0a2",
+            "0.5.0.dev0",
+            "1.0.0.post1",
+            "1!2.0",
+            "2024.8.30",
+            "4.30.0",
+            "0.1.6",
+            "not installed",
+            "unknown",
+        ):
+            with self.subTest(version=version):
+                added = r.with_package(make().environment, "torch", version)
+                self.assertEqual(r.Environment.from_json(added.to_json()), added)
+
+    def test_a_version_found_on_the_machine_that_does_not_fit_is_unknown(self) -> None:
+        self.assertEqual(r.package_version("2.8.0+cu128"), "2.8.0+cu128")
+        for odd in ("2.8.0+git.abc1234", "custom-build", "1.0 beta", "1.0\n"):
+            with self.subTest(odd=odd):
+                self.assertEqual(r.package_version(odd), "unknown")
+        with mock.patch("importlib.metadata.version", return_value="2.0+my-private-build"):
+            env = r.collect_environment(("pyyaml",))
+        self.assertEqual(env.packages["pyyaml"], "unknown")
 
     def test_collects_versions_and_marks_missing_packages(self) -> None:
         env = r.collect_environment(("pyyaml", "no-such-package-xyz"), gpu="GPU 1")

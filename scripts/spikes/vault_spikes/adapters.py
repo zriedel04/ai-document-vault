@@ -15,6 +15,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from vault_spikes.report import package_version
 from vault_spikes.spike_pdf import (
     HEADING_MAX_WORDS,
     HEADING_RATIO,
@@ -196,7 +197,7 @@ class TesseractEngine:
         )
         lines = (done.stdout or done.stderr).splitlines()
         found = VERSION_NUMBER.search(lines[0]) if lines else None
-        return found.group(0) if found else "unknown"
+        return package_version(found.group(0)) if found else "unknown"
 
     def recognise(self, image: Path) -> str:
         if self.executable is None:
