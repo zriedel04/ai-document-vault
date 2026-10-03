@@ -12,7 +12,7 @@ import json
 import posixpath
 import re
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -194,19 +194,35 @@ def load_manifest(path: Path) -> list[Document]:
             msg = "the manifest lists a document twice"
             raise SpikeInputError(msg)
         listed.add(identity)
-        pages = row.get("pages")
-        duplicate = row.get("exact_duplicate_of")
         documents.append(
             Document(
                 doc_path,
                 kind,
-                pages if isinstance(pages, int) else None,
-                bool(row.get("needs_ocr")),
-                duplicate if isinstance(duplicate, str) else None,
+                _optional(row, "pages", int),
+                _optional(row, "needs_ocr", bool) or False,
+                _optional(row, "exact_duplicate_of", str),
             )
         )
     _check_duplicate_references(documents)
     return documents
+
+
+def _optional[T](row: Mapping[str, object], key: str, kind: type[T]) -> T | None:
+    """A field that may be absent or null, and otherwise must be exactly of ``kind``.
+
+    A value of another kind is refused and never converted or ignored: ``bool("false")`` is
+    ``True``, so a hand-typed ``"needs_ocr": "false"`` would skip a readable document, an
+    ``exact_duplicate_of`` that is not text would leave a copy in the corpus twice, and ``True``
+    is not a page count. The error names the field (a fixed word of this format), never the
+    value.
+    """
+    value = row.get(key)
+    if value is None:
+        return None
+    if type(value) is not kind or (isinstance(value, int) and value < 0):  # not even bool
+        msg = f"the manifest field {key} has a value of the wrong kind"
+        raise SpikeInputError(msg)
+    return value
 
 
 def _check_duplicate_references(documents: list[Document]) -> None:
@@ -239,14 +255,15 @@ def check_sources_listed(questions: Sequence[Question], documents: Sequence[Docu
     where a data error reads as a limit of the reader. The spelling must be the manifest's own,
     not one Windows would treat as the same file: scoring compares the paths as written, so a
     path that differs only in case or slash would load, never match a chunk and score as a miss.
-    The error names the question's id, never the path.
+    The error gives the question's position in the eval file, a number this code counted: its id
+    is free text of the owner's file (it may carry a client name) and so is the path.
     """
     listed = {doc.path for doc in documents}
-    for question in questions:
+    for number, question in enumerate(questions, start=1):
         if any(
             passage.path not in listed for passage in (*question.sources, *question.alternatives)
         ):
-            msg = f"question {question.id} cites a document the manifest does not list"
+            msg = f"question number {number} of the eval file cites a document the manifest lacks"
             raise SpikeInputError(msg)
 
 

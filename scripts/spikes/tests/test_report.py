@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from vault_spikes import report as r
@@ -38,6 +39,7 @@ KNOWN = {
         ),
         TOY_METRICS,
         frozenset({"numpy", "torch"}),
+        frozenset({"numpy"}),
     )
 }
 
@@ -425,6 +427,43 @@ class MetricValueTest(unittest.TestCase):
         self.assertEqual(set(r.Kind), {r.Kind.COUNT, r.Kind.RATIO, r.Kind.AMOUNT, r.Kind.FLAG})
         self.assertFalse(r.in_domain(r.Kind.COUNT, 2.0))  # a count is a whole number
         self.assertTrue(r.in_domain(r.Kind.AMOUNT, 2))
+
+
+class PackageBaselineTest(unittest.TestCase):
+    """A report must list the packages every report of its spike lists (the versions that make a
+    measurement reproducible), and may add only the extras the spike allows."""
+
+    def read(self, packages: dict[str, str], row: dict[str, str] | None = None) -> r.Report:
+        data = make().to_json()
+        env = cast("dict[str, object]", data["environment"])
+        env["packages"] = packages
+        if row is not None:
+            data["rows"] = [
+                {
+                    "candidate": "model",
+                    "metrics": {},
+                    "environment": {**env, "packages": row},
+                }
+            ]
+        return r.Report.from_json(data, KNOWN)
+
+    def test_the_baseline_alone_and_with_an_allowed_extra_is_accepted(self) -> None:
+        self.read({"numpy": "2.0"})
+        self.read({"numpy": "2.0", "torch": "2.5"})
+
+    def test_a_report_without_its_baseline_packages_is_refused(self) -> None:
+        for packages in ({}, {"torch": "2.5"}):
+            with self.subTest(packages=packages), self.assertRaisesRegex(OwnValueError, "lacks"):
+                self.read(packages)
+
+    def test_a_row_environment_needs_the_baseline_too(self) -> None:
+        self.read({"numpy": "2.0"}, {"numpy": "2.1"})
+        with self.assertRaisesRegex(OwnValueError, "lacks"):
+            self.read({"numpy": "2.0"}, {})
+
+    def test_the_baseline_is_a_subset_of_what_may_be_listed(self) -> None:
+        schema = KNOWN["embedding"]
+        self.assertLessEqual(schema.required_packages, schema.packages)
 
 
 class RowShapeTest(unittest.TestCase):

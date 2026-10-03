@@ -149,6 +149,7 @@ class SpikeSchema(NamedTuple):
     rows: tuple[RowShape, ...]
     metrics: Mapping[str, Kind]
     packages: frozenset[str]
+    required_packages: frozenset[str] = frozenset()
 
     def shape_of(self, candidate: str) -> RowShape | None:
         return next((shape for shape in self.rows if shape.candidate.fullmatch(candidate)), None)
@@ -250,6 +251,9 @@ def _known_environment(data: object, schema: SpikeSchema) -> Environment:
     env = Environment.from_json(cast("dict[str, object]", data))
     if not set(env.packages) <= schema.packages:
         msg = "the report's environment has a package name this spike cannot produce"
+        raise OwnValueError(msg)
+    if not schema.required_packages <= set(env.packages):
+        msg = "the report's environment lacks a package version that every report of this spike has"
         raise OwnValueError(msg)
     return env
 

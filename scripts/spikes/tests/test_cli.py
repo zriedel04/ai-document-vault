@@ -10,11 +10,17 @@ from pathlib import Path
 from unittest import mock
 
 from vault_spikes import __main__ as cli
-from vault_spikes import adapters
+from vault_spikes import adapters, spike_embedding, spike_ocr, spike_vec
 from vault_spikes import spike_pdf as pdf
-from vault_spikes.report import Environment, Kind, Report
+from vault_spikes.report import Environment, Kind, Report, collect_environment
 
 KNOWN = cli.KNOWN
+
+
+def environment_of(spike: str, **extra: str) -> Environment:
+    """A machine description with the package versions every report of this spike carries."""
+    packages = dict.fromkeys(KNOWN[spike].required_packages, "1.0") | extra
+    return Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, packages)
 
 
 def complete_row(spike: str, candidate: str) -> dict[str, float]:
@@ -137,6 +143,7 @@ class CliTest(unittest.TestCase):
         *extra: str,
         factory: Callable[..., object] | None = None,
         cited: str = "a.txt",
+        question_id: str = "q1",
     ) -> tuple[int, str, str]:
         """One embedding run on a one-document corpus; the questions are the owner's own."""
         (root / "corpus").mkdir(exist_ok=True)
@@ -152,7 +159,7 @@ class CliTest(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "questions.yaml").write_text(
-            "questions:\n- {id: q1, question: q, category: lookup, answerable: true,"
+            f"questions:\n- {{id: {question_id}, question: q, category: lookup, answerable: true,"
             f" sources: [{{path: {cited}, quote: beta}}]}}\n",
             encoding="utf-8",
         )
@@ -185,12 +192,17 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             code, out, err = self.embedding_run(
-                root, cited="SECRET-b.txt", factory=lambda *_a: NeverLoaded()
+                root,
+                cited="SECRET-b.txt",
+                question_id="Client-Smith-diagnosis",
+                factory=lambda *_a: NeverLoaded(),
             )
             written = (root / "out").exists()
         self.assertEqual((code, out), (2, ""))
-        self.assertIn("question q1 cites a document the manifest does not list", err)
-        self.assertNotIn("SECRET", err)
+        self.assertIn("question number 1 of the eval file cites a document the manifest lacks", err)
+        # The id is free text of the owner's file, so it is never printed, nor is the path.
+        for private in ("SECRET", "Client", "Smith", "diagnosis"):
+            self.assertNotIn(private, err)
         self.assertFalse(written)
 
     def test_an_embedding_run_keeps_its_measurement_on_a_card_the_vocabulary_lacks(self) -> None:
@@ -318,7 +330,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse(cli.is_public_dataset(elsewhere / "demo" / "corpus", questions))
 
     def test_merge_combines_candidate_reports(self) -> None:
-        env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+        env = environment_of("embedding")
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             paths = []
@@ -347,7 +359,7 @@ class CliTest(unittest.TestCase):
             run("vec", "--sizes", "100", "0")
 
     def test_merge_can_be_repeated_but_never_replaces_one_of_its_inputs(self) -> None:
-        env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+        env = environment_of("embedding")
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             report = Report("embedding", *KNOWN["embedding"].text, env)
@@ -367,7 +379,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(own.read_bytes(), before)
 
     def test_merge_refuses_a_report_with_text_of_its_own(self) -> None:
-        env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+        env = environment_of("embedding")
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             report = Report("embedding", "Patient diagnosis", "Q?", "How.", env)
@@ -383,13 +395,13 @@ class CliTest(unittest.TestCase):
 
     def test_merge_refuses_names_that_only_look_harmless(self) -> None:
         text = "patient-diagnosis-confidential"
-        good = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+        good = environment_of("embedding")
         whole = complete_row("embedding", "qwen3-embedding-0.6b-cpu")
         cases = {
             "candidate": (good, text, whole),
             "metric": (good, "qwen3-embedding-0.6b-cpu", {**whole, "medical_record_number": 1}),
             "package": (
-                Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {text: "1.0"}),
+                environment_of("embedding", **{text: "1.0"}),
                 "qwen3-embedding-0.6b-cpu",
                 whole,
             ),
@@ -605,13 +617,43 @@ class DatasetNameTest(unittest.TestCase):
             flags[kind] = data["rows"][0]["metrics"]["public_dataset"]
         self.assertEqual(flags, {"public": True, "private": False})
 
+    def test_a_report_without_its_baseline_packages_is_refused_on_merge(self) -> None:
+        for spike, candidate in (
+            ("embedding", "qwen3-embedding-0.6b-cpu"),
+            ("ocr", "tesseract"),
+            ("pdf", "pypdfium2"),
+            ("vec", "extension-loading"),
+        ):
+            with self.subTest(spike=spike), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                bare = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+                report = Report(spike, *KNOWN[spike].text, bare)
+                report.add(candidate, **complete_row(spike, candidate))
+                path = str(report.write(root, stem=f"{spike}-x")[0])
+                code, _, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertEqual(code, 2)
+                self.assertIn("lacks a package version", err)
+
+    def test_every_spike_writes_the_baseline_it_requires(self) -> None:
+        # What the script records must satisfy the rule that merge applies to it.
+        for spike, schema in KNOWN.items():
+            with self.subTest(spike=spike):
+                module = {
+                    "embedding": spike_embedding,
+                    "ocr": spike_ocr,
+                    "pdf": pdf,
+                    "vec": spike_vec,
+                }[spike]
+                recorded = collect_environment(module.PACKAGES)
+                self.assertLessEqual(schema.required_packages, set(recorded.packages))
+
     def test_a_row_without_its_dataset_flag_is_refused_on_merge(self) -> None:
         for spike, candidate in (("ocr", "tesseract"), ("pdf", "pypdfium2")):
             with self.subTest(spike=spike), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 row = complete_row(spike, candidate)
                 del row["public_dataset"]
-                report = Report(spike, *KNOWN[spike].text, MergeRowShapeTest.ENV)
+                report = Report(spike, *KNOWN[spike].text, environment_of(spike))
                 report.add(candidate, **row)
                 path = str(report.write(root, stem=f"{spike}-x")[0])
                 code, _, err = run("merge", path, "--out", str(root / "merged"))
@@ -624,12 +666,10 @@ class MergeRowShapeTest(unittest.TestCase):
     context a figure needs (what it was measured on, how much was left out) or carry a figure the
     candidate cannot produce."""
 
-    ENV = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
-
     def merge(self, spike: str, candidate: str, metrics: dict[str, float]) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            report = Report(spike, *KNOWN[spike].text, self.ENV)
+            report = Report(spike, *KNOWN[spike].text, environment_of(spike))
             report.add(candidate, **metrics)
             path = str(report.write(root, stem=f"{spike}-x")[0])
             code, _, err = run("merge", path, "--out", str(root / "merged"))

@@ -389,12 +389,20 @@ class SourcesListedTest(unittest.TestCase):
         c.check_sources_listed(self.questions("a/x.txt", "a/x.txt"), self.DOCS)
         c.check_sources_listed([], self.DOCS)
 
-    def test_a_misspelled_or_unlisted_source_is_refused_naming_the_question_only(self) -> None:
+    def test_a_misspelled_or_unlisted_source_is_refused_by_position_only(self) -> None:
         for source in ("a/y.txt", "a/x.tx", "x.txt", "", "a/x.txt ", "a/x.txt\n"):
             with self.subTest(source=source), self.assertRaises(c.SpikeInputError) as caught:
                 c.check_sources_listed(self.questions(source), self.DOCS)
-            self.assertIn("q7", str(caught.exception))
-            self.assertNotIn("a/", str(caught.exception))
+            message = str(caught.exception)
+            self.assertIn("question number 1 ", message)
+            # The id and the path are the owner's free text and are never in the message.
+            self.assertNotIn("q7", message)
+            self.assertNotIn("a/", message)
+
+    def test_the_position_counts_questions_in_the_eval_file(self) -> None:
+        good, bad = self.questions("a/x.txt"), self.questions("a/nope.txt")
+        with self.assertRaisesRegex(c.SpikeInputError, "number 3 "):
+            c.check_sources_listed([*good, *good, *bad], self.DOCS)
 
     def test_an_unlisted_alternative_is_refused_too(self) -> None:
         with self.assertRaises(c.SpikeInputError):
@@ -406,6 +414,51 @@ class SourcesListedTest(unittest.TestCase):
         for source in ("A/X.TXT", "a\\x.txt", "./a/x.txt", "a//x.txt"):
             with self.subTest(source=source), self.assertRaises(c.SpikeInputError):
                 c.check_sources_listed(self.questions(source), self.DOCS)
+
+
+class ManifestFieldTest(unittest.TestCase):
+    """A hand-typed manifest can make a common mistake in a field's kind; each is refused and
+    none is converted or ignored, because a conversion silently changes what is scored."""
+
+    def load(self, **row: object) -> list[c.Document]:
+        manifest = {"documents": [{"path": "a.txt", "kind": "text", **row}]}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "m.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            return c.load_manifest(path)
+
+    def test_absent_and_null_fields_are_the_defaults(self) -> None:
+        for row in ({}, {"needs_ocr": None, "pages": None, "exact_duplicate_of": None}):
+            with self.subTest(row=row):
+                (doc,) = self.load(**row)
+                self.assertEqual((doc.needs_ocr, doc.pages, doc.duplicate_of), (False, None, None))
+
+    def test_right_kinds_are_read_as_they_are(self) -> None:
+        (doc,) = self.load(needs_ocr=True, pages=3)
+        self.assertEqual((doc.needs_ocr, doc.pages), (True, 3))
+        (doc,) = self.load(needs_ocr=False, pages=0)
+        self.assertEqual((doc.needs_ocr, doc.pages), (False, 0))
+
+    def test_a_field_of_the_wrong_kind_is_refused_naming_the_field_only(self) -> None:
+        private_text = "Client-Smith-diagnosis"
+        for key, value in (
+            ("needs_ocr", "false"),  # bool("false") is True: a readable document would be skipped
+            ("needs_ocr", "no"),
+            ("needs_ocr", 0),
+            ("needs_ocr", 1),
+            ("needs_ocr", [private_text]),
+            ("pages", "3"),
+            ("pages", 2.5),
+            ("pages", True),
+            ("pages", -1),
+            ("exact_duplicate_of", 7),
+            ("exact_duplicate_of", [private_text]),
+            ("exact_duplicate_of", True),
+        ):
+            with self.subTest(key=key, value=value), self.assertRaises(c.SpikeInputError) as caught:
+                self.load(**{key: value})
+            self.assertIn(key, str(caught.exception))
+            self.assertNotIn(private_text, str(caught.exception))
 
 
 class SplitTest(unittest.TestCase):

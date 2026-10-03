@@ -58,6 +58,7 @@ KNOWN = {
         module.ROWS,
         module.METRICS,
         frozenset(getattr(module, "REPORT_PACKAGES", module.PACKAGES)),
+        frozenset(module.PACKAGES),
     )
     for name, module in (
         ("embedding", spike_embedding),
