@@ -636,7 +636,7 @@ class TestLinksAreNotBlobs:
     @staticmethod
     def untouched(original: Path) -> None:
         assert original.read_bytes() == HELLO
-        assert stat.S_IMODE(original.stat().st_mode) == 0o644
+        assert not is_read_only(original)  # the mode bits differ by system; only writable matters
 
     def test_a_link_in_the_place_of_a_blob_is_not_found_and_the_target_is_left_alone(
         self, store: BlobStore, tmp_path: Path
@@ -743,7 +743,7 @@ class TestLinksAreNotBlobs:
         assert store.seal() == 0
         assert store.delete(HELLO_SHA) is False
         assert blob.read_bytes() == HELLO
-        assert stat.S_IMODE(blob.stat().st_mode) == 0o644
+        assert not is_read_only(blob)
 
     def test_a_vault_folder_that_is_itself_a_link_still_works(self, tmp_path: Path) -> None:
         real = tmp_path / "real"
