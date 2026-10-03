@@ -315,3 +315,5 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw 'run started without a vault folder' }
           if ($text -notmatch 'no vault folder is set') { throw "unexpected message: $text" }
           if (Test-Path .run\server.json) { throw 'a server was started anyway' }
+          # The refused run left exit code 1 behind, and the step would report it.
+          exit 0
