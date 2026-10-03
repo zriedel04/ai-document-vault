@@ -908,3 +908,177 @@ class TestScanReportsWhatIsOdd:
         for path in loose:
             path.write_bytes(b"?")
         assert set(store.scan().strays) == set(loose)
+
+
+class TestTheTemporaryFolderIsARealFolder:
+    """Copies, locks and the start-up clean-up all work inside ``.tmp``, so a link there must not
+    lead them to another folder (the clean-up deletes files)."""
+
+    @staticmethod
+    def linked_tmp(store: BlobStore, tmp_path: Path) -> Path:
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "original.txt").write_bytes(HELLO)
+        (outside / "other.pdf").write_bytes(b"%PDF-1.4 other")
+        store.root.mkdir()
+        link(outside, store.root / ".tmp")
+        return outside
+
+    def test_the_clean_up_does_not_delete_through_a_linked_temporary_folder(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        outside = self.linked_tmp(store, tmp_path)
+        with pytest.raises(BlobIntegrityError):
+            store.clean_temp()
+        assert sorted(path.name for path in outside.iterdir()) == ["original.txt", "other.pdf"]
+
+    def test_an_import_does_not_copy_or_lock_through_it_either(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        outside = self.linked_tmp(store, tmp_path)
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        with pytest.raises(BlobIntegrityError):
+            store.delete(HELLO_SHA)
+        assert sorted(path.name for path in outside.iterdir()) == ["original.txt", "other.pdf"]
+        assert not store.exists(HELLO_SHA)
+
+    def test_a_file_in_the_place_of_the_temporary_folder_is_the_same_error(
+        self, store: BlobStore
+    ) -> None:
+        store.root.mkdir()
+        (store.root / ".tmp").write_bytes(b"?")
+        with pytest.raises(BlobIntegrityError):
+            store.clean_temp()
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+
+    def test_a_link_inside_the_temporary_folder_is_removed_as_a_link_only(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "original.txt").write_bytes(HELLO)
+        folder = store.root / ".tmp"
+        folder.mkdir(parents=True)
+        (folder / "leftover").write_bytes(b"copy")
+        file_link = link(outside / "original.txt", folder / "a-link")
+        folder_link = link(outside, folder / "a-folder-link")
+        (folder / "a-folder").mkdir()
+        removed = store.clean_temp()
+        assert removed == 2  # the copy and the link to a file
+        assert not file_link.is_symlink()
+        assert folder_link.is_symlink()  # a link to a folder is left alone, with its target
+        assert (folder / "a-folder").is_dir()
+        assert (outside / "original.txt").read_bytes() == HELLO
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows feature")
+    def test_a_junction_as_the_temporary_folder_is_refused(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "original.txt").write_bytes(HELLO)
+        store.root.mkdir()
+        winapi = importlib.import_module("_winapi")  # typed only on Windows
+        winapi.CreateJunction(str(outside), str(store.root / ".tmp"))
+        with pytest.raises(BlobIntegrityError):
+            store.clean_temp()
+        assert (outside / "original.txt").read_bytes() == HELLO
+
+
+class TestAFileWithAnotherNameIsNotABlob:
+    """A hard link to a file outside the store has the same bytes and the same permissions, so
+    changing the mode of the blob would change the outside original (ADR 0006)."""
+
+    @staticmethod
+    def shared(store: BlobStore, tmp_path: Path) -> tuple[Path, Path]:
+        original = outside_file(tmp_path)
+        entry = store.path_for(HELLO_SHA, "txt")
+        entry.parent.mkdir(parents=True)
+        try:
+            os.link(original, entry)
+        except OSError:
+            pytest.skip("this file system has no hard links")
+        return original, entry
+
+    def test_it_is_not_found_not_sealed_and_not_a_blob_in_the_scan(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        original, entry = self.shared(store, tmp_path)
+        assert store.find(HELLO_SHA) is None
+        assert store.seal() == 0
+        scan = store.scan()
+        assert scan.blobs == ()
+        assert scan.strays == (entry,)
+        assert not is_read_only(original)  # the outside file keeps its mode
+
+    def test_an_import_of_the_same_bytes_does_not_change_the_outside_file(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        original, entry = self.shared(store, tmp_path)
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert not is_read_only(original)
+        assert original.read_bytes() == HELLO
+        assert os.path.samefile(original, entry)  # and the entry is left as it was
+        assert store.delete(HELLO_SHA) is False
+        assert original.exists()
+
+    def test_the_helpers_refuse_it(self, store: BlobStore, tmp_path: Path) -> None:
+        original, entry = self.shared(store, tmp_path)
+        for change in (blobs_module._read_only, blobs_module._writable, BlobStore._seal_file):
+            with pytest.raises(BlobIntegrityError):
+                change(entry)
+        assert not is_read_only(original)
+
+    def test_a_blob_a_crash_left_linked_to_its_temporary_copy_is_sealed_after_the_clean_up(
+        self, store: BlobStore
+    ) -> None:
+        # A crash between linking the blob and removing the temporary name leaves two names.
+        blob = put(store, HELLO)
+        blob.chmod(0o644)
+        leftover = store.root / ".tmp" / "leftover"
+        try:
+            os.link(blob, leftover)
+        except OSError:
+            pytest.skip("this file system has no hard links")
+        assert store.seal() == 0  # not yet a blob: it has another name
+        assert store.clean_temp() == 1
+        assert store.seal() == 1  # start-up order: clean_temp(), then seal()
+        assert is_read_only(blob)
+        assert store.verify(HELLO_SHA)
+
+    @staticmethod
+    def fake_status(links: int) -> SimpleNamespace:
+        return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_nlink=links)
+
+    def test_windows_gets_a_moment_for_a_removed_name_to_stop_counting(
+        self, tmp_path: Path
+    ) -> None:
+        entry = tmp_path / "entry"
+        answers = [self.fake_status(2), self.fake_status(2), self.fake_status(1)]
+        with (
+            mock.patch.object(blobs_module, "IS_WINDOWS", True),
+            mock.patch.object(blobs_module, "_lstat", side_effect=answers),
+        ):
+            assert blobs_module._blob_status(entry) is answers[2]  # type: ignore[comparison-overlap]
+
+    def test_a_count_that_stays_above_one_is_refused_on_windows_too(self, tmp_path: Path) -> None:
+        entry = tmp_path / "entry"
+        with (
+            mock.patch.object(blobs_module, "IS_WINDOWS", True),
+            mock.patch.object(blobs_module, "UNLINK_TRIES", 3),
+            mock.patch.object(blobs_module, "_lstat", return_value=self.fake_status(2)) as lstat,
+        ):
+            assert blobs_module._blob_status(entry) is None
+        assert lstat.call_count == 3
+
+    def test_elsewhere_the_count_is_believed_at_once(self, tmp_path: Path) -> None:
+        entry = tmp_path / "entry"
+        with (
+            mock.patch.object(blobs_module, "IS_WINDOWS", False),
+            mock.patch.object(blobs_module, "_lstat", return_value=self.fake_status(2)) as lstat,
+        ):
+            assert blobs_module._blob_status(entry) is None
+        assert lstat.call_count == 1

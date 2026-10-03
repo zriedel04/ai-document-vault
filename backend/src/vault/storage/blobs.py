@@ -137,13 +137,31 @@ def _is_real_file(status: os.stat_result | None) -> bool:
     return status is not None and stat.S_ISREG(status.st_mode) and not _is_link(status)
 
 
+def _blob_status(path: Path) -> os.stat_result | None:
+    """The status of a regular file that only the store holds, or None for anything else: a link,
+    a folder, or a file with other names (a hard link to a file outside the store has the same
+    bytes and the same permissions, so changing its mode would change the outside file). Windows
+    can keep counting a name for a moment after it was removed, so there a count above one is
+    looked at again before it is believed."""
+    for attempt in range(UNLINK_TRIES if IS_WINDOWS else 1):
+        status = _lstat(path)
+        if not _is_real_file(status):
+            return None
+        assert status is not None  # noqa: S101 - narrowed by the check above, for the type checker
+        if status.st_nlink == 1:
+            return status
+        if attempt < UNLINK_TRIES - 1 and IS_WINDOWS:
+            time.sleep(LOCK_POLL_SECONDS)
+    return None
+
+
 def _real_file_mode(path: Path) -> int:
-    """The permission bits of a regular file; anything else (a link, a folder) is not a blob."""
-    status = _lstat(path)
-    if not _is_real_file(status):
-        msg = "something that is not a regular file is where a blob belongs"
+    """The permission bits of a blob; anything else (a link, a folder, a file shared with another
+    name) is not one and is never changed."""
+    status = _blob_status(path)
+    if status is None:
+        msg = "something that is not a file held only by the store is where a blob belongs"
         raise BlobIntegrityError(msg)
-    assert status is not None  # noqa: S101 - narrowed by the check above, for the type checker
     return status.st_mode
 
 
@@ -204,7 +222,7 @@ class BlobStore:
             return None
         for entry in folder.iterdir():
             match = BLOB_NAME.fullmatch(entry.name)
-            if match and match.group(1) == sha256 and _is_real_file(_lstat(entry)):
+            if match and match.group(1) == sha256 and _blob_status(entry) is not None:
                 return entry
         return None
 
@@ -349,29 +367,48 @@ class BlobStore:
         return True
 
     def _temp_folder(self) -> Path:
+        """The temporary folder, made if it is missing. Anything but a real folder (a link, a file)
+        is refused: copies, locks and the clean-up all work inside it."""
         folder = self.root / TEMP_FOLDER
-        folder.mkdir(parents=True, exist_ok=True)
+        if _lstat(folder) is None:
+            folder.mkdir(parents=True, exist_ok=True)
+        if not _is_real_dir(_lstat(folder)):
+            msg = "something that is not a folder is where the temporary folder belongs"
+            raise BlobIntegrityError(msg)
         return folder
 
     def _temp_path(self) -> Path:
         return self._temp_folder() / uuid.uuid4().hex
 
     def clean_temp(self) -> int:
-        """Remove what a crashed copy left behind, locks included. Run at start-up, never while
-        copying."""
+        """Remove what a crashed copy left behind, locks included. Run at start-up, before
+        ``seal()`` and never while copying. A link is removed as a link (its target is never
+        touched), a folder is left alone, and a temporary folder that is itself a link is an
+        error, so the clean-up cannot delete files outside the store."""
         folder = self.root / TEMP_FOLDER
-        if not folder.is_dir():
+        status = _lstat(folder)
+        if status is None:
             return 0
+        if not _is_real_dir(status):
+            msg = "something that is not a folder is where the temporary folder belongs"
+            raise BlobIntegrityError(msg)
         removed = 0
         for entry in folder.iterdir():
-            if entry.is_file():
+            entry_status = _lstat(entry)
+            if entry_status is None:
+                continue
+            linked = _is_link(entry_status)
+            is_folder = stat.S_ISDIR(entry_status.st_mode) or (linked and entry.is_dir())
+            if _is_real_file(entry_status) or (linked and not is_folder):
                 entry.unlink()
                 removed += 1
         return removed
 
     def seal(self) -> int:
-        """Make every blob read-only again and return how many were not. Run at start-up with
-        ``clean_temp()``: a crash between publishing a blob and marking it read-only leaves a
+        """Make every blob read-only again and return how many were not. Run at start-up after
+        ``clean_temp()`` (a crash between linking and unlinking leaves the temporary name as a
+        second name for a finished blob, which ``scan`` does not count as a blob until the clean-up
+        has removed it): a crash between publishing a blob and marking it read-only leaves a
         finished blob that anyone could edit in place under a name that still claims its hash.
         (An edit is found by ``verify``; sealing only closes the door.)"""
         sealed = 0
@@ -427,7 +464,7 @@ class BlobStore:
                     match = BLOB_NAME.fullmatch(entry.name)
                     if (
                         match
-                        and _is_real_file(_lstat(entry))
+                        and _blob_status(entry) is not None
                         and entry.parent == self.folder_for(match.group(1))
                     ):
                         blobs.append((match.group(1), entry))

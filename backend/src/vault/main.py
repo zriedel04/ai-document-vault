@@ -11,10 +11,11 @@ from fastapi import FastAPI
 
 from vault.api import health, session
 from vault.core.config import Settings, load_settings
-from vault.core.logging import configure_logging, log_event
+from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
+from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
 from vault.web import INDEX, find_file, install_frontend
 
@@ -27,9 +28,11 @@ DEFAULT_FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist
 def create_app(settings: Settings | None = None, *, serve_frontend: bool = True) -> FastAPI:
     """Build the application. ``settings`` defaults to :func:`load_settings`.
 
-    With ``vault.path`` set, the vault folder is validated and created, the database is migrated
-    and the install's token is read (or created) before the first request. A bad vault folder
-    (inside a Git repository, say) stops the start-up. Without a vault (demo mode, tests) there is
+    With ``vault.path`` set, the vault folder is validated and created, the install's token is read
+    (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
+    every blob is made read-only again) and the database is migrated before the first request. A
+    bad vault folder (inside a Git repository, say) or a damaged blob store (the temporary folder
+    is a link) stops the start-up. Without a vault (demo mode, tests) there is
     no database and the token is random for this process only, so only the open endpoints work.
 
     The built frontend is served when ``dist/index.html`` exists (the ``frontend.dist`` setting, or
@@ -39,9 +42,14 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     configure_logging(settings.logging.level)
 
     engine = None
+    blobs = None
     if settings.vault.path is not None:
         paths = ensure_vault(settings.vault.path)
         token = load_or_create_token(paths.token_file)
+        blobs = BlobStore(paths.blobs)
+        removed = blobs.clean_temp()  # first: seal() does not count a blob a crash left linked
+        sealed = blobs.seal()
+        log_event(logger, "blobs.recovered", removed=metric(removed), sealed=metric(sealed))
         upgrade_to_latest(paths.db)
         engine = create_vault_engine(paths.db)
     else:
@@ -63,6 +71,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.settings = settings
     app.state.token = token
     app.state.engine = engine
+    app.state.blobs = blobs
     app.add_middleware(LocalSecurityMiddleware, token=token)
     app.include_router(health.router, prefix="/api")
     app.include_router(session.router, prefix="/api")
