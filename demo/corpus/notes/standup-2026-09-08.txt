@@ -1,0 +1,7 @@
+Team Northwind standup, Tuesday, September 8, 2026
+Attendees: Alex, Jordan, Sam
+
+Alex: drafting the outline of the project proposal.
+Jordan: comparing web frameworks. Leaning toward Flask.
+Sam: sketching the first screens.
+Blockers: none.

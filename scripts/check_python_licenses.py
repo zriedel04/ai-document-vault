@@ -79,6 +79,12 @@ REVIEWED: dict[str, tuple[str, str]] = {
         "MPL-2.0 is file-level copyleft and applies only if pathspec itself is modified or "
         "redistributed. It is a dependency of mypy, a development tool that is not shipped.",
     ),
+    "pillow": (
+        "MIT-CMU",
+        "MIT-CMU (the HPND family) is a permissive licence that only asks for the copyright and "
+        "permission notice to be kept. It is not yet on the allowed list. Pillow is used by the "
+        "demo corpus generator in demo/generate, which is a development tool that is not shipped.",
+    ),
 }
 
 CLASSIFIER_PREFIX = "License :: "

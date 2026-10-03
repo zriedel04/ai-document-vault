@@ -1,0 +1,216 @@
+%PDF-1.3
+%“Œ‹ž ReportLab Generated PDF document (opensource)
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/Contents 10 0 R /MediaBox [ 0 0 612 792 ] /Parent 9 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+5 0 obj
+<<
+/Contents 11 0 R /MediaBox [ 0 0 612 792 ] /Parent 9 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+6 0 obj
+<<
+/Contents 12 0 R /MediaBox [ 0 0 612 792 ] /Parent 9 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+7 0 obj
+<<
+/PageMode /UseNone /Pages 9 0 R /Type /Catalog
+>>
+endobj
+8 0 obj
+<<
+/Author (AI Document Vault demo corpus) /CreationDate (D:20000101000000+00'00') /Creator (demo/generate) /Keywords () /ModDate (D:20000101000000+00'00') /Producer (ReportLab PDF Library - \(opensource\)) 
+  /Subject (unspecified) /Title (courses/cse485/syllabus.pdf) /Trapped /False
+>>
+endobj
+9 0 obj
+<<
+/Count 3 /Kids [ 4 0 R 5 0 R 6 0 R ] /Type /Pages
+>>
+endobj
+10 0 obj
+<<
+/Length 1907
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 18 Tf 21.6 TL ET
+BT 1 0 0 1 72 694 Tm (CSE 485: Capstone Project - Course Syllabus) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 671 Tm (Lakeshore Institute of Technology, Department of Computer Science. Fall 2026.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 647 Tm (Course information) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 628 Tm (The course runs from September 1 to December 11, 2026. Class meets on Tuesdays and) Tj T* ET
+BT 1 0 0 1 72 613 Tm (Thursdays from 2:00 PM to 3:15 PM in Room 214 of Harbor Hall.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 592 Tm (Instructor: Dr. Priya Raman, priya.raman@lit.example. Office hours are on Wednesdays from) Tj T* ET
+BT 1 0 0 1 72 577 Tm (10:00 AM to 12:00 PM in Room 318 of Harbor Hall.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 556 Tm (Teaching assistant: Marcus Bell. His office hours are on Fridays from 1:00 PM to 3:00 PM,) Tj T* ET
+BT 1 0 0 1 72 541 Tm (online.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 517 Tm (Description) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 498 Tm (In this course, teams of three or four students design, build and demonstrate a software product) Tj T* ET
+BT 1 0 0 1 72 483 Tm (for a real or realistic user. The course emphasises requirements, design reviews and working in) Tj T* ET
+BT 1 0 0 1 72 468 Tm (a team.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 444 Tm (Learning outcomes) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 425 Tm (-) Tj T* ET
+BT 1 0 0 1 86 425 Tm (Write testable requirements and trace them to design decisions.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 407 Tm (-) Tj T* ET
+BT 1 0 0 1 86 407 Tm (Plan and track work in a small team using an agile board.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 389 Tm (-) Tj T* ET
+BT 1 0 0 1 86 389 Tm (Present a working prototype and defend design choices.) Tj T* ET
+ 
+endstream
+endobj
+11 0 obj
+<<
+/Length 1833
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 702 Tm (Grading) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 683 Tm (The final grade is made up of the following parts.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 662 Tm (-) Tj T* ET
+BT 1 0 0 1 86 662 Tm (Project proposal: 10 percent) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 644 Tm (-) Tj T* ET
+BT 1 0 0 1 86 644 Tm (Requirements specification: 15 percent) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 626 Tm (-) Tj T* ET
+BT 1 0 0 1 86 626 Tm (Design review: 15 percent) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 608 Tm (-) Tj T* ET
+BT 1 0 0 1 86 608 Tm (Prototype demo: 20 percent) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 590 Tm (-) Tj T* ET
+BT 1 0 0 1 86 590 Tm (Final report: 25 percent) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 572 Tm (-) Tj T* ET
+BT 1 0 0 1 86 572 Tm (Peer evaluation: 5 percent) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 554 Tm (-) Tj T* ET
+BT 1 0 0 1 86 554 Tm (Participation: 10 percent) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 533 Tm (Late work) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 514 Tm (Late work loses 10 percent per day, up to five days. After five days the work is not accepted.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 493 Tm (Extension requests must be sent to the instructor at least 48 hours before the deadline. An) Tj T* ET
+BT 1 0 0 1 72 478 Tm (extension is granted at the instructor's discretion and does not carry a penalty.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 454 Tm (Academic integrity) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 435 Tm (All submitted work must be the team's own. Using code or text from another source without) Tj T* ET
+BT 1 0 0 1 72 420 Tm (citing it is a violation of the academic integrity policy.) Tj T* ET
+ 
+endstream
+endobj
+12 0 obj
+<<
+/Length 1538
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 702 Tm (Schedule of deadlines) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 683 Tm (-) Tj T* ET
+BT 1 0 0 1 86 683 Tm (Project proposal: due Friday, September 18, 2026 at 11:59 PM) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 665 Tm (-) Tj T* ET
+BT 1 0 0 1 86 665 Tm (Requirements specification: due Friday, October 9, 2026 at 11:59 PM) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 647 Tm (-) Tj T* ET
+BT 1 0 0 1 86 647 Tm (Design review: Friday, October 30, 2026) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 629 Tm (-) Tj T* ET
+BT 1 0 0 1 86 629 Tm (Prototype demo: Friday, November 20, 2026) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 611 Tm (-) Tj T* ET
+BT 1 0 0 1 86 611 Tm (Final report: due Friday, December 4, 2026 at 11:59 PM) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 593 Tm (There is no final exam in this course.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 569 Tm (Required textbook) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 550 Tm (Software Engineering in Practice, 4th edition, by R. Whitfield. The bookstore lists it at 89.95) Tj T* ET
+BT 1 0 0 1 72 535 Tm (dollars.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 511 Tm (Course tools) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 492 Tm (Teams use the course portal to submit work and an agile board of their choice to track tasks.) Tj T* ET
+BT 1 0 0 1 72 477 Tm (Source code must be kept in a version-control repository that the instructor can access.) Tj T* ET
+ 
+endstream
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000061 00000 n 
+0000000102 00000 n 
+0000000209 00000 n 
+0000000321 00000 n 
+0000000515 00000 n 
+0000000709 00000 n 
+0000000903 00000 n 
+0000000971 00000 n 
+0000001275 00000 n 
+0000001346 00000 n 
+0000003305 00000 n 
+0000005190 00000 n 
+trailer
+<<
+/ID 
+[<066745e11dd7446524fadbf5e569269c><066745e11dd7446524fadbf5e569269c>]
+% ReportLab generated PDF document -- digest (opensource)
+
+/Info 8 0 R
+/Root 7 0 R
+/Size 13
+>>
+startxref
+6780
+%%EOF

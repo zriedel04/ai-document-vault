@@ -1,0 +1,7 @@
+CSE 485 reading list
+
+Software Engineering in Practice, chapters 1 and 2: read by September 8
+Software Engineering in Practice, chapters 3 and 4: read by September 15
+Software Engineering in Practice, chapter 5 on requirements: read by September 24
+Software Engineering in Practice, chapter 6 on design: read by October 8
+Article: "Writing testable requirements": read by October 1
