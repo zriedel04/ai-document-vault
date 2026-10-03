@@ -120,6 +120,91 @@ try {
         Assert-That "an unreadable record ($garbage) is removed" (-not (Test-Path -LiteralPath $script:RecordFile))
     }
 
+    # --- a vault folder whose name is not ASCII ----------------------------------------------
+    # Built from code points: Windows PowerShell 5.1 reads this file in the ANSI code page, so a
+    # letter typed here would not arrive as written.
+    $accented = 'C:\Users\Jos' + [char]0x00E9 + '\AIVault-' + [char]0x00DF + [char]0x4E2D + [char]::ConvertFromUtf32(0x1F4C1)
+    Write-Record $self ([pscustomobject]@{ host = '127.0.0.1'; port = 8765; vault = $accented })
+    $bytes = [System.IO.File]::ReadAllBytes($script:RecordFile)
+    Assert-That 'the record has no byte order mark' (-not (($bytes.Length -ge 3) -and ($bytes[0] -eq 0xEF) -and ($bytes[1] -eq 0xBB) -and ($bytes[2] -eq 0xBF)))
+    Assert-That 'the record keeps a vault folder with non-ASCII letters' `
+        ((Get-RunningServer).Vault -ceq $accented)
+    Assert-That 'the record does not hold a question mark for a letter' `
+        (-not ([System.IO.File]::ReadAllText($script:RecordFile).Contains('?')))
+    Remove-Record
+
+    # --- a port that something else holds ------------------------------------------------------
+    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $taken = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    try {
+        Assert-That 'a port that accepts connections is in use' (Test-PortInUse '127.0.0.1' $taken)
+        Assert-That 'a wildcard address is probed on loopback' (Test-PortInUse '0.0.0.0' $taken)
+        $script:BackendDir = Join-Path $work 'no-backend'
+        $message = Get-ThrownMessage { Start-Backend ([pscustomobject]@{ host = '127.0.0.1'; port = $taken; vault = 'C:\v' }) }
+        Assert-That 'starting on a taken port is refused before anything is started' `
+            (($null -ne $message) -and ($message -match 'already answers') -and ($message -notmatch 'not installed'))
+        Assert-That 'and no record or log is left behind' (@(Get-ChildItem -LiteralPath $script:RunDir -Force).Count -eq 0)
+    }
+    finally {
+        $listener.Stop()
+    }
+    Assert-That 'a port that nothing holds is free' (-not (Test-PortInUse '127.0.0.1' $taken))
+
+    # --- the lock around check-and-start -------------------------------------------------------
+    $name = Get-LockName
+    $probe = {
+        param($lockName)
+        $m = New-Object System.Threading.Mutex($false, $lockName)
+        try {
+            if ($m.WaitOne(0)) { $m.ReleaseMutex(); return $true }
+            return $false
+        }
+        finally { $m.Dispose() }
+    }
+    # BeginInvoke, so the probe runs on a thread of its own: a mutex is owned by a thread, and the
+    # thread that holds it is let in again, which would make "held" look "free".
+    $freeFromElsewhere = {
+        $shell = [powershell]::Create().AddScript($probe).AddArgument($name)
+        try { return [bool]($shell.EndInvoke($shell.BeginInvoke()) | Select-Object -First 1) }
+        finally { $shell.Dispose() }
+    }
+    Assert-That 'the lock is free when nobody holds it' (& $freeFromElsewhere)
+    $duringBody = $null
+    $returned = Invoke-Locked { $script:duringBody = (& $freeFromElsewhere); 'value' }
+    Assert-That 'the lock is held while the block runs' ($script:duringBody -eq $false)
+    Assert-That 'the block can hand a value back' ($returned -ceq 'value')
+    Assert-That 'the lock is released afterwards' (& $freeFromElsewhere)
+    $null = Get-ThrownMessage { Invoke-Locked { throw 'boom' } }
+    Assert-That 'the lock is released when the block fails' (& $freeFromElsewhere)
+
+    # Another thread holds the lock: a command waits its turn, and gives up with a plain message.
+    $held = New-Object System.Threading.ManualResetEvent($false)
+    $release = New-Object System.Threading.ManualResetEvent($false)
+    $holder = [powershell]::Create().AddScript({
+            param($lockName, $held, $release)
+            $m = New-Object System.Threading.Mutex($false, $lockName)
+            $null = $m.WaitOne()
+            $null = $held.Set()
+            $null = $release.WaitOne()
+            $m.ReleaseMutex()
+            $m.Dispose()
+        }).AddArgument($name).AddArgument($held).AddArgument($release)
+    $pending = $holder.BeginInvoke()
+    try {
+        Assert-That 'the holder got the lock' ($held.WaitOne(10000))
+        $ran = $false
+        $message = Get-ThrownMessage { Invoke-Locked -WaitSeconds 1 { $script:ran = $true } }
+        Assert-That 'a command that cannot get the lock gives up' (($null -ne $message) -and ($message -match 'another vault.ps1 command'))
+        Assert-That 'and does not run its block' (-not $script:ran)
+    }
+    finally {
+        $null = $release.Set()
+        $null = $holder.EndInvoke($pending)
+        $holder.Dispose()
+    }
+    Assert-That 'the lock is free again once the holder is done' (& $freeFromElsewhere)
+
     # --- the token file of the vault ---------------------------------------------------------
     $vault = Join-Path $work 'vault'
     New-Item -ItemType Directory -Path $vault | Out-Null

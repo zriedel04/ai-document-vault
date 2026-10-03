@@ -281,25 +281,35 @@ jobs:
       - name: Settings for a throwaway vault outside the repository
         shell: pwsh
         run: |
-          $vault = Join-Path $env:RUNNER_TEMP 'vault'
+          # An accented letter in the folder name: the record of the running server must keep it.
+          $vault = Join-Path $env:RUNNER_TEMP ('vault-Jos' + [char]0x00E9)
           $config = Join-Path $env:RUNNER_TEMP 'config.toml'
-          Set-Content -LiteralPath $config -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", "port = 18766")
-          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'no-vault.toml') -Encoding ASCII -Value @("[server]", "port = 18766")
-          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'other-port.toml') -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", "port = 18767")
-          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'ipv6.toml') -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", 'host = "::1"')
+          # PowerShell 7's utf8 has no byte order mark, which the TOML reader would refuse.
+          Set-Content -LiteralPath $config -Encoding utf8 -Value @("[vault]", "path = '$vault'", "[server]", "port = 18766")
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'no-vault.toml') -Encoding utf8 -Value @("[server]", "port = 18766")
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'other-port.toml') -Encoding utf8 -Value @("[vault]", "path = '$vault'", "[server]", "port = 18767")
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'ipv6.toml') -Encoding utf8 -Value @("[vault]", "path = '$vault'", "[server]", 'host = "::1"')
           "AIVAULT_CONFIG=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Run, serve the app and stop, in both PowerShell editions
         shell: pwsh
         run: |
+          $vault = Join-Path $env:RUNNER_TEMP ('vault-Jos' + [char]0x00E9)
           foreach ($edition in 'powershell', 'pwsh') {
             Write-Host "== $edition"
             & $edition -NoProfile -File .\vault.ps1 run -NoBrowser
             if ($LASTEXITCODE -ne 0) { throw "run failed in $edition" }
-            if (-not (Test-Path (Join-Path $env:RUNNER_TEMP 'vault\local-token'))) { throw 'the server did not create the token file' }
+            if (-not (Test-Path -LiteralPath (Join-Path $vault 'local-token'))) { throw 'the server did not create the token file' }
             python scripts/smoke_test_server.py http://127.0.0.1:18766
             if ($LASTEXITCODE -ne 0) { throw 'the server did not serve the app' }
-            $again = & $edition -NoProfile -File .\vault.ps1 run -NoBrowser | Out-String
-            if ($again -notmatch 'already running') { throw 'a second run did not notice the first' }
+            # The second run reads the vault folder back from the record, so a folder name that
+            # the record had mangled would fail here ("the token file local-token is not in...").
+            # The other edition reads the record the first one wrote.
+            $otherEdition = if ($edition -eq 'pwsh') { 'powershell' } else { 'pwsh' }
+            foreach ($again in $edition, $otherEdition) {
+              $text = & $again -NoProfile -File .\vault.ps1 run -NoBrowser | Out-String
+              if ($LASTEXITCODE -ne 0) { throw "a second run in $again failed: $text" }
+              if ($text -notmatch 'already running') { throw "a second run in $again did not notice the first: $text" }
+            }
             # Changed settings must not redirect a second run to a port nothing listens on.
             $kept = $env:AIVAULT_CONFIG
             $env:AIVAULT_CONFIG = Join-Path $env:RUNNER_TEMP 'other-port.toml'
@@ -314,6 +324,53 @@ jobs:
             if ($up) { throw 'the server still answers after stop' }
             $idle = & $edition -NoProfile -File .\vault.ps1 stop | Out-String
             if ($idle -notmatch 'not running') { throw 'stop did not say the server was not running' }
+          }
+      - name: run refuses a port that something else holds
+        shell: pwsh
+        run: |
+          # Another program (or another copy of the app) on the port: the new server would fail
+          # to bind, yet it could be taken for ready because the other one answers.
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 18766)
+          $listener.Start()
+          try {
+            foreach ($edition in 'powershell', 'pwsh') {
+              $text = & $edition -NoProfile -File .\vault.ps1 run -NoBrowser 2>&1 | Out-String
+              if ($LASTEXITCODE -eq 0) { throw "run started in $edition although the port was taken" }
+              if ($text -notmatch 'already answers') { throw "unexpected message in ${edition}: $text" }
+              if (Test-Path .run\server.json) { throw 'a record was left behind' }
+            }
+          }
+          finally { $listener.Stop() }
+          # The refused runs left exit code 1 behind, and the step would report it.
+          exit 0
+      - name: Two runs started together leave one server that stop can find
+        shell: pwsh
+        run: |
+          foreach ($edition in 'powershell', 'pwsh') {
+            Write-Host "== $edition"
+            $processes = foreach ($i in 1, 2) {
+              Start-Process -FilePath $edition -NoNewWindow -PassThru `
+                -ArgumentList '-NoProfile', '-File', '.\vault.ps1', 'run', '-NoBrowser' `
+                -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP "race$i.out") `
+                -RedirectStandardError (Join-Path $env:RUNNER_TEMP "race$i.err")
+            }
+            $null = $processes | ForEach-Object { $_.Handle }   # keeps the exit code readable
+            $processes | Wait-Process -Timeout 240 -ErrorAction SilentlyContinue
+            foreach ($p in $processes) {
+              if (-not $p.HasExited) { $p.Kill(); throw "a run did not finish in $edition" }
+            }
+            foreach ($i in 1, 2) {
+              $p = $processes[$i - 1]
+              if ($p.ExitCode -ne 0) { throw "run $i failed in $edition (exit $($p.ExitCode)): $(Get-Content -Raw (Join-Path $env:RUNNER_TEMP "race$i.err")) $(Get-Content -Raw (Join-Path $env:RUNNER_TEMP "race$i.out"))" }
+            }
+            if (-not (Test-Path .run\server.json)) { throw 'no record of the server' }
+            python scripts/smoke_test_server.py http://127.0.0.1:18766
+            if ($LASTEXITCODE -ne 0) { throw 'the server did not serve the app' }
+            & $edition -NoProfile -File .\vault.ps1 stop
+            if ($LASTEXITCODE -ne 0) { throw "stop failed in $edition" }
+            $up = $true
+            try { Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:18766/api/health -TimeoutSec 2 | Out-Null } catch { $up = $false }
+            if ($up) { throw 'a server was left running that stop could not find' }
           }
       - name: dev refuses a host the Vite proxy cannot reach
         shell: pwsh

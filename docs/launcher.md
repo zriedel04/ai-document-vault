@@ -17,6 +17,14 @@ The server reads `backend\config.toml` (copy `config.example.toml` there and set
 
 The launcher keeps a process id and the server's output in `.run/` (git-ignored). The record holds the process id and the process's start time, so `stop` never ends a process that only reuses the number, and the host, port and vault folder the server was started with. The server's console output goes to `.run\server.out.log` and `.run\server.err.log`; the backend's logging holds no document content (see `backend/README.md`).
 
+The record is UTF-8 without a byte order mark, written and read the same way in both editions, because the vault folder in it may have an accented letter in a Windows user name (Windows PowerShell's `-Encoding ASCII` would turn it into `?`). The backend reports the folder to the launcher as JSON with escaped letters, so the console's code page never touches it.
+
+## Starting is serialised and checks the port
+
+`run`, `stop` and `dev` (while it starts the server) hold one lock per checkout (a named mutex over the `.run` folder) around "is it running, start it, write the record". Two commands started together therefore take turns, and the second finds the server the first started, instead of both starting one and the loser deleting the winner's record. A command that cannot get the lock within two minutes stops with a plain message. Windows releases the lock of a process that ended, and the next command takes it over.
+
+Before it starts anything, the launcher also tries to connect to the configured address, and refuses if something answers. Readiness is "`/api/health` answers", which another copy of the app on the same port would satisfy for a new server that is about to fail to bind; refusing first avoids opening the browser, with the new vault's token, on the wrong server. A program that binds the port in the moment between that check and the server's own bind is not caught.
+
 ## The token
 
 The token is never printed. It is in the address handed to the browser, which makes it visible to other local programs for a moment as part of the browser's command line; ADR 0016 accepts that limit and describes the alternative.
@@ -31,4 +39,4 @@ The token is never printed. It is in the address handed to the browser, which ma
 
 ## Tests
 
-`scripts/tests/launcher.tests.ps1` checks the token shape (including a trailing newline, as lesson 4 in `CLAUDE.md` asks), the address, the process record, the token file and how the script is called, in both PowerShell editions. The `Launcher (Windows)` CI job also runs `install`, `run`, a second `run`, `stop` and a refused start without a vault folder against a real server, in both editions, using a throwaway vault in the runner's temporary folder. Opening the browser is the one step CI cannot show.
+`scripts/tests/launcher.tests.ps1` checks the token shape (including a trailing newline, as lesson 4 in `CLAUDE.md` asks), the address, the process record (including a folder name with letters outside ASCII), the port check, the lock, the token file and how the script is called, in both PowerShell editions. The `Launcher (Windows)` CI job also runs `install`, `run`, a second `run`, `stop` and a refused start without a vault folder, a refused start on a port something else holds, and two `run` commands started together against a real server (in a vault folder with an accented letter in its name, so the record is read back by the other edition as well), in both editions, using a throwaway vault in the runner's temporary folder. Opening the browser is the one step CI cannot show.

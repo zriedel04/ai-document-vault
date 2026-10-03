@@ -105,11 +105,13 @@ import json
 from vault.core.config import load_settings
 
 settings = load_settings()
+# ensure_ascii: a path with an accented letter reaches PowerShell as \u00e9, not as bytes that
+# the console code page would decode wrongly.
 print(json.dumps({
     "vault": None if settings.vault.path is None else str(settings.vault.path),
     "host": settings.server.host,
     "port": settings.server.port,
-}))
+}, ensure_ascii=True))
 '@
     Push-Location -LiteralPath $script:BackendDir
     try {
@@ -148,6 +150,21 @@ function Get-StartStamp {
     return [int64]$Process.StartTime.ToUniversalTime().Ticks
 }
 
+function Write-TextFile {
+    <# UTF-8 without a byte order mark, in both editions. The record holds the vault folder, and
+       Windows folder names are not always ASCII (an accented letter in a user name): "-Encoding ASCII" writes a
+       "?" for each such letter, and Windows PowerShell 5.1 reads a file without a mark as the
+       ANSI code page, so the record is read back with Read-TextFile. The path is absolute, as
+       .NET resolves a relative one against the process folder, not the PowerShell location. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Read-TextFile {
+    param([Parameter(Mandatory)][string]$Path)
+    return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+}
+
 function Write-Record {
     <# Remember the server: its process id and start time, and the settings it was started with, so
        a later "run" talks to the server that is up and not to whatever the settings say now. #>
@@ -160,7 +177,7 @@ function Write-Record {
         port    = [int]$Facts.port
         vault   = [string]$Facts.vault
     }
-    $record | ConvertTo-Json | Set-Content -LiteralPath $script:RecordFile -Encoding ASCII
+    Write-TextFile $script:RecordFile ($record | ConvertTo-Json)
 }
 
 function Remove-Record {
@@ -174,7 +191,7 @@ function Get-RunningServer {
        A record that cannot be read, or that names a process that has ended, is removed. #>
     if (-not (Test-Path -LiteralPath $script:RecordFile -PathType Leaf)) { return $null }
     try {
-        $record = Get-Content -LiteralPath $script:RecordFile -Raw | ConvertFrom-Json
+        $record = Read-TextFile $script:RecordFile | ConvertFrom-Json
         $process = Get-Process -Id ([int]$record.pid) -ErrorAction Stop
         if ((Get-StartStamp $process) -eq [int64]$record.started) {
             $names = @($record.PSObject.Properties.Name)
@@ -205,11 +222,82 @@ function Get-RunningServer {
     return $null
 }
 
+function Test-PortInUse {
+    <# True if something accepts connections on the address. The server's own readiness check
+       is "something answers /api/health", which another copy of the app on the same port would
+       satisfy for a child that is about to fail to bind, so a taken port is refused before
+       anything is started. (A wildcard address cannot be connected to, so it is probed on
+       loopback.) A probe that cannot run counts as free: the start-up then reports what it finds. #>
+    param([Parameter(Mandatory)][string]$HostName, [Parameter(Mandatory)][int]$Port)
+    if ($HostName -eq '0.0.0.0') { $HostName = '127.0.0.1' }
+    if ($HostName -eq '::') { $HostName = '::1' }
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $pending = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $pending.AsyncWaitHandle.WaitOne(2000)) { return $false }
+        try {
+            $client.EndConnect($pending)
+            return $true
+        }
+        catch {
+            return $false   # refused: nothing listens
+        }
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Get-LockName {
+    <# One lock per checkout (its state folder), so two copies of the app are not made to wait
+       for each other. The name is a hash because a mutex name cannot hold backslashes. #>
+    $hash = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $hash.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($script:RunDir.ToLowerInvariant()))
+    }
+    finally {
+        $hash.Dispose()
+    }
+    return 'Local\AIVaultLauncher-' + ([BitConverter]::ToString($bytes) -replace '-', '').Substring(0, 32)
+}
+
+function Invoke-Locked {
+    <# Run a block while holding the launcher's lock. Two commands started together would both
+       see "no server", both start one, and the one that fails to bind would delete the record of
+       the one that works, leaving a server that "stop" cannot find. A holder that was killed
+       leaves the lock abandoned, which the next command simply takes over. #>
+    param([Parameter(Mandatory)][scriptblock]$Body, [int]$WaitSeconds = 120)
+    $mutex = New-Object System.Threading.Mutex($false, (Get-LockName))
+    $held = $false
+    try {
+        try {
+            $held = $mutex.WaitOne([TimeSpan]::FromSeconds($WaitSeconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $held = $true
+        }
+        if (-not $held) {
+            throw 'another vault.ps1 command is still starting or stopping the server; wait for it to finish and try again'
+        }
+        & $Body
+    }
+    finally {
+        if ($held) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
 function Start-Backend {
     <# Start the server hidden, remember it and wait until it answers. #>
     param([Parameter(Mandatory)][object]$Facts)
     $HostName = [string]$Facts.host
     $Port = [int]$Facts.port
+    if (Test-PortInUse $HostName $Port) {
+        throw "something already answers on ${HostName}:${Port} (another copy of the app, or another program); stop it, or set another server.port, before starting the server"
+    }
     $python = Get-BackendPython
     New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
     $process = Start-Process -FilePath $python -ArgumentList @('-m', 'vault') `
@@ -268,7 +356,8 @@ function Invoke-Install {
     Write-Host 'Installed. Copy config.example.toml to backend\config.toml, set vault.path, then run .\vault.ps1 run'
 }
 
-function Invoke-Run {
+function Get-OrStartServer {
+    <# The settings of the server that is running, starting one if there is none. #>
     $running = Get-RunningServer
     if ($running) {
         # Talk to the server that is up, whatever the settings say now.
@@ -286,11 +375,15 @@ function Invoke-Run {
         catch {
             Write-Host 'The settings cannot be read now; opening the server that is running.'
         }
+        return $facts
     }
-    else {
-        $facts = Get-VaultFacts
-        $null = Start-Backend $facts
-    }
+    $facts = Get-VaultFacts
+    $null = Start-Backend $facts
+    return $facts
+}
+
+function Invoke-Run {
+    $facts = Invoke-Locked { Get-OrStartServer }
     $token = Read-Token $facts.vault
     $address = Get-AppAddress -HostName $facts.host -Port $facts.port -Token $token
     Open-App $address
@@ -298,13 +391,15 @@ function Invoke-Run {
 }
 
 function Invoke-Stop {
-    $running = Get-RunningServer
-    if (-not $running) {
-        Write-Host 'The server is not running.'
-        return
+    Invoke-Locked {
+        $running = Get-RunningServer
+        if (-not $running) {
+            Write-Host 'The server is not running.'
+            return
+        }
+        Stop-Backend $running.Process
+        Write-Host 'The server is stopped.'
     }
-    Stop-Backend $running.Process
-    Write-Host 'The server is stopped.'
 }
 
 function Invoke-Dev {
@@ -318,10 +413,12 @@ function Invoke-Dev {
         # there. "localhost" is not enough: it can resolve to ::1.
         throw "dev expects server.host 127.0.0.1 and server.port 8765 (the Vite proxy is fixed to that address), but the settings say $($facts.host) and $($facts.port)"
     }
-    if (Get-RunningServer) {
-        throw 'a server started by "run" is already running; stop it first with .\vault.ps1 stop'
+    $server = Invoke-Locked {
+        if (Get-RunningServer) {
+            throw 'a server started by "run" is already running; stop it first with .\vault.ps1 stop'
+        }
+        Start-Backend $facts
     }
-    $server = Start-Backend $facts
     try {
         $token = Read-Token $facts.vault
         $address = Get-AppAddress -HostName '127.0.0.1' -Port $script:DevPort -Token $token
