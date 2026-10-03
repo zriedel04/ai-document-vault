@@ -2,13 +2,13 @@
 
 A report is built from names fixed in code (a spike, a candidate, a metric) and numbers. Its
 title, question and method are fixed text per spike, and the only other strings (the machine and
-package descriptions) are checked against a fixed vocabulary and strict patterns, so a script cannot put document
-text, a file name or an OCR result into a report by accident: anything else is a TypeError or
-ValueError. A report read back from a JSON file is checked the same way, its title, question and
-method must equal the fixed text of the spike it names, and every candidate, metric and package name
-must be one that spike can produce, not merely one of the right shape. The Markdown output has the
-five sections that ``scripts/check_adrs.py`` requires of a spike file, with the conclusion left for
-the owner's review.
+package descriptions) are checked against a fixed vocabulary and strict patterns, so a script cannot
+put document text, a file name or an OCR result into a report by accident: anything else is a
+TypeError or ValueError. A report read back from a JSON file is checked the same way, its title,
+question and method must equal the fixed text of the spike it names, and every candidate, metric and
+package name must be one that spike can produce, not merely one of the right shape. The Markdown
+output has the five sections that ``scripts/check_adrs.py`` requires of a spike file, with the
+conclusion left for the owner's review.
 """
 
 from __future__ import annotations
