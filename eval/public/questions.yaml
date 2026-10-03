@@ -49,7 +49,7 @@ questions:
     page: 2
     quote: 'Final report: 25 percent'
 - id: q006
-  question: Which document gives the late-work penalty for CSE 485?
+  question: Which document gives the late-work penalty for CSE 485, and what is the penalty?
   category: lookup
   answerable: true
   answer: 'The course syllabus: 10 percent per day for up to five days; after five days the work is not
@@ -114,7 +114,7 @@ questions:
     quote: A proposal that exceeds two pages loses 5 points for each extra page.
   find_document: true
 - id: q012
-  question: Which lecture notes explain what 'could have' means in MoSCoW prioritisation?
+  question: Which lecture notes cover MoSCoW prioritisation, and what does 'could have' mean in it?
   category: lookup
   answerable: true
   answer: 'The slide notes on requirements engineering: nice to have if time allows.'
@@ -137,7 +137,8 @@ questions:
     page: null
     quote: 'Jordan: chose SQLite for the prototype.'
 - id: q014
-  question: Which notes give the default and the maximum page size of a list endpoint?
+  question: Which notes describe list endpoints, and how many items does one return by default and at
+    most?
   category: lookup
   answerable: true
   answer: 'The API design notes: 20 by default and at most 100 per page.'
@@ -267,7 +268,8 @@ questions:
 
       Peer evaluation,5,96,100'
 - id: q024
-  question: Which document records the design review score and what the reviewer asked for?
+  question: Which document records the design review, what was its score and what did the reviewer ask
+    the team to add?
   category: lookup
   answerable: true
   answer: 'The design review feedback: 92 out of 100; an index on the course code column for the group
@@ -555,7 +557,7 @@ questions:
     page: null
     quote: Subtotal $174.00
 - id: q045
-  question: Which file lists the team's project budget and its total?
+  question: Which file lists the team's project budget, and what is the total?
   category: numeric
   answerable: true
   answer: 'The project budget table: $82.90.'

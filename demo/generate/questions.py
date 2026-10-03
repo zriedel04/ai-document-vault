@@ -185,7 +185,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which document gives the late-work penalty for CSE 485?",
+        "Which document gives the late-work penalty for CSE 485, and what is the penalty?",
         "The course syllabus: 10 percent per day for up to five days; after five days the work is not accepted.",
         (
             s(
@@ -244,7 +244,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which lecture notes explain what 'could have' means in MoSCoW prioritisation?",
+        "Which lecture notes cover MoSCoW prioritisation, and what does 'could have' mean in it?",
         "The slide notes on requirements engineering: nice to have if time allows.",
         (s(LECTURE4, "Could have: nice to have if time allows", 3),),
         (),
@@ -261,7 +261,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which notes give the default and the maximum page size of a list endpoint?",
+        "Which notes describe list endpoints, and how many items does one return by default and at most?",
         "The API design notes: 20 by default and at most 100 per page.",
         (
             s(
@@ -384,7 +384,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "Which document records the design review score and what the reviewer asked for?",
+        "Which document records the design review, what was its score and what did the reviewer ask the team to add?",
         "The design review feedback: 92 out of 100; an index on the course code column for the group search query.",
         (
             s(REVIEW, "Design review score: 92 out of 100."),
@@ -629,7 +629,7 @@ _RAW: list[_Row] = [
     ),
     _q(
         "numeric",
-        "Which file lists the team's project budget and its total?",
+        "Which file lists the team's project budget, and what is the total?",
         "The project budget table: $82.90.",
         (s(BUDGET, BUDGET_TABLE),),
         (),
