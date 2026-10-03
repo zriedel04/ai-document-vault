@@ -350,9 +350,16 @@ _RAW: list[_Row] = [
         "Which course components are not yet in the grades file?",
         "The final report (25 percent) and participation (10 percent).",
         (
-            s(SYLLABUS, "Final report: 25 percent", 2),
-            s(SYLLABUS, "Participation: 10 percent", 2),
-            # What is missing from a table is only shown by the whole table, not by one row.
+            # What is missing from a list or a table is only shown by the whole of each, not by
+            # one item or one row.
+            s(
+                SYLLABUS,
+                "- Project proposal: 10 percent - Requirements specification: 15 percent "
+                "- Design review: 15 percent - Prototype demo: 20 percent "
+                "- Final report: 25 percent - Peer evaluation: 5 percent "
+                "- Participation: 10 percent",
+                2,
+            ),
             s(
                 GRADES,
                 "assessment,weight_percent,score,out_of\n"

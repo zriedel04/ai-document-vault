@@ -244,10 +244,9 @@ questions:
   sources:
   - path: courses/cse485/syllabus.pdf
     page: 2
-    quote: 'Final report: 25 percent'
-  - path: courses/cse485/syllabus.pdf
-    page: 2
-    quote: 'Participation: 10 percent'
+    quote: '- Project proposal: 10 percent - Requirements specification: 15 percent - Design review: 15
+      percent - Prototype demo: 20 percent - Final report: 25 percent - Peer evaluation: 5 percent - Participation:
+      10 percent'
   - path: data/grades.csv
     page: null
     quote: 'assessment,weight_percent,score,out_of

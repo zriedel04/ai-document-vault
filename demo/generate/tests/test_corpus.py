@@ -359,6 +359,25 @@ class EvalSetTests(unittest.TestCase):
         rows = [r for r in data(DOCS["data/grades.csv"]).decode("utf-8").splitlines() if r]
         self.assertEqual(norm(table[0].quote), norm(" ".join(rows)))
 
+    def test_the_question_about_what_is_not_graded_cites_the_whole_syllabus_grading_list(
+        self,
+    ) -> None:
+        # One item of the list cannot show which components the course has in all.
+        question = next(q for q in QUESTIONS if q.question.startswith("Which course components"))
+        listed = [src for src in question.sources if src.path == "courses/cse485/syllabus.pdf"]
+        self.assertEqual(len(listed), 1)
+        lines = "\n".join(DOCS["courses/cse485/syllabus.pdf"].page_texts()).splitlines()
+        start = lines.index("Grading") + 1
+        items = []
+        for line in lines[start:]:
+            if not line.startswith("- "):
+                if items:
+                    break
+                continue
+            items.append(line)
+        self.assertEqual(len(items), 7)
+        self.assertEqual(norm(listed[0].quote), norm(" ".join(items)))
+
     def test_a_csv_source_is_the_whole_table(self) -> None:
         # A row alone does not say which column a number belongs to, and a total does not show
         # what it adds up, so a passage that holds only a row could earn full recall without
