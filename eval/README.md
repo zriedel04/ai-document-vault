@@ -33,6 +33,7 @@ edit it by hand. Each entry looks like this:
 | `answerable` | `false` for `not_in_vault`: nothing in the corpus answers it, and the right behaviour is to say so |
 | `sources` | The evidence the answer needs, all of it. `quote` is verbatim text of that page, so a retrieved passage can be matched against it. A `multi_doc` question needs at least two documents, and no single document may hold all its quotes; every other answerable question needs exactly one. Every number in the answer must appear in the sources |
 | `alternatives` | Passages in other documents that give the same answer. Citing one of them is as good as citing a source, so each must give the whole expected answer on its own (every number, time and date); none is required |
+| `find_document` | `true` on a "find the document" question (7 in the public set): the answer names the document that holds the evidence, and the question is also scored by Hit@1, whether the top-ranked chunk comes from that document (an exact duplicate counts as its original). It is only set on an answerable question whose sources all lie in one document, and never guessed from the category. The field is left out when false |
 | `distractors` | Documents that must not be cited as the answer (for example the superseded version) |
 
 Exact duplicates in `demo/corpus/manifest.json` (`exact_duplicate_of`) are interchangeable: a

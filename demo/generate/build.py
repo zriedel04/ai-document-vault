@@ -99,6 +99,8 @@ def question_entry(q: Question) -> dict[str, object]:
         ]
     if q.distractors:
         entry["distractors"] = list(q.distractors)
+    if q.find_document:
+        entry["find_document"] = True
     return entry
 
 

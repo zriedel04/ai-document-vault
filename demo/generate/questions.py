@@ -99,6 +99,10 @@ class Question:
     alternatives: tuple[Source, ...] = ()
     distractors: tuple[str, ...] = ()  # documents that look relevant but are outdated or wrong
     tags: tuple[str, ...] = field(default=())
+    # True for a "find the document" question: the answer is which document holds the evidence, so
+    # retrieval is also scored by whether the top result is that document (Hit@1, plan section 21).
+    # Only an answerable question whose passages all lie in one document can be one.
+    find_document: bool = False
 
     @property
     def answerable(self) -> bool:
@@ -109,7 +113,7 @@ def s(path: str, quote: str, page: int | None = None) -> Source:
     return Source(path, quote, page)
 
 
-_Row = tuple[Category, str, str, tuple[Source, ...], tuple[str, ...], tuple[Source, ...]]
+_Row = tuple[Category, str, str, tuple[Source, ...], tuple[str, ...], tuple[Source, ...], bool]
 
 
 def _q(
@@ -119,8 +123,9 @@ def _q(
     sources: tuple[Source, ...],
     distractors: tuple[str, ...] = (),
     alternatives: tuple[Source, ...] = (),
+    find_document: bool = False,
 ) -> _Row:
-    return category, question, answer, sources, distractors, alternatives
+    return category, question, answer, sources, distractors, alternatives, find_document
 
 
 _RAW: list[_Row] = [
@@ -180,8 +185,8 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "What is the penalty for handing work in late in CSE 485?",
-        "10 percent per day for up to five days; after five days the work is not accepted.",
+        "Which document gives the late-work penalty for CSE 485?",
+        "The course syllabus: 10 percent per day for up to five days; after five days the work is not accepted.",
         (
             s(
                 SYLLABUS,
@@ -190,6 +195,7 @@ _RAW: list[_Row] = [
             ),
         ),
         (),
+        find_document=True,
     ),
     _q(
         "lookup",
@@ -227,20 +233,22 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "How long can the project proposal be, and what happens if it is longer?",
-        "No more than two pages; each extra page loses 5 points.",
+        "Which assignment sheet limits the length of the project proposal?",
+        "The project proposal assignment sheet: no more than two pages; each extra page loses 5 points.",
         (
             s(ASSIGN1, "no more than two pages", 1),
             s(ASSIGN1, "A proposal that exceeds two pages loses 5 points for each extra page.", 2),
         ),
         (),
+        find_document=True,
     ),
     _q(
         "lookup",
-        "In MoSCoW prioritisation, what does 'could have' mean?",
-        "Nice to have if time allows.",
+        "Which lecture notes explain what 'could have' means in MoSCoW prioritisation?",
+        "The slide notes on requirements engineering: nice to have if time allows.",
         (s(LECTURE4, "Could have: nice to have if time allows", 3),),
         (),
+        find_document=True,
     ),
     _q(
         "lookup",
@@ -253,8 +261,8 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "How many items does a list endpoint return by default and what is the most a client can ask for?",
-        "20 by default and at most 100 per page.",
+        "Which notes give the default and the maximum page size of a list endpoint?",
+        "The API design notes: 20 by default and at most 100 per page.",
         (
             s(
                 API,
@@ -262,6 +270,7 @@ _RAW: list[_Row] = [
             ),
         ),
         (),
+        find_document=True,
     ),
     _q(
         "lookup",
@@ -285,14 +294,15 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "How long is each team's prototype demo and how is the time split?",
-        "12 minutes: 8 to present and 4 for questions.",
+        "Which announcement says how long each team's prototype demo is?",
+        "The class announcement about demo day: 12 minutes, 8 to present and 4 for questions.",
         (
             s(
                 DEMO_DAY,
                 "Each team has 12 minutes for its prototype demo on Friday, November 20: 8 minutes to present and 4 minutes for questions.",
             ),
         ),
+        find_document=True,
     ),
     _q(
         "lookup",
@@ -374,8 +384,8 @@ _RAW: list[_Row] = [
     ),
     _q(
         "lookup",
-        "What was the design review score and what did the reviewer ask the team to add?",
-        "92 out of 100; an index on the course code column for the group search query.",
+        "Which document records the design review score and what the reviewer asked for?",
+        "The design review feedback: 92 out of 100; an index on the course code column for the group search query.",
         (
             s(REVIEW, "Design review score: 92 out of 100."),
             s(
@@ -383,6 +393,7 @@ _RAW: list[_Row] = [
                 "The group search query needs an index on the course code column before the demo.",
             ),
         ),
+        find_document=True,
     ),
     _q(
         "multi_doc",
@@ -618,10 +629,11 @@ _RAW: list[_Row] = [
     ),
     _q(
         "numeric",
-        "What is the total of the team's project budget?",
-        "$82.90.",
+        "Which file lists the team's project budget and its total?",
+        "The project budget table: $82.90.",
         (s(BUDGET, BUDGET_TABLE),),
         (),
+        find_document=True,
     ),
     _q(
         "multi_doc",
@@ -755,8 +767,15 @@ def build_questions() -> list[Question]:
             sources=sources,
             alternatives=alternatives,
             distractors=distractors,
+            find_document=find_document,
         )
-        for i, (category, question, answer, sources, distractors, alternatives) in enumerate(
-            _RAW, start=1
-        )
+        for i, (
+            category,
+            question,
+            answer,
+            sources,
+            distractors,
+            alternatives,
+            find_document,
+        ) in enumerate(_RAW, start=1)
     ]
