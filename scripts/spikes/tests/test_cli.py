@@ -123,7 +123,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse(cli.is_public_dataset(elsewhere / "demo" / "corpus", questions))
 
     def test_merge_combines_candidate_reports(self) -> None:
-        env = Environment("w", "3.12", "c", 1, 1.0, None, {})
+        env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             paths = []
@@ -140,7 +140,7 @@ class CliTest(unittest.TestCase):
         )
 
     def test_merge_refuses_a_report_with_text_of_its_own(self) -> None:
-        env = Environment("w", "3.12", "c", 1, 1.0, None, {})
+        env = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             report = Report("embedding", "Patient diagnosis", "Q?", "How.", env)
@@ -154,12 +154,12 @@ class CliTest(unittest.TestCase):
 
     def test_merge_refuses_names_that_only_look_harmless(self) -> None:
         text = "patient-diagnosis-confidential"
-        good = Environment("w", "3.12", "c", 1, 1.0, None, {})
+        good = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
         cases = {
             "candidate": (good, text, {"chunks": 1}),
             "metric": (good, "qwen3-embedding-0.6b-cpu", {"medical_record_number": 1}),
             "package": (
-                Environment("w", "3.12", "c", 1, 1.0, None, {text: "1.0"}),
+                Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {text: "1.0"}),
                 "qwen3-embedding-0.6b-cpu",
                 {"chunks": 1},
             ),

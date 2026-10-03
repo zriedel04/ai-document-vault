@@ -180,7 +180,7 @@ class OutputTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "package name this spike cannot"):
             r.Report.from_json(data, KNOWN)
         cpu, gpu = make(), make()
-        gpu.environment = r.Environment("W", "3.12.1", "cpu", 8, 16.0, None, {text: "1.0"})
+        gpu.environment = r.Environment("Windows 11", "3.12.1", "cpu", 8, 16.0, None, {text: "1.0"})
         cpu.add("a", n=1)
         gpu.add("b", n=2)
         with self.assertRaisesRegex(ValueError, "package name this spike cannot"):
@@ -231,12 +231,74 @@ class OutputTest(unittest.TestCase):
         )
         self.assertEqual(r.Environment.from_json(env.to_json()), env)
 
-    def test_the_descriptions_taken_from_the_machine_always_fit(self) -> None:
-        for text in ("", "   ", "é" * 300, "\n"):
-            with self.subTest(text=text[:5]):
-                cleaned = r.machine_text(text)
-                self.assertTrue(r.MACHINE_TEXT.fullmatch(cleaned))
-        self.assertEqual(r.machine_text("Ünï GPU"), "?n? GPU")
+    def test_the_descriptions_taken_from_the_machine_are_known_words_or_unknown(self) -> None:
+        for text in ("", "   ", "é" * 300, "\n", "Patient diagnosis confidential", "x" * 101):
+            with self.subTest(text=text[:20]):
+                self.assertEqual(r.machine_text(text), "unknown")
+        for text in ("NVIDIA GeForce RTX 3080", "AMD Ryzen 7 7800X3D 8-Core Processor"):
+            with self.subTest(text=text):
+                self.assertEqual(r.machine_text(f"  {text}  "), text)
+
+    def test_a_machine_description_is_built_from_known_words_and_model_numbers(self) -> None:
+        # Letters, digits and spaces are not enough: a word the vocabulary does not know is free
+        # text, whatever it looks like, in any field a merge reads back from a file.
+        for field, value in (
+            ("cpu", "Patient diagnosis confidential"),
+            ("cpu", "AMD Ryzen secret"),
+            ("cpu", "Intel Core meeting notes for tuesday"),
+            ("gpu", "NVIDIA GeForce RTX confidential"),
+            ("gpu", "Dr Smith"),
+            ("system", "Windows 11 budget"),
+            ("system", "Linux-6.18.44-fc-v64"),
+            ("cpu", "?"),
+            ("cpu", "AMD\n"),
+            ("cpu", "AMD "[:3] + "é"),
+        ):
+            data = make().to_json()
+            env = dict(data["environment"])  # type: ignore[call-overload]
+            env[field] = value
+            data["environment"] = env
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                r.Report.from_json(data, KNOWN)
+        for text in (
+            "Windows-11-10.0.26200-SP0",
+            "Intel(R) Core(TM) i7-12700K",
+            "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+            "NVIDIA GeForce RTX 3080 Laptop GPU",
+            "arm64",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(r.is_machine_text(text))
+
+    def test_every_vocabulary_word_is_a_hardware_or_system_word(self) -> None:
+        # The list is a reviewed set of names, so it must stay lower-case and free of sentences.
+        for word in r.MACHINE_WORDS:
+            with self.subTest(word=word):
+                self.assertEqual(word, word.lower())
+                self.assertRegex(word, r"[a-z0-9]{1,12}")
+
+    def test_the_system_is_a_name_and_a_release_number_only(self) -> None:
+        with (
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("platform.release", return_value="6.18.44-fc-v64"),
+        ):
+            self.assertEqual(r.system_description(), "Linux 6.18.44")
+        with (
+            mock.patch("platform.system", return_value="Windows"),
+            mock.patch("platform.release", return_value="11"),
+        ):
+            self.assertEqual(r.system_description(), "Windows 11")
+        with (
+            mock.patch("platform.system", return_value="MyCompanyOS"),
+            mock.patch("platform.release", return_value="x"),
+        ):
+            self.assertEqual(r.system_description(), "unknown")
+
+    def test_a_cpu_or_gpu_name_the_vocabulary_lacks_is_stored_as_unknown(self) -> None:
+        with mock.patch("platform.processor", return_value="Acme Quantum Wibble 9"):
+            env = r.collect_environment(gpu="Acme Frobnicator")
+        self.assertEqual((env.cpu, env.gpu), ("unknown", "unknown"))
+        self.assertEqual(r.Environment.from_json(env.to_json()), env)
 
     def test_file_stems_cannot_escape_the_folder(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

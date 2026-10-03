@@ -247,6 +247,32 @@ def corpus_inputs() -> emb.EmbeddingInputs:
 
 
 class EmbeddingTest(unittest.TestCase):
+    def test_a_gpu_candidate_reports_video_memory_next_to_host_memory(self) -> None:
+        embedder = FakeEmbedder()
+        embedder.name = "fake-model-cuda"
+        report = emb.run_embedding_spike(
+            embedder, corpus_inputs(), environment=ENV, gpu_memory=lambda: (1500.5, 2048.0)
+        )
+        metrics = report.rows[0].metrics
+        self.assertEqual(metrics["gpu_peak_allocated_mib"], 1500.5)
+        self.assertEqual(metrics["gpu_peak_reserved_mib"], 2048.0)
+        self.assertIn("peak_memory_mib", metrics)  # host RAM stays, it is a different number
+
+    def test_a_cpu_candidate_or_a_missing_gpu_reports_no_video_memory(self) -> None:
+        def unexpected() -> tuple[float, float]:
+            raise AssertionError("a CPU run must not ask for video memory")
+
+        cpu = emb.run_embedding_spike(
+            FakeEmbedder(), corpus_inputs(), environment=ENV, gpu_memory=unexpected
+        )
+        self.assertNotIn("gpu_peak_allocated_mib", cpu.rows[0].metrics)
+        gpu = FakeEmbedder()
+        gpu.name = "fake-model-cuda"
+        none = emb.run_embedding_spike(
+            gpu, corpus_inputs(), environment=ENV, gpu_memory=lambda: None
+        )
+        self.assertNotIn("gpu_peak_reserved_mib", none.rows[0].metrics)
+
     def test_one_candidate_is_measured_and_scored(self) -> None:
         embedder = FakeEmbedder()
         report = emb.run_embedding_spike(

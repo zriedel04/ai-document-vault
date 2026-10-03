@@ -13,7 +13,7 @@ The scripts that take the measurements are in [`scripts/spikes/`](../../scripts/
 Name the file `NN-topic.md` (for example `01-embedding-model.md`) and include these five sections as `## ` headings (`scripts/check_adrs.py` requires each to be non-empty before a hardware-dependent ADR can be Accepted):
 
 - **Question**: what the spike decides, and the ADR it feeds.
-- **Environment**: Windows version, CPU, RAM, GPU and VRAM, Python version, package versions.
+- **Environment**: Windows version, CPU, RAM, GPU and VRAM, Python version, package versions. The report scripts write the machine lines from a fixed word list and say `unknown` for anything else; read them before committing.
 - **Method**: the script and the commands (scripts live in `scripts/spikes/`), the data set (synthetic, private sample, or both) and how it was measured.
 - **Results**: a table of metrics, per candidate.
 - **Conclusion**: which candidate wins and why, or a recommended alternative.

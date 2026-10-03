@@ -2,7 +2,7 @@
 
 A report is built from names fixed in code (a spike, a candidate, a metric) and numbers. Its
 title, question and method are fixed text per spike, and the only other strings (the machine and
-package descriptions) are checked against short, strict patterns, so a script cannot put document
+package descriptions) are checked against a fixed vocabulary and strict patterns, so a script cannot put document
 text, a file name or an OCR result into a report by accident: anything else is a TypeError or
 ValueError. A report read back from a JSON file is checked the same way, its title, question and
 method must equal the fixed text of the spike it names, and every candidate, metric and package name
@@ -28,11 +28,31 @@ from typing import Final, NamedTuple, cast
 SPIKE_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
 CANDIDATE = re.compile(r"[a-z0-9][a-z0-9._+-]{0,60}")
 METRIC = re.compile(r"[a-z][a-z0-9_]{0,48}")
-# A machine or GPU description such as "AMD64 Family 25 Model 97, AuthenticAMD": letters, digits and
-# a few marks, at most 100 characters. This is the one free-form text left in a report, and a
-# pattern cannot tell a CPU name from a short sentence, so the owner reviews the environment lines
-# of a report before committing it (docs/spikes/README.md).
-MACHINE_TEXT = re.compile(r"[A-Za-z0-9 ._+()/,:?-]{1,100}")
+# A machine or GPU description such as "AMD64 Family 25 Model 97, AuthenticAMD" is built from a
+# closed vocabulary of hardware and operating system words plus model numbers (``7800X3D``,
+# ``i7-12700K``, ``3080``), at most 100 characters. A pattern over letters cannot tell a CPU name
+# from a sentence (``Patient diagnosis confidential`` fits "letters and spaces"), so a word the
+# vocabulary does not know is refused when a report is built, merged or read back, and the code that
+# reads the machine stores ``unknown`` instead. ``MACHINE_CHARACTERS`` is only the first, cheap
+# filter; ``is_machine_text`` is the rule.
+MACHINE_CHARACTERS = re.compile(r"[A-Za-z0-9 ._+()/,:-]{1,100}")
+_MACHINE_SEPARATORS = re.compile(r"[ ._+()/,:-]+")
+_MODEL_NUMBER = re.compile(r"[a-z]{0,2}\d{1,6}[a-z]{0,2}\d{0,2}[a-z]{0,2}")
+MACHINE_WORDS: Final = frozenset(
+    {
+        # operating systems and architectures
+        "windows", "linux", "darwin", "macos", "sp", "x86", "arm", "arm64", "aarch64", "amd64",
+        "intel64", "i386", "i686", "x64", "ia64", "riscv64", "ppc64le", "s390x", "unknown",
+        # processors
+        "amd", "authenticamd", "intel", "genuineintel", "ryzen", "threadripper", "epyc", "athlon",
+        "core", "xeon", "pentium", "celeron", "atom", "apple", "qualcomm", "snapdragon", "family",
+        "model", "stepping", "processor", "cpu", "r", "tm", "ultra", "pro", "max", "mobile",
+        "series", "with", "ai", "graphics",
+        # graphics cards
+        "nvidia", "geforce", "rtx", "gtx", "gt", "quadro", "tesla", "titan", "radeon", "rx",
+        "arc", "ti", "super", "xt", "xtx", "laptop", "gpu", "mib", "gib", "q",
+    }
+)  # fmt: skip
 PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}")
 # A version is numbers with at most a pre-release, post-release, dev and local part from a closed
 # list (PEP 440 shapes such as ``2.8.0+cu128`` or ``1.0.0rc1``). A word in the version position is
@@ -78,10 +98,30 @@ def package_version(text: str) -> str:
     return text if PACKAGE_VERSION.fullmatch(text) else "unknown"
 
 
+def is_machine_text(text: str) -> bool:
+    """Is this a machine description: only vocabulary words and model numbers, 100 characters at
+    most? Anything else, however harmless it looks, is free text and has no place in a report."""
+    if not MACHINE_CHARACTERS.fullmatch(text):
+        return False
+    words = [word.lower() for word in _MACHINE_SEPARATORS.split(text) if word]
+    return bool(words) and all(
+        word in MACHINE_WORDS or _MODEL_NUMBER.fullmatch(word) for word in words
+    )
+
+
 def machine_text(text: str) -> str:
-    """Make a description from the OS fit the report: unusual characters become ``?``."""
-    cleaned = re.sub(r"[^A-Za-z0-9 ._+()/,:?-]", "?", text).strip()[:100]
-    return cleaned or "unknown"
+    """A description read from the machine, or ``unknown`` when it is not one the report can
+    vouch for. It is never cleaned up or cut down: a half-cleaned string is still text."""
+    cleaned = text.strip()
+    return cleaned if is_machine_text(cleaned) else "unknown"
+
+
+def system_description() -> str:
+    """The operating system as a name and a release number, such as ``Windows 11`` or
+    ``Linux 6.18.44``. ``platform.platform()`` carries free-form parts (a distribution's kernel
+    label), so only the name and the leading numbers of the release are used."""
+    release = re.match(r"\d{1,4}(?:\.\d{1,4}){0,2}", platform.release())
+    return machine_text(f"{platform.system()} {release.group(0) if release else ''}")
 
 
 @dataclass(frozen=True)
@@ -98,8 +138,8 @@ class Environment:
 
     def __post_init__(self) -> None:
         for label, text in (("system", self.system), ("cpu", self.cpu), ("gpu", self.gpu)):
-            if text is not None and not MACHINE_TEXT.fullmatch(text):
-                msg = f"environment {label} must be a short machine description"
+            if text is not None and not is_machine_text(text):
+                msg = f"environment {label} must be a machine description from the known words"
                 raise ValueError(msg)
         if not PYTHON_VERSION.fullmatch(self.python):
             msg = "environment python must be a version number"
@@ -201,7 +241,7 @@ def collect_environment(packages: tuple[str, ...] = (), gpu: str | None = None) 
         except metadata.PackageNotFoundError:
             versions[name] = "not installed"
     return Environment(
-        system=machine_text(platform.platform()),
+        system=system_description(),
         python=platform.python_version(),
         cpu=machine_text(platform.processor() or platform.machine()),
         cpu_count=os.cpu_count(),

@@ -112,6 +112,28 @@ def peak_memory_mib() -> float | None:
     return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
 
 
+def gpu_peak_memory_mib() -> tuple[float, float] | None:
+    """The most memory this process has had on the first CUDA GPU, in MiB, as (allocated, reserved),
+    or None when torch or a GPU is missing.
+
+    ``peak_memory_mib`` is the host's working set and never includes video memory, so a model that
+    nearly fills the card would look small without this. Allocated is what the tensors needed;
+    reserved is what torch's allocator took from the card, which is what another program would
+    find missing. Like the host number it only grows, so it needs one candidate per process.
+    """
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    mib = 1024 * 1024
+    return (
+        torch.cuda.max_memory_allocated(0) / mib,
+        torch.cuda.max_memory_reserved(0) / mib,
+    )
+
+
 def _peak_memory_windows() -> float | None:  # pragma: no cover - exercised on the Windows runner
     import ctypes
     from ctypes import wintypes

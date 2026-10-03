@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Question, canonical_paths
-from vault_spikes.metrics import mean, peak_memory_mib, per_second
+from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
 from vault_spikes.report import Environment, Report, collect_environment
 from vault_spikes.retrieval import K, rank_by_similarity, score_all, sources_missing_from
 
@@ -29,7 +29,9 @@ METHOD = (
     "`python -m vault_spikes embedding --candidate NAME --device DEVICE`, one candidate per "
     "process so the peak memory is that candidate's. The model is downloaded beforehand with "
     "`fetch-model` and loaded only from the local cache, so the load time never includes a "
-    "download. The corpus is cut "
+    "download. Memory is the process's peak working set (host RAM); a CUDA run also reports the "
+    "peak video memory torch allocated and reserved, since the working set does not include it. "
+    "The corpus is cut "
     "into chunks of at most 800 characters that overlap by at least the longest evidence quote, "
     "so no quote is split between two chunks (the overlap is reported); throughput is chunks "
     "embedded per second in batches. "
@@ -68,6 +70,8 @@ METRICS = frozenset(
         "hit_at_1_questions",
         "hit_at_1",
         "peak_memory_mib",
+        "gpu_peak_allocated_mib",
+        "gpu_peak_reserved_mib",
     }
 )
 
@@ -101,6 +105,7 @@ def run_embedding_spike(
     public_dataset: bool = True,
     environment: Environment | None = None,
     clock: Callable[[], float] = time.perf_counter,
+    gpu_memory: Callable[[], tuple[float, float] | None] = gpu_peak_memory_mib,
 ) -> Report:
     """Measure one candidate and return a report with one row."""
     corpus = inputs.corpus
@@ -170,5 +175,9 @@ def run_embedding_spike(
             metrics["hit_at_1"] = scores.hit_at_1
     if (peak := peak_memory_mib()) is not None:
         metrics["peak_memory_mib"] = peak
+    # The host number above is the process's RAM. A candidate run on the GPU also needs video
+    # memory, which is what limits it on a 12 GB card, so it is reported separately.
+    if embedder.name.endswith("-cuda") and (gpu := gpu_memory()) is not None:
+        metrics["gpu_peak_allocated_mib"], metrics["gpu_peak_reserved_mib"] = gpu
     report.add(embedder.name, **metrics)
     return report

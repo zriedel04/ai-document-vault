@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import math
 import sys
+import types
 import unittest
 from collections.abc import Callable
+from unittest import mock
 
 from vault_spikes import metrics
 
@@ -81,6 +83,27 @@ class SummaryTest(unittest.TestCase):
         if sys.platform == "win32" or sys.platform.startswith("linux"):
             self.assertIsNotNone(peak)
         self.assertTrue(peak is None or (math.isfinite(peak) and 5 < peak < 1_000_000))
+
+
+class GpuMemoryTest(unittest.TestCase):
+    def fake_torch(self, available: bool) -> types.ModuleType:
+        mib = 1024 * 1024
+        cuda = types.SimpleNamespace(
+            is_available=lambda: available,
+            max_memory_allocated=lambda device: 3 * mib,
+            max_memory_reserved=lambda device: 5 * mib,
+        )
+        return types.SimpleNamespace(cuda=cuda)  # type: ignore[return-value]
+
+    def test_allocated_and_reserved_video_memory_are_reported_in_mib(self) -> None:
+        with mock.patch.dict(sys.modules, {"torch": self.fake_torch(True)}):
+            self.assertEqual(metrics.gpu_peak_memory_mib(), (3.0, 5.0))
+
+    def test_no_gpu_or_no_torch_is_none(self) -> None:
+        with mock.patch.dict(sys.modules, {"torch": self.fake_torch(False)}):
+            self.assertIsNone(metrics.gpu_peak_memory_mib())
+        with mock.patch.dict(sys.modules, {"torch": None}):  # an import of None is an ImportError
+            self.assertIsNone(metrics.gpu_peak_memory_mib())
 
 
 if __name__ == "__main__":
