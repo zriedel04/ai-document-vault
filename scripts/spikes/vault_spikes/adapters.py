@@ -66,16 +66,25 @@ EMBEDDING_MODELS = {
 }
 
 
+DEFAULT_BATCH_SIZE = 16
+
+
 class SentenceTransformerEmbedder:
     """A sentence-transformers model on the CPU or a CUDA GPU."""
 
-    def __init__(self, candidate: str, device: str) -> None:
+    def __init__(self, candidate: str, device: str, batch_size: int = DEFAULT_BATCH_SIZE) -> None:
         if candidate not in EMBEDDING_MODELS:
             msg = f"unknown candidate {candidate!r}; choose one of {sorted(EMBEDDING_MODELS)}"
             raise OwnValueError(msg)
         if device not in {"cpu", "cuda"}:
             msg = "device must be cpu or cuda"
             raise OwnValueError(msg)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            msg = "the batch size must be a whole number of at least 1"
+            raise OwnValueError(msg)
+        # The size the report records. It is also passed to the encoder, which otherwise batches
+        # by its own default (32): a report must name the batch the measurement really used.
+        self.batch_size = batch_size
         self.candidate = candidate
         self.name = f"{candidate}-{device}"
         self.model_id = EMBEDDING_MODELS[candidate]
@@ -112,7 +121,12 @@ class SentenceTransformerEmbedder:
         # each model's own prompts. Fall back to a plain encode on older ones.
         method = getattr(model, "encode_query" if query else "encode_document", None)
         encode: Callable[..., object] = method or model.encode  # type: ignore[attr-defined]
-        vectors = encode(list(texts), normalize_embeddings=True, convert_to_numpy=True)
+        vectors = encode(
+            list(texts),
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
         return vectors.tolist()  # type: ignore[attr-defined, no-any-return]
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:

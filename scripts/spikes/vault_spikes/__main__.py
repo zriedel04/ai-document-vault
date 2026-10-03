@@ -101,7 +101,7 @@ def parser() -> argparse.ArgumentParser:
     emb.add_argument(
         "--questions", type=Path, default=REPO_ROOT / "eval" / "public" / "questions.yaml"
     )
-    emb.add_argument("--batch-size", type=positive_int, default=16)
+    emb.add_argument("--batch-size", type=positive_int, default=adapters.DEFAULT_BATCH_SIZE)
     emb.add_argument("--vault-chunks", type=positive_int, default=100_000)
 
     fetch = commands.add_parser(
@@ -219,7 +219,9 @@ def run(args: argparse.Namespace) -> int:
 
     if args.command == "embedding":
         require_embedding_inputs(args.corpus, args.questions)
-        embedder = adapters.SentenceTransformerEmbedder(args.candidate, args.device)
+        embedder = adapters.SentenceTransformerEmbedder(
+            args.candidate, args.device, args.batch_size
+        )
         # The same candidate is measured on the public and on the private questions, and both
         # reports are needed, so the data set is part of the name; checked before the long run.
         public = is_public_dataset(args.corpus, args.questions)

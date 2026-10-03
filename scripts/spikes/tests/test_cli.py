@@ -5,7 +5,7 @@ import io
 import json
 import tempfile
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -103,7 +103,9 @@ class CliTest(unittest.TestCase):
             self.assertNotIn(folder, text)
         self.assertIn("report: ocr-rapidocr-ppocrv5.json and ocr-rapidocr-ppocrv5.md", out)
 
-    def embedding_run(self, root: Path, *extra: str) -> tuple[int, str, str]:
+    def embedding_run(
+        self, root: Path, *extra: str, factory: Callable[..., object] | None = None
+    ) -> tuple[int, str, str]:
         """One embedding run on a one-document corpus; the questions are the owner's own."""
         (root / "corpus").mkdir(exist_ok=True)
         (root / "corpus" / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
@@ -123,7 +125,9 @@ class CliTest(unittest.TestCase):
             encoding="utf-8",
         )
         with (
-            mock.patch.object(adapters, "SentenceTransformerEmbedder", lambda *_a: FakeEmbedder()),
+            mock.patch.object(
+                adapters, "SentenceTransformerEmbedder", factory or (lambda *_a: FakeEmbedder())
+            ),
             mock.patch.object(adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"),
         ):
             return run(
@@ -150,6 +154,25 @@ class CliTest(unittest.TestCase):
                 )
             )
         self.assertEqual(written["environment"]["gpu"], "unknown")
+
+    def test_the_batch_size_asked_for_reaches_the_model_and_the_report(self) -> None:
+        made: list[tuple[object, ...]] = []
+
+        def make(*args: object) -> FakeEmbedder:
+            made.append(args)
+            return FakeEmbedder()
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, _, err = self.embedding_run(root, "--batch-size", "5", factory=make)
+            self.assertEqual(code, 0, err)
+            written = json.loads(
+                (root / "out" / "embedding-qwen3-embedding-0.6b-cpu-private.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(made[0][2], 5)  # the third argument is the batch size
+        self.assertEqual(written["rows"][0]["metrics"]["batch_size"], 5)
 
     def test_the_public_and_the_private_run_of_a_candidate_keep_separate_reports(self) -> None:
         # ADR 0013 needs both, and the same candidate on the same device used to write both to

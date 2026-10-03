@@ -309,6 +309,39 @@ class RequireCudaTest(unittest.TestCase):
             "Qwen/Qwen3-Embedding-0.6B", device="cpu", local_files_only=True
         )
 
+    def test_the_reported_batch_size_is_the_one_the_encoder_uses(self) -> None:
+        # sentence-transformers batches by 32 unless told otherwise, so a report that says 64
+        # would describe a run that was really done in batches of 32.
+        for query in (False, True):
+            embedder = adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cpu", 64)
+            model = mock.MagicMock()
+            model.encode_document.return_value.tolist.return_value = [[1.0]]
+            model.encode_query.return_value.tolist.return_value = [[1.0]]
+            embedder.model = model
+            with self.subTest(query=query):
+                (embedder.embed_queries if query else embedder.embed_documents)(["a"])
+                called = model.encode_query if query else model.encode_document
+                self.assertEqual(called.call_args.kwargs["batch_size"], 64)
+        # Older versions without encode_query / encode_document use plain encode.
+        old = mock.MagicMock(spec=["encode"])
+        old.encode.return_value.tolist.return_value = [[1.0]]
+        embedder.model = old
+        embedder.embed_documents(["a"])
+        self.assertEqual(old.encode.call_args.kwargs["batch_size"], 64)
+        self.assertEqual(
+            adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cpu").batch_size,
+            adapters.DEFAULT_BATCH_SIZE,
+        )
+
+    def test_a_batch_size_that_cannot_work_is_refused(self) -> None:
+        for bad in (0, -1, True, 1.5, "16"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                adapters.SentenceTransformerEmbedder(
+                    "qwen3-embedding-0.6b",
+                    "cpu",
+                    bad,  # type: ignore[arg-type]
+                )
+
     def test_a_model_that_is_not_downloaded_says_how_to_fetch_it(self) -> None:
         embedder = adapters.SentenceTransformerEmbedder("embeddinggemma-300m", "cpu")
         fake_st = mock.MagicMock()
