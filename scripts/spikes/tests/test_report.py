@@ -9,13 +9,22 @@ from pathlib import Path
 from unittest import mock
 
 from vault_spikes import report as r
+from vault_spikes.errors import OwnValueError
 
 PRIVATE_TEXT = "Patient diagnosis: confidential"
 KNOWN = {
     "embedding": r.SpikeSchema(
         r.SpikeText("Title", "Q?", "How."),
         re.compile(r"model(?:-[a-z]+)?|a|b|model-cpu|model-cuda"),
-        frozenset({"chunks", "fast", "rate", "n", "detail"}),
+        {
+            "chunks": r.Kind.COUNT,
+            "fast": r.Kind.AMOUNT,
+            "rate": r.Kind.AMOUNT,
+            "n": r.Kind.AMOUNT,
+            "detail": r.Kind.AMOUNT,
+            "share": r.Kind.RATIO,
+            "ok": r.Kind.FLAG,
+        },
         frozenset({"numpy", "torch"}),
     )
 }
@@ -88,7 +97,7 @@ class OutputTest(unittest.TestCase):
 
     def test_writing_and_reading_back(self) -> None:
         report = make()
-        report.add("model-a", chunks=3, fast=False)
+        report.add("model-a", chunks=3, ok=False)
         with tempfile.TemporaryDirectory() as folder:
             json_path, md_path = report.write(Path(folder) / "out", stem="embedding-model-a")
             self.assertEqual(json_path.name, "embedding-model-a.json")
@@ -305,6 +314,59 @@ class OutputTest(unittest.TestCase):
             for stem in ("../x", "a/b", "", "A", "x\n", ".."):
                 with self.subTest(stem=stem), self.assertRaises(ValueError):
                     make().write(Path(folder), stem=stem)
+
+
+class MetricValueTest(unittest.TestCase):
+    """A report read back from a file is refused when a value is outside what its metric can be."""
+
+    def report_with(self, **metrics: object) -> dict[str, object]:
+        report = make()
+        report.add("a", n=1)
+        data = report.to_json()
+        rows = data["rows"]
+        assert isinstance(rows, list)
+        rows[0]["metrics"] = metrics
+        return data
+
+    def test_values_inside_each_kind_are_accepted(self) -> None:
+        data = self.report_with(chunks=0, share=1.0, ok=False, fast=0.5, rate=10**12)
+        self.assertEqual(r.Report.from_json(data, KNOWN).rows[0].metrics["share"], 1.0)
+        for share in (0, 0.0, 1, 0.25):
+            r.Report.from_json(self.report_with(share=share), KNOWN)
+        r.Report.from_json(self.report_with(ok=True), KNOWN)
+
+    def test_values_outside_a_kind_are_refused_and_not_quoted(self) -> None:
+        for metrics in (
+            {"share": -5},
+            {"share": 1.5},
+            {"share": True},
+            {"chunks": 1.5},
+            {"chunks": -1},
+            {"chunks": True},
+            {"chunks": 10**13},
+            {"fast": -0.1},
+            {"fast": True},
+            {"fast": 10**13},
+            {"ok": 1},
+            {"ok": 0.0},
+        ):
+            with self.subTest(metrics=metrics):
+                data = self.report_with(**metrics)
+                with self.assertRaises(OwnValueError) as caught:
+                    r.Report.from_json(data, KNOWN)
+                (name,) = metrics
+                self.assertIn(name, str(caught.exception))
+                self.assertNotIn(str(next(iter(metrics.values()))), str(caught.exception))
+
+    def test_text_in_place_of_a_number_is_still_refused(self) -> None:
+        for value in ("12", None, [1], {"a": 1}):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                r.Report.from_json(self.report_with(chunks=value), KNOWN)
+
+    def test_in_domain_covers_every_kind(self) -> None:
+        self.assertEqual(set(r.Kind), {r.Kind.COUNT, r.Kind.RATIO, r.Kind.AMOUNT, r.Kind.FLAG})
+        self.assertFalse(r.in_domain(r.Kind.COUNT, 2.0))  # a count is a whole number
+        self.assertTrue(r.in_domain(r.Kind.AMOUNT, 2))
 
 
 class MergeTest(unittest.TestCase):

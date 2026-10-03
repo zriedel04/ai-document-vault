@@ -13,12 +13,13 @@ from vault_spikes import spike_embedding as emb
 from vault_spikes import spike_ocr as ocr
 from vault_spikes import spike_pdf as pdf
 from vault_spikes import spike_vec as vec
-from vault_spikes.report import Environment, Report
+from vault_spikes.report import Environment, Report, in_domain
 
 ENV = Environment("Windows-11", "3.12.1", "cpu", 8, 16.0, None, {})
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
 EMITTED: dict[str, set[str]] = {}
+VALUES: list[tuple[str, str, object]] = []
 _real_add = Report.add
 
 
@@ -27,6 +28,7 @@ def setUpModule() -> None:
 
     def recording_add(self: Report, candidate: str, **metrics: float) -> None:
         EMITTED.setdefault(self.spike, set()).update(metrics)
+        VALUES.extend((self.spike, name, value) for name, value in metrics.items())
         _real_add(self, candidate, **metrics)
 
     Report.add = recording_add  # type: ignore[method-assign]
@@ -37,9 +39,13 @@ def tearDownModule() -> None:
     Report.add = _real_add  # type: ignore[method-assign]
     schemas = {"embedding": emb.METRICS, "ocr": ocr.METRICS, "pdf": pdf.METRICS, "vec": vec.METRICS}
     for spike, names in EMITTED.items():
-        unknown = names - schemas[spike]
+        unknown = names - set(schemas[spike])
         assert not unknown, f"{spike} emits metrics its schema does not list: {sorted(unknown)}"
     assert set(EMITTED) == set(schemas), "a spike was not exercised by these tests"
+    # A value a spike really produces must be one its metric's kind allows, or the report that
+    # script wrote could not be merged.
+    for spike, name, value in VALUES:
+        assert in_domain(schemas[spike][name], value), f"{spike}: {name} is outside its kind"
 
 
 class Clock:

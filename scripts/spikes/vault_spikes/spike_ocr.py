@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     character_error_rate,
     mean,
@@ -24,7 +25,7 @@ from vault_spikes.metrics import (
     per_second,
     percentile,
 )
-from vault_spikes.report import Environment, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, collect_environment
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"})
 TITLE = "OCR engines on this PC"
@@ -47,24 +48,22 @@ PACKAGES = ("rapidocr", "onnxruntime", "pillow")
 # Tesseract is a program, not a package: its version is added by the command line.
 REPORT_PACKAGES = frozenset({*PACKAGES, "tesseract"})
 CANDIDATES = re.compile(r"rapidocr-ppocrv5|tesseract")
-METRICS = frozenset(
-    {
-        "images",
-        "failures",
-        "empty_results",
-        "references_unusable",
-        "load_seconds",
-        "seconds_spent_in_failures",
-        "images_per_minute",
-        "cer_mean_failures_as_errors",
-        "cer_mean",
-        "cer_median",
-        "cer_p90",
-        "seconds_per_image_p50",
-        "seconds_per_image_p95",
-        "peak_memory_mib",
-    }
-)
+METRICS: dict[str, Kind] = {
+    "images": Kind.COUNT,
+    "failures": Kind.COUNT,
+    "empty_results": Kind.COUNT,
+    "references_unusable": Kind.COUNT,
+    "load_seconds": Kind.AMOUNT,
+    "seconds_spent_in_failures": Kind.AMOUNT,
+    "images_per_minute": Kind.AMOUNT,
+    "cer_mean_failures_as_errors": Kind.AMOUNT,
+    "cer_mean": Kind.AMOUNT,
+    "cer_median": Kind.AMOUNT,
+    "cer_p90": Kind.AMOUNT,
+    "seconds_per_image_p50": Kind.AMOUNT,
+    "seconds_per_image_p95": Kind.AMOUNT,
+    "peak_memory_mib": Kind.AMOUNT,
+}
 
 
 class OcrEngine(Protocol):
@@ -109,7 +108,7 @@ def run_ocr_spike(
     """Measure one engine over ``samples`` and return a report with one row."""
     if not samples:
         msg = "no image has a reference text file"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     report = Report(
         "ocr",
         TITLE,

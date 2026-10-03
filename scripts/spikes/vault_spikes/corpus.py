@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from vault_spikes.errors import OwnMessage, OwnValueError
+
 TEXT_SUFFIXES = frozenset({".txt", ".md", ".csv"})
 MAX_FILE_BYTES = 20 * 1024 * 1024
 """Skip anything bigger: a spike input is a small file, and a zip can expand enormously."""
@@ -25,7 +27,7 @@ _XML_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;"
 _ENTITY = re.compile("|".join(_XML_ENTITIES))
 
 
-class SpikeInputError(ValueError):
+class SpikeInputError(OwnMessage, ValueError):
     """An input file is missing, malformed or points outside its folder."""
 
 
@@ -279,7 +281,7 @@ def split_text(
     """Cut ``text`` into windows of at most ``max_chars``, ending at whitespace where possible."""
     if max_chars <= 0 or not 0 <= overlap < max_chars:
         msg = "need max_chars > 0 and 0 <= overlap < max_chars"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     text = text.strip()
     pieces: list[str] = []
     start = 0

@@ -20,9 +20,12 @@ import platform
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from importlib import metadata
 from pathlib import Path
 from typing import Final, NamedTuple, cast
+
+from vault_spikes.errors import OwnTypeError, OwnValueError
 
 # Always use ``fullmatch`` with these patterns (``$`` also matches before a trailing newline).
 SPIKE_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
@@ -72,6 +75,34 @@ CONCLUSION_PLACEHOLDER: Final = (
 type Number = int | float | bool
 
 
+class Kind(Enum):
+    """What a metric's value may be. Each spike lists the kind of every metric it can emit, and a
+    report read back from a file is refused when a value is outside it (``recall_at_10: -5``,
+    ``load_seconds: true``), so a malformed file cannot reach the evidence for an ADR."""
+
+    COUNT = "a whole number, 0 or more"
+    RATIO = "a number from 0 to 1"
+    AMOUNT = "a number, 0 or more"
+    FLAG = "true or false"
+
+
+# Far above anything a spike measures, and a bound a hand-edited file cannot overshoot silently.
+LARGEST_VALUE: Final = 10**12
+
+
+def in_domain(kind: Kind, value: object) -> bool:
+    """Is ``value`` allowed for a metric of this kind? Booleans are not numbers here."""
+    if kind is Kind.FLAG:
+        return isinstance(value, bool)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    if kind is Kind.COUNT:
+        return isinstance(value, int) and 0 <= value <= LARGEST_VALUE
+    if kind is Kind.RATIO:
+        return 0 <= value <= 1
+    return 0 <= value <= LARGEST_VALUE
+
+
 class SpikeText(NamedTuple):
     """The fixed words of one spike's report: its title, question and method."""
 
@@ -82,13 +113,14 @@ class SpikeText(NamedTuple):
 
 class SpikeSchema(NamedTuple):
     """Everything a spike's report may contain: its fixed words, the candidate names its rows may
-    have (a pattern over the names the code can produce), the metric names it can emit and the
-    package names its environment can list. A report read from a file may use nothing else, because
-    a name that merely looks harmless (``patient-diagnosis-confidential``) is still free text."""
+    have (a pattern over the names the code can produce), the metric names it can emit with the kind
+    of value each may hold, and the package names its environment can list. A report read from a
+    file may use nothing else, because a name that merely looks harmless
+    (``patient-diagnosis-confidential``) is still free text."""
 
     text: SpikeText
     candidates: re.Pattern[str]
-    metrics: frozenset[str]
+    metrics: Mapping[str, Kind]
     packages: frozenset[str]
 
 
@@ -140,10 +172,10 @@ class Environment:
         for label, text in (("system", self.system), ("cpu", self.cpu), ("gpu", self.gpu)):
             if text is not None and not is_machine_text(text):
                 msg = f"environment {label} must be a machine description from the known words"
-                raise ValueError(msg)
+                raise OwnValueError(msg)
         if not PYTHON_VERSION.fullmatch(self.python):
             msg = "environment python must be a version number"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         for count in (self.cpu_count, self.ram_gib):
             if count is not None and (
                 isinstance(count, bool)
@@ -151,11 +183,11 @@ class Environment:
                 or not 0 <= count <= 1_000_000
             ):
                 msg = "environment cpu_count and ram_gib must be plain numbers or none"
-                raise ValueError(msg)
+                raise OwnValueError(msg)
         for name, version in self.packages.items():
             if not PACKAGE_NAME.fullmatch(name) or not PACKAGE_VERSION.fullmatch(version):
                 msg = "environment packages must be a name and a version number"
-                raise ValueError(msg)
+                raise OwnValueError(msg)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -188,7 +220,7 @@ def _known_environment(data: object, schema: SpikeSchema) -> Environment:
     env = Environment.from_json(cast("dict[str, object]", data))
     if not set(env.packages) <= schema.packages:
         msg = "the report's environment has a package name this spike cannot produce"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     return env
 
 
@@ -296,24 +328,24 @@ class Report:
     def __post_init__(self) -> None:
         if not SPIKE_NAME.fullmatch(self.spike):
             msg = "spike name must be lower-case letters, digits and hyphens"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
 
     def add(self, candidate: str, **metrics: Number) -> None:
         """Add a row. Candidate and metric names are checked, and every value must be a number."""
         if not CANDIDATE.fullmatch(candidate):
             msg = "candidate names are short lower-case labels fixed in code"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         row = Row(candidate)
         for name, value in metrics.items():
             if not METRIC.fullmatch(name):
                 msg = "metric names are lower_snake_case labels fixed in code"
-                raise ValueError(msg)
+                raise OwnValueError(msg)
             if not isinstance(value, bool | int | float):
                 msg = f"metric {name} must be a number or a boolean, not text"
-                raise TypeError(msg)
+                raise OwnTypeError(msg)
             if isinstance(value, float) and not math.isfinite(value):
                 msg = f"metric {name} must be finite"
-                raise ValueError(msg)
+                raise OwnValueError(msg)
             row.metrics[name] = round(value, 4) if isinstance(value, float) else value
         self.rows.append(row)
 
@@ -340,12 +372,12 @@ class Report:
         spike = data["spike"]
         if not isinstance(spike, str) or spike not in known:
             msg = "the report is not from a known spike"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         schema = known[spike]
         fixed = schema.text
         if (data["title"], data["question"], data["method"]) != tuple(fixed):
             msg = "the report's title, question or method is not the spike's own text"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         report = cls(
             spike=spike,
             title=fixed.title,
@@ -357,11 +389,15 @@ class Report:
             candidate, metrics = row["candidate"], cast("dict[str, Number]", row["metrics"])
             if not isinstance(candidate, str) or not schema.candidates.fullmatch(candidate):
                 msg = "the report has a candidate name this spike cannot produce"
-                raise ValueError(msg)
-            if not isinstance(metrics, dict) or not set(metrics) <= schema.metrics:
+                raise OwnValueError(msg)
+            if not isinstance(metrics, dict) or not set(metrics) <= set(schema.metrics):
                 msg = "the report has a metric name this spike cannot produce"
-                raise ValueError(msg)
+                raise OwnValueError(msg)
             report.add(candidate, **metrics)
+            for name, value in report.rows[-1].metrics.items():
+                if not in_domain(schema.metrics[name], value):
+                    msg = f"metric {name} is outside the values this spike can produce"
+                    raise OwnValueError(msg)
             if (own := row.get("environment")) is not None:
                 report.rows[-1].environment = _known_environment(own, schema)
         return report
@@ -407,7 +443,7 @@ class Report:
         stem = self.spike if stem is None else stem
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,80}", stem):
             msg = "the file name stem must be lower-case letters, digits, dots and hyphens"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         directory.mkdir(parents=True, exist_ok=True)
         json_path = directory / f"{stem}.json"
         md_path = directory / f"{stem}.md"
@@ -420,7 +456,7 @@ def merge(reports: list[Report]) -> Report:
     """Combine reports of the same spike (one candidate per process) into one."""
     if not reports:
         msg = "nothing to merge"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     first = reports[0]
     for other in reports[1:]:
         if (other.spike, other.question, other.method) != (
@@ -429,7 +465,7 @@ def merge(reports: list[Report]) -> Report:
             first.method,
         ):
             msg = "reports are not from the same spike"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
     merged = Report(first.spike, first.title, first.question, first.method, first.environment)
     for report in reports:
         for row in report.rows:

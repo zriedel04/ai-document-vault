@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from vault_spikes.corpus import Chunk, Question, Source
+from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import cosine, mean
 
 K = 10
@@ -118,7 +119,7 @@ def score_all(
     results = [score_question(q, ranked[q.id], canonical, k) for q in have]
     if not results:
         msg = "no question could be scored"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     hits = [
         document_hit(q, ranked[q.id], canonical) for q in have if finds_a_document(q, canonical)
     ]

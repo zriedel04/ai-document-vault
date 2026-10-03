@@ -191,6 +191,67 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertTrue(err.startswith("error: no PDF files"))
 
+    def assert_no_detail(self, code: int, out: str, err: str, *kinds: str) -> None:
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertTrue(any(f"the run stopped with {kind};" in err for kind in kinds), err)
+        self.assertEqual(len(err.strip().splitlines()), 1)  # one line, never a traceback
+        for leaked in (PRIVATE_TEXT, "SECRET-FOLDER", "Traceback", ".png", ".pdf"):
+            self.assertNotIn(leaked, err)
+
+    def test_a_missing_input_folder_does_not_print_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            missing = str(Path(folder) / "SECRET-FOLDER")
+            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+                ocr = run("ocr", "--engine", "rapidocr", "--images", missing)
+            pdf = run("pdf", "--extractor", "pypdfium2", "--pdfs", missing)
+        self.assert_no_detail(*ocr, "FileNotFoundError")
+        self.assert_no_detail(*pdf, "FileNotFoundError")
+
+    def test_an_unreadable_output_folder_does_not_print_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            blocker = Path(folder) / "SECRET-FOLDER"
+            blocker.write_text("a file where the report folder should be", encoding="utf-8")
+            code, out, err = run("vec", "--out", str(blocker / "inside"), "--sizes", "10")
+        # The exact error depends on the system: a file in the way is a "not a directory" error on
+        # Linux and may be another OSError on Windows.
+        self.assert_no_detail(
+            code, out, err, "NotADirectoryError", "FileNotFoundError", "FileExistsError"
+        )
+
+    def test_a_librarys_error_message_is_never_printed(self) -> None:
+        class Leaky(FakeRapid):
+            def load(self) -> None:
+                raise RuntimeError(f"cannot read {PRIVATE_TEXT}.png in SECRET-FOLDER")
+
+        with tempfile.TemporaryDirectory() as folder:
+            images = Path(folder) / "images"
+            images.mkdir()
+            (images / "a.png").write_text("x", encoding="utf-8")
+            (images / "a.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(adapters, "RapidOcrEngine", Leaky):
+                result = run("ocr", "--engine", "rapidocr", "--images", str(images))
+        self.assert_no_detail(*result, "RuntimeError")
+
+    def test_a_plain_value_error_from_a_library_is_not_printed_either(self) -> None:
+        # int("...") and json.loads quote their input, so a ValueError is not one of ours by type.
+        class Leaky(FakeRapid):
+            def load(self) -> None:
+                int(f"{PRIVATE_TEXT} SECRET-FOLDER")
+
+        with tempfile.TemporaryDirectory() as folder:
+            images = Path(folder)
+            (images / "a.png").write_text("x", encoding="utf-8")
+            (images / "a.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(adapters, "RapidOcrEngine", Leaky):
+                result = run("ocr", "--engine", "rapidocr", "--images", str(images))
+        self.assert_no_detail(*result, "ValueError")
+
+    def test_this_packages_own_errors_are_still_explained(self) -> None:
+        code, _, err = run("embedding", "--candidate", "qwen3-embedding-0.6b", "--questions", "no")
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("error: "))
+
     def test_missing_inputs_are_named_before_any_model_is_touched(self) -> None:
         with (
             tempfile.TemporaryDirectory() as folder,

@@ -24,6 +24,7 @@ from vault_spikes.corpus import (
     load_questions,
     overlap_for,
 )
+from vault_spikes.errors import OwnMessage
 from vault_spikes.report import Report, SpikeSchema, SpikeText, merge, with_package
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
@@ -252,10 +253,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         return run(args)
-    except (adapters.MissingDependencyError, SpikeInputError, ValueError) as error:
-        # These messages are written in this package and never quote document text.
+    except OwnMessage as error:
+        # Fixed text written in this package; it names no file and quotes no document.
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except Exception as error:  # a library's error or a failed read of an input folder
+        # Python's own message and traceback would carry the path of a private folder or file, or
+        # text of a document, so only the kind of error is printed. Re-run the unit tests or use
+        # the public dataset to investigate a failure with a full traceback.
+        print(
+            f"error: the run stopped with {type(error).__name__}; no further detail is printed "
+            "because it could contain a file name or document text",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

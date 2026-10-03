@@ -7,6 +7,8 @@ import re
 import sys
 from collections.abc import Hashable, Sequence
 
+from vault_spikes.errors import OwnValueError
+
 _SPACE = re.compile(r"\s+")
 
 
@@ -38,7 +40,7 @@ def character_error_rate(reference: str, hypothesis: str) -> float:
     ref = normalise_text(reference)
     if not ref:
         msg = "the reference text is empty"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     return edit_distance(ref, normalise_text(hypothesis)) / len(ref)
 
 
@@ -47,7 +49,7 @@ def word_error_rate(reference: str, hypothesis: str) -> float:
     ref = normalise_text(reference).split(" ")
     if ref == [""]:
         msg = "the reference text is empty"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     hyp = normalise_text(hypothesis).split(" ") if normalise_text(hypothesis) else []
     return edit_distance(ref, hyp) / len(ref)
 
@@ -55,7 +57,7 @@ def word_error_rate(reference: str, hypothesis: str) -> float:
 def mean(values: Sequence[float]) -> float:
     if not values:
         msg = "no values"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     return math.fsum(values) / len(values)
 
 
@@ -63,10 +65,10 @@ def percentile(values: Sequence[float], fraction: float) -> float:
     """The value below which ``fraction`` (0 to 1) of the data falls, by linear interpolation."""
     if not values:
         msg = "no values"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     if not 0 <= fraction <= 1:
         msg = "fraction must be between 0 and 1"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     ordered = sorted(values)
     position = fraction * (len(ordered) - 1)
     low = math.floor(position)
@@ -82,7 +84,7 @@ def per_second(count: float, seconds: float) -> float:
     """``count / seconds``; zero time is an error, not infinity."""
     if seconds <= 0:
         msg = "elapsed time must be positive"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     return count / seconds
 
 
@@ -90,7 +92,7 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     """Cosine similarity of two vectors of the same length (0.0 if either has no length)."""
     if len(a) != len(b):
         msg = "vectors must have the same length"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     dot = math.fsum(x * y for x, y in zip(a, b, strict=True))
     norm = math.sqrt(math.fsum(x * x for x in a)) * math.sqrt(math.fsum(y * y for y in b))
     return dot / norm if norm else 0.0

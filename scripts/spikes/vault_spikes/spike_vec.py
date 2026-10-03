@@ -19,8 +19,9 @@ from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
+from vault_spikes.errors import OwnRuntimeError
 from vault_spikes.metrics import mean, peak_memory_mib, per_second, percentile
-from vault_spikes.report import Environment, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, collect_environment
 
 TITLE = "sqlite-vec on this PC"
 QUESTION = (
@@ -37,20 +38,18 @@ METHOD = (
 PACKAGES = ("sqlite-vec",)
 # What a report of this spike may contain (checked when a report is read back for a merge).
 CANDIDATES = re.compile(r"extension-loading|exact-search-check|vectors-\d{1,9}")
-METRICS = frozenset(
-    {
-        "can_load_extensions",
-        "vec_loads",
-        "vectors",
-        "same_answer_as_python",
-        "dim",
-        "insert_vectors_per_second",
-        "database_mib",
-        "query_ms_p50",
-        "query_ms_p95",
-        "peak_memory_mib",
-    }
-)
+METRICS: dict[str, Kind] = {
+    "can_load_extensions": Kind.FLAG,
+    "vec_loads": Kind.FLAG,
+    "vectors": Kind.COUNT,
+    "same_answer_as_python": Kind.RATIO,
+    "dim": Kind.COUNT,
+    "insert_vectors_per_second": Kind.AMOUNT,
+    "database_mib": Kind.AMOUNT,
+    "query_ms_p50": Kind.AMOUNT,
+    "query_ms_p95": Kind.AMOUNT,
+    "peak_memory_mib": Kind.AMOUNT,
+}
 
 
 class VectorStore(Protocol):
@@ -234,7 +233,7 @@ def run_vec_spike(
                 timings.append((clock() - begin) * 1000)
                 if len(found) != min(k, size):
                     msg = "the store returned the wrong number of neighbours"
-                    raise RuntimeError(msg)
+                    raise OwnRuntimeError(msg)
             metrics: dict[str, int | float] = {
                 "dim": dim,
                 "insert_vectors_per_second": per_second(size, insert_seconds),

@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Question, canonical_paths
+from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
-from vault_spikes.report import Environment, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, collect_environment
 from vault_spikes.retrieval import K, rank_by_similarity, score_all, sources_missing_from
 
 TITLE = "Embedding models on this PC"
@@ -51,29 +52,27 @@ METHOD = (
 PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
 # What a report of this spike may contain (checked when a report is read back for a merge).
 CANDIDATES = re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-(?:cpu|cuda)")
-METRICS = frozenset(
-    {
-        "dimensions",
-        "load_seconds",
-        "chunks",
-        "chunk_overlap_chars",
-        "mean_chunk_chars",
-        "chunks_per_second",
-        "hours_for_vault_of_chunks",
-        "vault_chunks_assumed",
-        "questions_scored",
-        "questions_left_out",
-        "sources_not_in_any_chunk",
-        "public_dataset",
-        "recall_at_10",
-        "mrr_at_10",
-        "hit_at_1_questions",
-        "hit_at_1",
-        "peak_memory_mib",
-        "gpu_peak_allocated_mib",
-        "gpu_peak_reserved_mib",
-    }
-)
+METRICS: dict[str, Kind] = {
+    "dimensions": Kind.COUNT,
+    "load_seconds": Kind.AMOUNT,
+    "chunks": Kind.COUNT,
+    "chunk_overlap_chars": Kind.COUNT,
+    "mean_chunk_chars": Kind.AMOUNT,
+    "chunks_per_second": Kind.AMOUNT,
+    "hours_for_vault_of_chunks": Kind.AMOUNT,
+    "vault_chunks_assumed": Kind.COUNT,
+    "questions_scored": Kind.COUNT,
+    "questions_left_out": Kind.COUNT,
+    "sources_not_in_any_chunk": Kind.COUNT,
+    "public_dataset": Kind.FLAG,
+    "recall_at_10": Kind.RATIO,
+    "mrr_at_10": Kind.RATIO,
+    "hit_at_1_questions": Kind.COUNT,
+    "hit_at_1": Kind.RATIO,
+    "peak_memory_mib": Kind.AMOUNT,
+    "gpu_peak_allocated_mib": Kind.AMOUNT,
+    "gpu_peak_reserved_mib": Kind.AMOUNT,
+}
 
 
 class Embedder(Protocol):
@@ -111,7 +110,7 @@ def run_embedding_spike(
     corpus = inputs.corpus
     if not corpus.chunks:
         msg = "the corpus has no readable chunks"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     report = Report(
         "embedding",
         TITLE,
@@ -133,7 +132,7 @@ def run_embedding_spike(
     embed_seconds = clock() - begin
     if len(vectors) != len(texts):
         msg = "the model returned the wrong number of vectors"
-        raise RuntimeError(msg)
+        raise OwnRuntimeError(msg)
     chunks_per_second = per_second(len(texts), embed_seconds)
 
     readable = corpus.readable

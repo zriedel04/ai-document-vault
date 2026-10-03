@@ -19,8 +19,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import mean, median, peak_memory_mib, per_second, word_error_rate
-from vault_spikes.report import Environment, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, collect_environment
 
 TITLE = "PDF extraction on this PC"
 QUESTION = (
@@ -46,29 +47,27 @@ METHOD = (
 PACKAGES = ("pypdfium2", "pdfplumber")
 # What a report of this spike may contain (checked when a report is read back for a merge).
 CANDIDATES = re.compile(r"pypdfium2|pypdfium2\+pdfplumber")
-METRICS = frozenset(
-    {
-        "files",
-        "files_ok",
-        "files_encrypted",
-        "files_corrupt",
-        "files_other_error",
-        "pages",
-        "pages_without_text",
-        "heading_candidates",
-        "files_with_heading_candidates",
-        "references_used",
-        "pages_per_second",
-        "wer_mean",
-        "wer_median",
-        "files_with_heading_reference",
-        "heading_false_positives",
-        "heading_recall",
-        "heading_precision",
-        "heading_f1",
-        "peak_memory_mib",
-    }
-)
+METRICS: dict[str, Kind] = {
+    "files": Kind.COUNT,
+    "files_ok": Kind.COUNT,
+    "files_encrypted": Kind.COUNT,
+    "files_corrupt": Kind.COUNT,
+    "files_other_error": Kind.COUNT,
+    "pages": Kind.COUNT,
+    "pages_without_text": Kind.COUNT,
+    "heading_candidates": Kind.COUNT,
+    "files_with_heading_candidates": Kind.COUNT,
+    "references_used": Kind.COUNT,
+    "pages_per_second": Kind.AMOUNT,
+    "wer_mean": Kind.AMOUNT,
+    "wer_median": Kind.AMOUNT,
+    "files_with_heading_reference": Kind.COUNT,
+    "heading_false_positives": Kind.COUNT,
+    "heading_recall": Kind.RATIO,
+    "heading_precision": Kind.RATIO,
+    "heading_f1": Kind.RATIO,
+    "peak_memory_mib": Kind.AMOUNT,
+}
 HEADINGS_SUFFIX = ".headings.txt"
 HEADING_RATIO = 1.2
 HEADING_MAX_WORDS = 12
@@ -128,7 +127,7 @@ def run_pdf_spike(
     """Measure one extractor over ``pdfs`` and return a report with one row."""
     if not pdfs:
         msg = "no PDF files to measure"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     report = Report(
         "pdf",
         TITLE,

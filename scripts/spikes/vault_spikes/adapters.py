@@ -15,6 +15,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from vault_spikes.errors import OwnMessage, OwnRuntimeError, OwnValueError
 from vault_spikes.report import package_version
 from vault_spikes.spike_pdf import (
     HEADING_MAX_WORDS,
@@ -27,7 +28,7 @@ from vault_spikes.spike_pdf import (
 VERSION_NUMBER = re.compile(r"\d+(?:\.\d+)+")
 
 
-class MissingDependencyError(RuntimeError):
+class MissingDependencyError(OwnMessage, RuntimeError):
     """An optional library or program is not installed."""
 
 
@@ -71,10 +72,10 @@ class SentenceTransformerEmbedder:
     def __init__(self, candidate: str, device: str) -> None:
         if candidate not in EMBEDDING_MODELS:
             msg = f"unknown candidate {candidate!r}; choose one of {sorted(EMBEDDING_MODELS)}"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         if device not in {"cpu", "cuda"}:
             msg = "device must be cpu or cuda"
-            raise ValueError(msg)
+            raise OwnValueError(msg)
         self.candidate = candidate
         self.name = f"{candidate}-{device}"
         self.model_id = EMBEDDING_MODELS[candidate]
@@ -106,7 +107,7 @@ class SentenceTransformerEmbedder:
         model = self.model
         if model is None:
             msg = "call load() first"
-            raise RuntimeError(msg)
+            raise OwnRuntimeError(msg)
         # Newer sentence-transformers versions have encode_query / encode_document, which apply
         # each model's own prompts. Fall back to a plain encode on older ones.
         method = getattr(model, "encode_query" if query else "encode_document", None)
@@ -125,7 +126,7 @@ def fetch_model(candidate: str) -> None:
     """Download a candidate's files into the local cache, outside any measurement."""
     if candidate not in EMBEDDING_MODELS:
         msg = f"unknown candidate {candidate!r}; choose one of {sorted(EMBEDDING_MODELS)}"
-        raise ValueError(msg)
+        raise OwnValueError(msg)
     _need("sentence_transformers", "embedding")
     from sentence_transformers import SentenceTransformer
 
@@ -176,7 +177,7 @@ class RapidOcrEngine:
     def recognise(self, image: Path) -> str:
         if self.engine is None:
             msg = "call load() first"
-            raise RuntimeError(msg)
+            raise OwnRuntimeError(msg)
         result = self.engine(str(image))
         texts = getattr(result, "txts", None)  # rapidocr 3.x: an object with .txts
         return "\n".join(texts) if texts else ""
@@ -212,7 +213,7 @@ class TesseractEngine:
     def recognise(self, image: Path) -> str:
         if self.executable is None:
             msg = "call load() first"
-            raise RuntimeError(msg)
+            raise OwnRuntimeError(msg)
         done = subprocess.run(  # noqa: S603 - a fixed program and argument list, no shell
             [self.executable, str(image), "stdout", "-l", self.language],
             capture_output=True,
