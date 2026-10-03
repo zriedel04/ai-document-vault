@@ -37,3 +37,4 @@ Each file here records one decision: the context, what was decided, the alternat
 | [0013](0013-embedding-model.md) | Embedding model | Proposed |
 | [0014](0014-ocr-engine.md) | OCR engine | Proposed |
 | [0015](0015-pdf-extraction-quality.md) | PDF extraction quality | Proposed |
+| [0016](0016-local-api-token-delivery.md) | Local API token: bearer header only, handed to the page in the address fragment | Accepted |

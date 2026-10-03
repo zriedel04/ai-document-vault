@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { NAV_ITEMS, isInSection } from "./nav";
-import { type FetchFn, jsonResponse, renderApp } from "./test/render";
+import { type FetchFn, TEST_TOKEN, jsonResponse, renderApp } from "./test/render";
+import { readToken } from "./api/token";
 
 describe("navigation", () => {
   it("lists every section", async () => {
@@ -130,5 +131,81 @@ describe("colour scheme", () => {
     await waitFor(() => {
       expect(root).toHaveAttribute("data-mantine-color-scheme", "light");
     });
+  });
+});
+
+describe("access token", () => {
+  const sessionCalls = (spy: ReturnType<typeof vi.fn<FetchFn>>) =>
+    spy.mock.calls
+      .map(([input]) => input as Request)
+      .filter((request) => new URL(request.url).pathname === "/api/session");
+
+  it("asks for the token, and makes no request that would be refused, when there is none", async () => {
+    const { healthyBackend } = await import("./test/render");
+    const spy = vi.fn<FetchFn>(healthyBackend);
+    await renderApp({ fetch: spy });
+    expect(await screen.findByText("Access token needed")).toBeInTheDocument();
+    await screen.findByText("Backend: ok");
+    expect(sessionCalls(spy)).toHaveLength(0);
+    expect(screen.getByText(/has no access token yet/)).toBeInTheDocument();
+  });
+
+  it("sends the stored token and shows that the browser has access", async () => {
+    const { healthyBackend } = await import("./test/render");
+    const spy = vi.fn<FetchFn>(healthyBackend);
+    await renderApp({ fetch: spy, token: TEST_TOKEN });
+    expect(await screen.findByText("This browser has access, as Local user.")).toBeInTheDocument();
+    expect(screen.queryByText("Access token needed")).not.toBeInTheDocument();
+    const [call] = sessionCalls(spy);
+    expect(call?.headers.get("authorization")).toBe(`Bearer ${TEST_TOKEN}`);
+  });
+
+  it("says when the stored token is not accepted", async () => {
+    await renderApp({ token: "x".repeat(40) });
+    expect(await screen.findByText("The access token was not accepted")).toBeInTheDocument();
+    expect(screen.getByText(/was not accepted. Paste the current one/)).toBeInTheDocument();
+  });
+
+  it("says when the backend cannot be asked", async () => {
+    const { healthyBackend } = await import("./test/render");
+    await renderApp({
+      token: TEST_TOKEN,
+      fetch: (input) =>
+        new URL((input as Request).url).pathname === "/api/session"
+          ? Promise.reject(new TypeError("network down"))
+          : healthyBackend(input),
+    });
+    expect(await screen.findByText(/Access could not be checked/)).toBeInTheDocument();
+    expect(screen.queryByText("Access token needed")).not.toBeInTheDocument();
+  });
+
+  it("takes a pasted token, keeps it for this tab and signs in", async () => {
+    await renderApp();
+    const field = await screen.findByLabelText("Access token");
+    expect(field).toHaveAttribute("type", "password"); // the token is never shown
+    await userEvent.type(field, TEST_TOKEN);
+    await userEvent.click(screen.getByRole("button", { name: "Save token" }));
+    expect(await screen.findByText("This browser has access, as Local user.")).toBeInTheDocument();
+    expect(screen.queryByText("Access token needed")).not.toBeInTheDocument();
+    expect(readToken()).toBe(TEST_TOKEN);
+    expect(document.body).not.toHaveTextContent(TEST_TOKEN);
+  });
+
+  it("refuses text that is not a token without saving or asking the backend", async () => {
+    const { healthyBackend } = await import("./test/render");
+    const spy = vi.fn<FetchFn>(healthyBackend);
+    await renderApp({ fetch: spy });
+    await userEvent.type(await screen.findByLabelText("Access token"), "hello");
+    await userEvent.click(screen.getByRole("button", { name: "Save token" }));
+    expect(screen.getByText("That does not look like an access token.")).toBeInTheDocument();
+    expect(readToken()).toBeNull();
+    expect(sessionCalls(spy)).toHaveLength(0);
+  });
+
+  it("asks again when a pasted token is not the right one", async () => {
+    await renderApp();
+    await userEvent.type(await screen.findByLabelText("Access token"), "y".repeat(40));
+    await userEvent.click(screen.getByRole("button", { name: "Save token" }));
+    expect(await screen.findByText("The access token was not accepted")).toBeInTheDocument();
   });
 });
