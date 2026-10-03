@@ -11,9 +11,18 @@ from unittest import mock
 
 from vault_spikes import __main__ as cli
 from vault_spikes import adapters
-from vault_spikes.report import Environment, Report
+from vault_spikes.report import Environment, Kind, Report
 
 KNOWN = cli.KNOWN
+
+
+def complete_row(spike: str, candidate: str) -> dict[str, float]:
+    """Every metric a row of this candidate must carry, each with a value its kind allows."""
+    shape = KNOWN[spike].shape_of(candidate)
+    assert shape is not None
+    values = {Kind.COUNT: 1, Kind.AMOUNT: 1.0, Kind.RATIO: 0.5, Kind.FLAG: True}
+    return {name: values[KNOWN[spike].metrics[name]] for name in sorted(shape.required)}
+
 
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
@@ -274,7 +283,7 @@ class CliTest(unittest.TestCase):
             paths = []
             for name in ("qwen3-embedding-0.6b", "embeddinggemma-300m"):
                 report = Report("embedding", *KNOWN["embedding"].text, env)
-                report.add(f"{name}-cpu", chunks=1)
+                report.add(f"{name}-cpu", **complete_row("embedding", f"{name}-cpu"))
                 paths.append(str(report.write(root, stem=f"embedding-{name}")[0]))
             code, _, err = run("merge", *paths, "--out", str(root / "merged"))
             self.assertEqual(code, 0, err)
@@ -301,7 +310,9 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             report = Report("embedding", *KNOWN["embedding"].text, env)
-            report.add("qwen3-embedding-0.6b-cpu", chunks=1)
+            report.add(
+                "qwen3-embedding-0.6b-cpu", **complete_row("embedding", "qwen3-embedding-0.6b-cpu")
+            )
             source = str(report.write(root / "in", stem="embedding-a")[0])
             for _ in range(2):  # the second merge replaces the first, which is derived data
                 code, _, err = run("merge", source, "--out", str(root / "merged"))
@@ -319,7 +330,9 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             report = Report("embedding", "Patient diagnosis", "Q?", "How.", env)
-            report.add("qwen3-embedding-0.6b-cpu", chunks=1)
+            report.add(
+                "qwen3-embedding-0.6b-cpu", **complete_row("embedding", "qwen3-embedding-0.6b-cpu")
+            )
             path = str(report.write(root, stem="embedding-a")[0])
             code, out, err = run("merge", path, "--out", str(root / "merged"))
             self.assertFalse((root / "merged").exists())
@@ -330,13 +343,14 @@ class CliTest(unittest.TestCase):
     def test_merge_refuses_names_that_only_look_harmless(self) -> None:
         text = "patient-diagnosis-confidential"
         good = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+        whole = complete_row("embedding", "qwen3-embedding-0.6b-cpu")
         cases = {
-            "candidate": (good, text, {"chunks": 1}),
-            "metric": (good, "qwen3-embedding-0.6b-cpu", {"medical_record_number": 1}),
+            "candidate": (good, text, whole),
+            "metric": (good, "qwen3-embedding-0.6b-cpu", {**whole, "medical_record_number": 1}),
             "package": (
                 Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {text: "1.0"}),
                 "qwen3-embedding-0.6b-cpu",
-                {"chunks": 1},
+                whole,
             ),
         }
         for kind, (env, candidate, metrics) in cases.items():
@@ -467,6 +481,87 @@ class CliTest(unittest.TestCase):
     def test_unknown_candidates_are_refused_by_the_parser(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.main(["embedding", "--candidate", "nonsense"])
+
+
+class MergeRowShapeTest(unittest.TestCase):
+    """What a merge accepts of a row is fixed per candidate, so ADR evidence cannot lose the
+    context a figure needs (what it was measured on, how much was left out) or carry a figure the
+    candidate cannot produce."""
+
+    ENV = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+
+    def merge(self, spike: str, candidate: str, metrics: dict[str, float]) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = Report(spike, *KNOWN[spike].text, self.ENV)
+            report.add(candidate, **metrics)
+            path = str(report.write(root, stem=f"{spike}-x")[0])
+            code, _, err = run("merge", path, "--out", str(root / "merged"))
+        return code, err
+
+    def test_every_candidate_merges_with_its_whole_row(self) -> None:
+        for spike, candidate in (
+            ("embedding", "embeddinggemma-300m-cpu"),
+            ("embedding", "qwen3-embedding-0.6b-cuda"),
+            ("ocr", "rapidocr-ppocrv5"),
+            ("ocr", "tesseract"),
+            ("pdf", "pypdfium2"),
+            ("pdf", "pypdfium2+pdfplumber"),
+            ("vec", "extension-loading"),
+            ("vec", "exact-search-check"),
+            ("vec", "vectors-10000"),
+        ):
+            with self.subTest(candidate=candidate):
+                code, err = self.merge(spike, candidate, complete_row(spike, candidate))
+                self.assertEqual((code, err), (0, ""))
+
+    def test_a_row_without_its_context_is_refused(self) -> None:
+        for spike, candidate, lost in (
+            ("embedding", "qwen3-embedding-0.6b-cpu", "public_dataset"),
+            ("embedding", "qwen3-embedding-0.6b-cpu", "documents_skipped"),
+            ("ocr", "tesseract", "failures"),
+            ("pdf", "pypdfium2", "files_ok"),
+            ("vec", "extension-loading", "vec_loads"),
+        ):
+            with self.subTest(candidate=candidate, lost=lost):
+                row = complete_row(spike, candidate)
+                del row[lost]
+                code, err = self.merge(spike, candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn("without metrics", err)
+                self.assertNotIn(lost, err)
+
+    def test_an_empty_row_is_refused(self) -> None:
+        for spike, candidate in (("embedding", "embeddinggemma-300m-cpu"), ("ocr", "tesseract")):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self.merge(spike, candidate, {})[0], 2)
+
+    def test_a_figure_the_candidate_cannot_produce_is_refused(self) -> None:
+        for spike, candidate, extra in (
+            ("embedding", "qwen3-embedding-0.6b-cpu", "gpu_peak_reserved_mib"),  # no video memory
+            ("ocr", "tesseract", "peak_memory_mib"),  # a separate program
+            ("pdf", "pypdfium2", "heading_f1"),  # this extractor finds no headings
+            ("vec", "extension-loading", "dim"),  # a figure of the size rows
+            ("vec", "exact-search-check", "query_ms_p50"),
+        ):
+            with self.subTest(candidate=candidate, extra=extra):
+                code, err = self.merge(
+                    spike, candidate, {**complete_row(spike, candidate), extra: 1.0}
+                )
+                self.assertEqual(code, 2)
+                self.assertIn("metric name this candidate cannot produce", err)
+
+    def test_a_figure_a_run_may_lack_is_not_required(self) -> None:
+        for spike, candidate, extra in (
+            ("embedding", "qwen3-embedding-0.6b-cuda", "gpu_peak_reserved_mib"),
+            ("ocr", "rapidocr-ppocrv5", "peak_memory_mib"),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    self.merge(spike, candidate, complete_row(spike, candidate)), (0, "")
+                )
+                row = {**complete_row(spike, candidate), extra: 1.0}
+                self.assertEqual(self.merge(spike, candidate, row), (0, ""))
 
 
 if __name__ == "__main__":

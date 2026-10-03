@@ -111,17 +111,36 @@ class SpikeText(NamedTuple):
     method: str
 
 
+class RowShape(NamedTuple):
+    """The metrics one kind of row has: the candidate names it applies to, the metrics every such
+    row carries (the context a figure needs to be read: what was measured on, how much was left
+    out) and the ones it may carry (a figure a run can lack, such as a peak the system does not
+    report). A metric in neither set is one the candidate could never emit."""
+
+    candidate: re.Pattern[str]
+    required: frozenset[str]
+    optional: frozenset[str] = frozenset()
+
+    @property
+    def allowed(self) -> frozenset[str]:
+        return self.required | self.optional
+
+
 class SpikeSchema(NamedTuple):
-    """Everything a spike's report may contain: its fixed words, the candidate names its rows may
-    have (a pattern over the names the code can produce), the metric names it can emit with the kind
-    of value each may hold, and the package names its environment can list. A report read from a
-    file may use nothing else, because a name that merely looks harmless
-    (``patient-diagnosis-confidential``) is still free text."""
+    """Everything a spike's report may contain: its fixed words, the shape of each kind of row it
+    can have (a pattern over the candidate names the code can produce, with the metrics such a row
+    must and may hold), the kind of value each metric may hold, and the package names its
+    environment can list. A report read from a file may use nothing else, because a name that
+    merely looks harmless (``patient-diagnosis-confidential``) is still free text, and a row with
+    its context missing or with another candidate's figures cannot be read for what it is."""
 
     text: SpikeText
-    candidates: re.Pattern[str]
+    rows: tuple[RowShape, ...]
     metrics: Mapping[str, Kind]
     packages: frozenset[str]
+
+    def shape_of(self, candidate: str) -> RowShape | None:
+        return next((shape for shape in self.rows if shape.candidate.fullmatch(candidate)), None)
 
 
 def package_version(text: str) -> str:
@@ -397,11 +416,18 @@ class Report:
         )
         for row in cast("list[dict[str, object]]", data["rows"]):
             candidate, metrics = row["candidate"], cast("dict[str, Number]", row["metrics"])
-            if not isinstance(candidate, str) or not schema.candidates.fullmatch(candidate):
+            shape = schema.shape_of(candidate) if isinstance(candidate, str) else None
+            if not isinstance(candidate, str) or shape is None:
                 msg = "the report has a candidate name this spike cannot produce"
                 raise OwnValueError(msg)
             if not isinstance(metrics, dict) or not set(metrics) <= set(schema.metrics):
                 msg = "the report has a metric name this spike cannot produce"
+                raise OwnValueError(msg)
+            if not set(metrics) <= shape.allowed:
+                msg = "the report has a metric name this candidate cannot produce"
+                raise OwnValueError(msg)
+            if not shape.required <= set(metrics):
+                msg = "the report has a row without metrics that every row of its candidate has"
                 raise OwnValueError(msg)
             report.add(candidate, **metrics)
             for name, value in report.rows[-1].metrics.items():

@@ -21,7 +21,7 @@ from typing import Protocol
 
 from vault_spikes.errors import OwnRuntimeError
 from vault_spikes.metrics import mean, peak_memory_mib, per_second, percentile
-from vault_spikes.report import Environment, Kind, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
 
 TITLE = "sqlite-vec on this PC"
 QUESTION = (
@@ -32,12 +32,12 @@ METHOD = (
     "`python -m vault_spikes vec`. Random unit-free float32 vectors from a seeded generator are "
     "inserted into a `vec0` table; each size is queried with random vectors for the 10 nearest "
     "neighbours (exact, brute force). Latency is wall-clock time per query. Correctness compares "
-    "the extension's answers with a plain-Python search on the smallest size. No document text is "
-    "involved."
+    "the extension's answers with a plain-Python search on the smallest size: the same ten "
+    "neighbours in the same order, because the application uses the ranking (two neighbours whose "
+    "distances are equal within float32 rounding may swap). No document text is involved."
 )
 PACKAGES = ("sqlite-vec",)
 # What a report of this spike may contain (checked when a report is read back for a merge).
-CANDIDATES = re.compile(r"extension-loading|exact-search-check|vectors-\d{1,9}")
 METRICS: dict[str, Kind] = {
     "can_load_extensions": Kind.FLAG,
     "vec_loads": Kind.FLAG,
@@ -51,6 +51,34 @@ METRICS: dict[str, Kind] = {
     "query_ms_p95": Kind.AMOUNT,
     "peak_memory_mib": Kind.AMOUNT,
 }
+ROWS = (
+    RowShape(
+        re.compile(r"extension-loading"),
+        frozenset({"can_load_extensions", "vec_loads"}),
+    ),
+    RowShape(
+        re.compile(r"exact-search-check"),
+        frozenset({"vectors", "same_answer_as_python"}),
+    ),
+    RowShape(
+        re.compile(r"vectors-\d{1,9}"),
+        frozenset(
+            {
+                "dim",
+                "queries_timed",
+                "insert_vectors_per_second",
+                "database_mib",
+                "query_ms_p50",
+                "query_ms_p95",
+            }
+        ),
+        frozenset({"peak_memory_mib"}),
+    ),
+)
+"""The metrics of each kind of row. A report read from a file must give every ``required`` one and
+nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another
+row's figures."""
+CANDIDATES = re.compile("|".join(f"(?:{shape.candidate.pattern})" for shape in ROWS))
 
 
 class VectorStore(Protocol):
@@ -75,16 +103,40 @@ def random_vectors(count: int, dim: int, seed: int) -> Iterator[bytes]:
         yield array.array("f", (rng.random() for _ in range(dim))).tobytes()
 
 
+def l2_distance(a: bytes, b: bytes) -> float:
+    """Squared Euclidean distance between two float32 vectors."""
+    return sum((x - y) ** 2 for x, y in zip(array.array("f", a), array.array("f", b), strict=True))
+
+
 def l2_nearest(vectors: list[bytes], query: bytes, k: int) -> list[int]:
-    """Plain-Python exact search: the ids (1-based) of the ``k`` vectors closest to ``query``."""
-    q = array.array("f", query)
-
-    def distance(blob: bytes) -> float:
-        v = array.array("f", blob)
-        return sum((a - b) ** 2 for a, b in zip(q, v, strict=True))
-
-    order = sorted(range(len(vectors)), key=lambda i: distance(vectors[i]))
+    """Plain-Python exact search: the ids (1-based) of the ``k`` vectors closest to ``query``,
+    nearest first."""
+    order = sorted(range(len(vectors)), key=lambda i: l2_distance(query, vectors[i]))
     return [i + 1 for i in order[:k]]
+
+
+TIE_TOLERANCE = 1e-4
+"""Two distances this close (relative) are a tie: sqlite-vec works in float32 and this script in
+float64, so they may order neighbours that are a rounding error apart either way."""
+
+
+def same_ranking(found: list[int], vectors: list[bytes], query: bytes, k: int) -> bool:
+    """Does ``found`` give the exact nearest neighbours *in order*? The application consumes a
+    ranked list, so the right ten ids from farthest to nearest are a wrong answer. Place by place,
+    the id must be the exact search's, or one at a distance equal to it within ``TIE_TOLERANCE``
+    (a tie, which either order satisfies); an id outside the data, or a repeated one, is wrong."""
+    expected = l2_nearest(vectors, query, k)
+    if len(found) != len(expected) or len(set(found)) != len(found):
+        return False
+    for got, want in zip(found, expected, strict=True):
+        if not 1 <= got <= len(vectors):
+            return False
+        if got != want:
+            near = l2_distance(query, vectors[got - 1])
+            exact = l2_distance(query, vectors[want - 1])
+            if abs(near - exact) > TIE_TOLERANCE * max(near, exact, 1e-12):
+                return False
+    return True
 
 
 class PythonStore:
@@ -203,7 +255,7 @@ def run_vec_spike(
     try:
         store.insert(enumerate(vectors, start=1))
         probes = list(random_vectors(5, dim, seed + 1))
-        matches = [set(store.nearest(p, k)) == set(l2_nearest(vectors, p, k)) for p in probes]
+        matches = [same_ranking(store.nearest(p, k), vectors, p, k) for p in probes]
     finally:
         store.close()
     report.add(

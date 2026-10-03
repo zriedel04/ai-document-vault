@@ -54,7 +54,7 @@ OPTIONAL = {
 KNOWN = {
     name: SpikeSchema(
         SpikeText(module.TITLE, module.QUESTION, module.METHOD),
-        module.CANDIDATES,
+        module.ROWS,
         module.METRICS,
         frozenset(getattr(module, "REPORT_PACKAGES", module.PACKAGES)),
     )

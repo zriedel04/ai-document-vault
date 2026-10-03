@@ -5,6 +5,7 @@ import re
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
@@ -12,19 +13,30 @@ from vault_spikes import report as r
 from vault_spikes.errors import OwnValueError
 
 PRIVATE_TEXT = "Patient diagnosis: confidential"
+TOY_METRICS = {
+    "chunks": r.Kind.COUNT,
+    "fast": r.Kind.AMOUNT,
+    "rate": r.Kind.AMOUNT,
+    "n": r.Kind.AMOUNT,
+    "detail": r.Kind.AMOUNT,
+    "share": r.Kind.RATIO,
+    "ok": r.Kind.FLAG,
+}
 KNOWN = {
     "embedding": r.SpikeSchema(
         r.SpikeText("Title", "Q?", "How."),
-        re.compile(r"model(?:-[a-z]+)?|a|b|model-cpu|model-cuda"),
-        {
-            "chunks": r.Kind.COUNT,
-            "fast": r.Kind.AMOUNT,
-            "rate": r.Kind.AMOUNT,
-            "n": r.Kind.AMOUNT,
-            "detail": r.Kind.AMOUNT,
-            "share": r.Kind.RATIO,
-            "ok": r.Kind.FLAG,
-        },
+        (
+            # Rows of the other tests: nothing is required, so a row may carry any one metric.
+            r.RowShape(
+                re.compile(r"model(?:-[a-z]+)?|a|b|model-cpu|model-cuda"),
+                frozenset(),
+                frozenset(TOY_METRICS),
+            ),
+            # A row with context it cannot lose (chunks, ok), and one figure it may lack (fast).
+            r.RowShape(re.compile(r"strict"), frozenset({"chunks", "ok"}), frozenset({"fast"})),
+            r.RowShape(re.compile(r"plain"), frozenset({"chunks"})),
+        ),
+        TOY_METRICS,
         frozenset({"numpy", "torch"}),
     )
 }
@@ -413,6 +425,54 @@ class MetricValueTest(unittest.TestCase):
         self.assertEqual(set(r.Kind), {r.Kind.COUNT, r.Kind.RATIO, r.Kind.AMOUNT, r.Kind.FLAG})
         self.assertFalse(r.in_domain(r.Kind.COUNT, 2.0))  # a count is a whole number
         self.assertTrue(r.in_domain(r.Kind.AMOUNT, 2))
+
+
+class RowShapeTest(unittest.TestCase):
+    """A report read back must give each row all the metrics its candidate always has, and only
+    metrics that candidate can emit."""
+
+    def read(self, candidate: str, metrics: Mapping[str, object]) -> r.Report:
+        data = make().to_json()
+        data["rows"] = [{"candidate": candidate, "metrics": metrics}]
+        return r.Report.from_json(data, KNOWN)
+
+    def test_a_complete_row_is_accepted_with_or_without_its_optional_figure(self) -> None:
+        self.read("strict", {"chunks": 3, "ok": True})
+        self.read("strict", {"chunks": 3, "ok": True, "fast": 0.5})
+
+    def test_a_row_without_its_context_is_refused(self) -> None:
+        for metrics in ({}, {"chunks": 3}, {"ok": True}, {"fast": 0.5}):
+            with (
+                self.subTest(metrics=metrics),
+                self.assertRaisesRegex(OwnValueError, "without metrics"),
+            ):
+                self.read("strict", metrics)
+
+    def test_an_empty_row_is_refused_where_a_metric_is_required(self) -> None:
+        with self.assertRaises(OwnValueError):
+            self.read("plain", {})
+
+    def test_a_metric_the_candidate_cannot_emit_is_refused_though_the_spike_has_it(self) -> None:
+        # "rate" is a metric of the spike (the toy "model" rows carry it), not of these rows.
+        for candidate, metrics in (
+            ("strict", {"chunks": 3, "ok": True, "rate": 1.0}),
+            ("plain", {"chunks": 3, "fast": 1.0}),
+        ):
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaisesRegex(OwnValueError, "metric name"),
+            ):
+                self.read(candidate, metrics)
+
+    def test_the_error_names_the_kind_of_fault_and_not_the_candidate(self) -> None:
+        with self.assertRaises(OwnValueError) as caught:
+            self.read("strict", {})
+        self.assertNotIn("strict", str(caught.exception))
+
+    def test_the_first_row_that_fits_the_name_decides(self) -> None:
+        self.assertEqual(KNOWN["embedding"].shape_of("plain"), KNOWN["embedding"].rows[2])
+        self.assertIsNone(KNOWN["embedding"].shape_of("plain\n"))
+        self.assertIsNone(KNOWN["embedding"].shape_of(""))
 
 
 class MergeTest(unittest.TestCase):

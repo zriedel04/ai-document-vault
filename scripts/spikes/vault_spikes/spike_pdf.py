@@ -21,7 +21,7 @@ from typing import Protocol
 
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import mean, median, peak_memory_mib, per_second, word_error_rate
-from vault_spikes.report import Environment, Kind, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
 
 TITLE = "PDF extraction on this PC"
 QUESTION = (
@@ -46,7 +46,6 @@ METHOD = (
 )
 PACKAGES = ("pypdfium2", "pdfplumber")
 # What a report of this spike may contain (checked when a report is read back for a merge).
-CANDIDATES = re.compile(r"pypdfium2|pypdfium2\+pdfplumber")
 METRICS: dict[str, Kind] = {
     "files": Kind.COUNT,
     "files_ok": Kind.COUNT,
@@ -68,6 +67,41 @@ METRICS: dict[str, Kind] = {
     "heading_f1": Kind.RATIO,
     "peak_memory_mib": Kind.AMOUNT,
 }
+_PDF_REQUIRED = frozenset(
+    {
+        "files",
+        "files_ok",
+        "files_encrypted",
+        "files_corrupt",
+        "files_other_error",
+        "pages",
+        "pages_without_text",
+        "heading_candidates",
+        "files_with_heading_candidates",
+        "references_used",
+    }
+)
+_PDF_OPTIONAL = frozenset({"pages_per_second", "wer_mean", "wer_median", "peak_memory_mib"})
+_PDF_HEADING_ACCURACY = frozenset(
+    {
+        "files_with_heading_reference",
+        "heading_false_positives",
+        "heading_recall",
+        "heading_precision",
+        "heading_f1",
+    }
+)
+ROWS = (
+    # Only the extractor that detects headings can be scored on them.
+    RowShape(re.compile(r"pypdfium2"), _PDF_REQUIRED, _PDF_OPTIONAL),
+    RowShape(
+        re.compile(r"pypdfium2\+pdfplumber"), _PDF_REQUIRED, _PDF_OPTIONAL | _PDF_HEADING_ACCURACY
+    ),
+)
+"""The metrics of each kind of row. A report read from a file must give every ``required`` one and
+nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another
+candidate's figures."""
+CANDIDATES = re.compile("|".join(f"(?:{shape.candidate.pattern})" for shape in ROWS))
 HEADINGS_SUFFIX = ".headings.txt"
 HEADING_RATIO = 1.2
 HEADING_MAX_WORDS = 12

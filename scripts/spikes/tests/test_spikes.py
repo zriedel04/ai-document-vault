@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import json
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from vault_spikes import spike_embedding as emb
 from vault_spikes import spike_ocr as ocr
 from vault_spikes import spike_pdf as pdf
 from vault_spikes import spike_vec as vec
+from vault_spikes.__main__ import KNOWN
 from vault_spikes.report import Environment, Report, in_domain
 
 ENV = Environment("Windows-11", "3.12.1", "cpu", 8, 16.0, None, {})
@@ -22,6 +24,7 @@ PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
 EMITTED: dict[str, set[str]] = {}
 VALUES: list[tuple[str, str, object]] = []
+ROW_KEYS: list[tuple[str, str, frozenset[str]]] = []
 _real_add = Report.add
 
 
@@ -31,6 +34,7 @@ def setUpModule() -> None:
     def recording_add(self: Report, candidate: str, **metrics: float) -> None:
         EMITTED.setdefault(self.spike, set()).update(metrics)
         VALUES.extend((self.spike, name, value) for name, value in metrics.items())
+        ROW_KEYS.append((self.spike, candidate, frozenset(metrics)))
         _real_add(self, candidate, **metrics)
 
     Report.add = recording_add  # type: ignore[method-assign]
@@ -44,6 +48,22 @@ def tearDownModule() -> None:
         unknown = names - set(schemas[spike])
         assert not unknown, f"{spike} emits metrics its schema does not list: {sorted(unknown)}"
     assert set(EMITTED) == set(schemas), "a spike was not exercised by these tests"
+    # Each row a spike wrote must fit the shape its candidate has, or merge would refuse the
+    # report the script itself wrote; and no metric of the vocabulary may be one no row can have.
+    for spike, candidate, emitted in ROW_KEYS:
+        shape = KNOWN[spike].shape_of(candidate)
+        assert shape is not None, f"{spike}: no row shape fits a candidate it emits"
+        assert emitted <= shape.allowed, (
+            f"{spike}/{candidate} emits {sorted(emitted - shape.allowed)}"
+        )
+        assert shape.required <= emitted, (
+            f"{spike}/{candidate} lacks {sorted(shape.required - emitted)}"
+        )
+    for spike, schema in KNOWN.items():
+        used = {schema.shape_of(candidate) for name, candidate, _ in ROW_KEYS if name == spike}
+        assert set(schema.rows) <= used, f"{spike}: a row shape no test exercised"
+        allowed: set[str] = set().union(*(shape.allowed for shape in schema.rows))
+        assert allowed == set(schema.metrics), f"{spike}: a metric no row shape allows"
     # A value a spike really produces must be one its metric's kind allows, or the report that
     # script wrote could not be merged.
     for spike, name, value in VALUES:
@@ -153,6 +173,40 @@ class VecTest(unittest.TestCase):
         )
         self.assertEqual(report.rows[0].metrics["same_answer_as_python"], 0.0)
 
+    def test_the_right_neighbours_in_the_wrong_order_are_not_the_right_answer(self) -> None:
+        """A store that returns the exact ten ids from farthest to nearest has a ranking the
+        application cannot use, though the sets are equal."""
+
+        class Reversed(vec.PythonStore):
+            def nearest(self, query: bytes, k: int) -> list[int]:
+                return super().nearest(query, k)[::-1]
+
+        report = vec.run_vec_spike(
+            lambda _dim: Reversed(),
+            sizes=(),
+            dim=4,
+            k=5,
+            check_size=30,
+            environment=ENV,
+            clock=Clock(),
+        )
+        self.assertEqual(report.rows[0].metrics["same_answer_as_python"], 0.0)
+
+    def test_ranking_rules(self) -> None:
+        def blob(*values: float) -> bytes:
+            return array.array("f", values).tobytes()
+
+        vectors = [blob(0.0), blob(1.0), blob(1.0), blob(5.0)]  # ids 2 and 3 tie
+        query = blob(0.0)
+        self.assertEqual(vec.l2_nearest(vectors, query, 3), [1, 2, 3])
+        self.assertTrue(vec.same_ranking([1, 2, 3], vectors, query, 3))
+        self.assertTrue(vec.same_ranking([1, 3, 2], vectors, query, 3), "a tie may swap")
+        # The tie at the edge of the ten: either of the equal vectors may be the last one.
+        self.assertTrue(vec.same_ranking([1, 3], vectors, query, 2))
+        for wrong in ([2, 1, 3], [1, 2, 4], [1, 2], [1, 2, 3, 4], [1, 2, 2], [1, 2, 0], [1, 2, 9]):
+            with self.subTest(found=wrong):
+                self.assertFalse(vec.same_ranking(wrong, vectors, query, 3))
+
     def test_a_store_that_returns_too_few_neighbours_is_an_error(self) -> None:
         class Short(vec.PythonStore):
             def nearest(self, query: bytes, k: int) -> list[int]:
@@ -196,7 +250,7 @@ class VecTest(unittest.TestCase):
 class FakeEmbedder:
     """Embeds text as counts of three words, so retrieval works without a model."""
 
-    name = "fake-model-cpu"
+    name = "qwen3-embedding-0.6b-cpu"
 
     def __init__(self) -> None:
         self.loaded = False
@@ -266,7 +320,7 @@ class EmbeddingTest(unittest.TestCase):
 
     def test_a_gpu_candidate_reports_video_memory_next_to_host_memory(self) -> None:
         embedder = FakeEmbedder()
-        embedder.name = "fake-model-cuda"
+        embedder.name = "qwen3-embedding-0.6b-cuda"
         report = emb.run_embedding_spike(
             embedder, corpus_inputs(), environment=ENV, gpu_memory=lambda: (1500.5, 2048.0)
         )
@@ -284,7 +338,7 @@ class EmbeddingTest(unittest.TestCase):
         )
         self.assertNotIn("gpu_peak_allocated_mib", cpu.rows[0].metrics)
         gpu = FakeEmbedder()
-        gpu.name = "fake-model-cuda"
+        gpu.name = "qwen3-embedding-0.6b-cuda"
         none = emb.run_embedding_spike(
             gpu, corpus_inputs(), environment=ENV, gpu_memory=lambda: None
         )
@@ -302,7 +356,7 @@ class EmbeddingTest(unittest.TestCase):
         )
         self.assertTrue(embedder.loaded)
         metrics = report.rows[0].metrics
-        self.assertEqual(report.rows[0].candidate, "fake-model-cpu")
+        self.assertEqual(report.rows[0].candidate, "qwen3-embedding-0.6b-cpu")
         self.assertEqual(metrics["recall_at_10"], 1.0)
         self.assertEqual(metrics["hit_at_1"], 1.0)
         self.assertEqual(metrics["questions_scored"], 2)
@@ -444,9 +498,16 @@ class EmbeddingTest(unittest.TestCase):
 
 
 class FakeOcr:
-    name = "fake-ocr"
-
-    def __init__(self, texts: dict[str, str], broken: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        texts: dict[str, str],
+        broken: frozenset[str] = frozenset(),
+        *,
+        runs_in_process: bool = True,
+    ) -> None:
+        self.runs_in_process = runs_in_process
+        # The name of the real engine this one stands in for, so its rows fit that row shape.
+        self.name = "rapidocr-ppocrv5" if runs_in_process else "tesseract"
         self.texts = texts
         self.broken = broken
         self.loaded = False
@@ -471,12 +532,16 @@ class OcrTest(unittest.TestCase):
     def test_an_engine_that_runs_as_another_program_has_no_memory_figure(self) -> None:
         # This process's working set is the wrapper's when the engine is a separate program;
         # reporting it next to an in-process engine's real figure would mislead.
-        outside = FakeOcr({"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"})
-        outside.runs_in_process = False  # type: ignore[attr-defined]
+        outside = FakeOcr(
+            {"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"},
+            runs_in_process=False,
+        )
         with mock.patch.object(ocr, "peak_memory_mib", return_value=123.0):
             separate = ocr.run_ocr_spike(outside, self.samples(), environment=ENV, clock=Clock())
-            inside = FakeOcr({"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"})
-            inside.runs_in_process = True  # type: ignore[attr-defined]
+            inside = FakeOcr(
+                {"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"},
+                runs_in_process=True,
+            )
             local = ocr.run_ocr_spike(inside, self.samples(), environment=ENV, clock=Clock())
             plain = ocr.run_ocr_spike(
                 FakeOcr({"a.png": "hello world", "b.png": "total 100", "c.png": "receipt"}),
@@ -591,8 +656,6 @@ class OcrTest(unittest.TestCase):
 
 
 class FakePdf:
-    name = "fake-pdf"
-
     def __init__(
         self,
         results: dict[str, pdf.PdfText | pdf.Outcome | Exception],
@@ -601,6 +664,8 @@ class FakePdf:
     ) -> None:
         self.results = results
         self.detects_headings = detects_headings
+        # The name of the real extractor this one stands in for, so its rows fit its shape.
+        self.name = "pypdfium2+pdfplumber" if detects_headings else "pypdfium2"
 
     def extract(self, path: Path) -> pdf.PdfText:
         result = self.results[path.name]

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
@@ -186,15 +187,20 @@ class ReadingTest(unittest.TestCase):
         (self.root / "a" / "syllabus.txt").write_text(
             "Instructor: Dr. Example. " * 80, encoding="utf-8"
         )
-        (self.root / "a" / "copy.txt").write_text("Instructor: Dr. Example.", encoding="utf-8")
+        (self.root / "a" / "copy.txt").write_text(
+            "Instructor: Dr. Example. " * 80, encoding="utf-8"
+        )
         (self.root / "a" / "scan.pdf").write_bytes(b"%PDF-1.4")
         (self.root / "a" / "book.pdf").write_bytes(b"%PDF-1.4")
         write_docx(self.root / "a" / "notes.docx", ["First & second", "Third <one>", "  "])
         self.documents = c.load_manifest(self.write_manifest())
 
     def write_manifest(self) -> Path:
+        return self.write_manifest_of(MANIFEST)
+
+    def write_manifest_of(self, manifest: Mapping[str, object]) -> Path:
         path = self.root / "manifest.json"
-        path.write_text(json.dumps(MANIFEST), encoding="utf-8")
+        path.write_text(json.dumps(manifest), encoding="utf-8")
         return path
 
     def test_text_docx_and_pdf_are_read_and_scans_are_skipped(self) -> None:
@@ -227,6 +233,82 @@ class ReadingTest(unittest.TestCase):
         self.assertNotIn("a/syllabus.txt", corpus.readable)
         self.assertNotIn("a/copy.txt", corpus.readable)
         self.assertEqual(corpus.skipped, 3)  # the scan, the original and its copy
+
+    def test_a_document_marked_as_a_copy_that_holds_other_bytes_is_refused(self) -> None:
+        # The mark alone would drop the file and score its questions against the other one.
+        for text in ("Instructor: Dr. Example.", "Instructor: Dr. Example. " * 80 + " ", ""):
+            with self.subTest(length=len(text)):
+                (self.root / "a" / "copy.txt").write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(c.SpikeInputError, "does not hold its original"):
+                    c.build_corpus(self.root, self.documents, lambda _path: ["page"])
+
+    def test_a_copy_of_the_same_size_but_other_bytes_is_refused(self) -> None:
+        original = (self.root / "a" / "syllabus.txt").read_bytes()
+        (self.root / "a" / "copy.txt").write_bytes(b"X" + original[1:])
+        with self.assertRaisesRegex(c.SpikeInputError, "does not hold its original"):
+            c.build_corpus(self.root, self.documents, lambda _path: ["page"])
+
+    def test_the_bytes_are_compared_even_when_the_original_cannot_be_read(self) -> None:
+        documents = [
+            replace(d, needs_ocr=True) if d.path == "a/syllabus.txt" else d for d in self.documents
+        ]
+        (self.root / "a" / "copy.txt").write_text("other", encoding="utf-8")
+        with self.assertRaises(c.SpikeInputError):
+            c.build_corpus(self.root, documents, lambda _path: ["page"])
+
+    def test_a_copy_of_a_copy_is_compared_with_the_first_original(self) -> None:
+        text = (self.root / "a" / "syllabus.txt").read_text(encoding="utf-8")
+        (self.root / "a" / "copy2.txt").write_text(text, encoding="utf-8")
+        chain = [
+            *self.documents,
+            c.Document("a/copy2.txt", "text", None, False, "a/copy.txt"),
+        ]
+        corpus = c.build_corpus(self.root, chain, lambda _path: ["page"])
+        self.assertIn("a/copy2.txt", corpus.readable)
+        (self.root / "a" / "copy2.txt").write_text("other", encoding="utf-8")
+        with self.assertRaises(c.SpikeInputError):
+            c.build_corpus(self.root, chain, lambda _path: ["page"])
+
+    def test_the_manifest_refuses_a_duplicate_mark_that_points_nowhere_useful(self) -> None:
+        def manifest(*rows: Mapping[str, object]) -> Path:
+            documents = [{"kind": "text", "pages": None, "needs_ocr": False, **row} for row in rows]
+            return self.write_manifest_of({"documents": documents})
+
+        cases = {
+            "unlisted": [
+                {"path": "a/x.txt", "exact_duplicate_of": "a/missing.txt"},
+            ],
+            "itself": [{"path": "a/x.txt", "exact_duplicate_of": "a/x.txt"}],
+            "a near spelling": [
+                {"path": "a/x.txt"},
+                {"path": "a/y.txt", "exact_duplicate_of": "A/X.txt"},
+            ],
+            "a loop": [
+                {"path": "a/x.txt", "exact_duplicate_of": "a/y.txt"},
+                {"path": "a/y.txt", "exact_duplicate_of": "a/x.txt"},
+            ],
+            "a longer loop": [
+                {"path": "a/x.txt", "exact_duplicate_of": "a/y.txt"},
+                {"path": "a/y.txt", "exact_duplicate_of": "a/z.txt"},
+                {"path": "a/z.txt", "exact_duplicate_of": "a/x.txt"},
+            ],
+            "a chain into a loop": [
+                {"path": "a/w.txt", "exact_duplicate_of": "a/x.txt"},
+                {"path": "a/x.txt", "exact_duplicate_of": "a/y.txt"},
+                {"path": "a/y.txt", "exact_duplicate_of": "a/x.txt"},
+            ],
+        }
+        for name, rows in cases.items():
+            with self.subTest(name), self.assertRaises(c.SpikeInputError) as caught:
+                c.load_manifest(manifest(*rows))
+            self.assertNotIn("a/", str(caught.exception), "a path is not quoted")
+        # A chain that ends at an original is fine.
+        chain = manifest(
+            {"path": "a/x.txt"},
+            {"path": "a/y.txt", "exact_duplicate_of": "a/x.txt"},
+            {"path": "a/z.txt", "exact_duplicate_of": "a/y.txt"},
+        )
+        self.assertEqual(len(c.load_manifest(chain)), 3)
 
     def test_a_listed_duplicate_that_is_missing_is_still_refused(self) -> None:
         (self.root / "a" / "copy.txt").unlink()
@@ -284,7 +366,8 @@ class ReadingTest(unittest.TestCase):
                 self.assertIsNone(c.read_pages(self.root / "a" / name, self.docx_document(name)))
 
     def test_one_unreadable_document_does_not_stop_the_corpus(self) -> None:
-        (self.root / "a" / "syllabus.txt").write_text("fine " * 10, encoding="utf-8")
+        for name in ("syllabus.txt", "copy.txt"):  # the copy must stay a copy
+            (self.root / "a" / name).write_text("fine " * 10, encoding="utf-8")
         (self.root / "a" / "notes.docx").write_bytes(b"corrupt")
         corpus = c.build_corpus(self.root, self.documents, lambda _path: None)
         self.assertIn("a/syllabus.txt", corpus.readable)

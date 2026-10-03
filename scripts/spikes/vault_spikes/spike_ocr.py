@@ -25,7 +25,7 @@ from vault_spikes.metrics import (
     per_second,
     percentile,
 )
-from vault_spikes.report import Environment, Kind, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"})
 TITLE = "OCR engines on this PC"
@@ -50,7 +50,6 @@ PACKAGES = ("rapidocr", "onnxruntime", "pillow")
 # What a report of this spike may contain (checked when a report is read back for a merge).
 # Tesseract is a program, not a package: its version is added by the command line.
 REPORT_PACKAGES = frozenset({*PACKAGES, "tesseract"})
-CANDIDATES = re.compile(r"rapidocr-ppocrv5|tesseract")
 METRICS: dict[str, Kind] = {
     "images": Kind.COUNT,
     "failures": Kind.COUNT,
@@ -67,6 +66,38 @@ METRICS: dict[str, Kind] = {
     "seconds_per_image_p95": Kind.AMOUNT,
     "peak_memory_mib": Kind.AMOUNT,
 }
+_OCR_REQUIRED = frozenset(
+    {
+        "images",
+        "failures",
+        "empty_results",
+        "references_unusable",
+        "load_seconds",
+        "seconds_spent_in_failures",
+    }
+)
+# The rates and timings exist only when an image was read (or failed); see run_ocr_spike.
+_OCR_OPTIONAL = frozenset(
+    {
+        "images_per_minute",
+        "cer_mean_failures_as_errors",
+        "cer_mean",
+        "cer_median",
+        "cer_p90",
+        "seconds_per_image_p50",
+        "seconds_per_image_p95",
+    }
+)
+ROWS = (
+    # RapidOCR runs inside this process, so its peak memory is this process's own.
+    RowShape(re.compile(r"rapidocr-ppocrv5"), _OCR_REQUIRED, _OCR_OPTIONAL | {"peak_memory_mib"}),
+    # Tesseract is a separate program for each image: no figure here stands for it.
+    RowShape(re.compile(r"tesseract"), _OCR_REQUIRED, _OCR_OPTIONAL),
+)
+"""The metrics of each kind of row. A report read from a file must give every ``required`` one and
+nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another
+candidate's figures."""
+CANDIDATES = re.compile("|".join(f"(?:{shape.candidate.pattern})" for shape in ROWS))
 
 
 class OcrEngine(Protocol):

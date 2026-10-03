@@ -7,6 +7,7 @@ same way, but the scripts never print or store any of its text.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import posixpath
 import re
@@ -197,7 +198,46 @@ def load_manifest(path: Path) -> list[Document]:
                 duplicate if isinstance(duplicate, str) else None,
             )
         )
+    _check_duplicate_references(documents)
     return documents
+
+
+def _check_duplicate_references(documents: list[Document]) -> None:
+    """Refuse an ``exact_duplicate_of`` that names nothing, itself, or a loop. The mark makes the
+    spike drop the copy and score its questions against the original, so a mark that points
+    nowhere would drop a document on nothing but a claim. (That the bytes really are the same is
+    checked when the files are read, by ``build_corpus``.)"""
+    listed = {doc.path: doc for doc in documents}
+    for doc in documents:
+        if doc.duplicate_of is None:
+            continue
+        if doc.duplicate_of == doc.path or doc.duplicate_of not in listed:
+            msg = "a document is marked as a duplicate of one the manifest does not list"
+            raise SpikeInputError(msg)
+        seen = {doc.path}
+        current = doc
+        while (target := current.duplicate_of) is not None:
+            if target in seen:
+                msg = "the manifest's exact duplicates form a loop"
+                raise SpikeInputError(msg)
+            seen.add(target)
+            current = listed[target]
+
+
+def file_digest(path: Path) -> str:
+    """SHA-256 of a file's bytes, read in pieces (a listed file may be larger than is chunked)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def same_bytes(first: Path, second: Path) -> bool:
+    """Do two files hold exactly the same bytes? The sizes are compared before any hashing."""
+    return first.stat().st_size == second.stat().st_size and file_digest(first) == file_digest(
+        second
+    )
 
 
 def canonical_paths(documents: list[Document]) -> dict[str, str]:
@@ -363,9 +403,14 @@ def build_corpus(
             )
     for doc in documents:
         if canonical[doc.path] != doc.path:
-            # The same bytes as the original, so it can be read exactly when the original can.
-            # It is still a listed file, so a missing or linked one is refused like any other.
-            safe_file(corpus_dir, doc.path)
+            # The mark is a claim about bytes, so the bytes are compared: a copy that is not one
+            # would be dropped from the corpus and its questions scored against another file. It
+            # is still a listed file, so a missing or linked one is refused like any other.
+            copy = safe_file(corpus_dir, doc.path)
+            original = safe_file(corpus_dir, canonical[doc.path])
+            if not same_bytes(copy, original):
+                msg = "a document marked as an exact duplicate does not hold its original's bytes"
+                raise SpikeInputError(msg)
             if canonical[doc.path] in readable:
                 readable.add(doc.path)
             else:

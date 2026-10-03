@@ -17,7 +17,7 @@ from typing import Protocol
 from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Question, canonical_paths
 from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
-from vault_spikes.report import Environment, Kind, Report, collect_environment
+from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
 from vault_spikes.retrieval import (
     K,
     can_be_scored,
@@ -66,7 +66,6 @@ METHOD = (
 )
 PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
 # What a report of this spike may contain (checked when a report is read back for a merge).
-CANDIDATES = re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-(?:cpu|cuda)")
 METRICS: dict[str, Kind] = {
     "dimensions": Kind.COUNT,
     "load_seconds": Kind.AMOUNT,
@@ -90,6 +89,45 @@ METRICS: dict[str, Kind] = {
     "gpu_peak_allocated_mib": Kind.AMOUNT,
     "gpu_peak_reserved_mib": Kind.AMOUNT,
 }
+_EMBEDDING_REQUIRED = frozenset(
+    {
+        "dimensions",
+        "load_seconds",
+        "chunks",
+        "chunk_overlap_chars",
+        "mean_chunk_chars",
+        "batch_size",
+        "chunks_per_second",
+        "hours_for_vault_of_chunks",
+        "vault_chunks_assumed",
+        "documents_skipped",
+        "questions_scored",
+        "questions_left_out",
+        "sources_not_in_any_chunk",
+        "public_dataset",
+    }
+)
+# Scores exist only when some question could be scored; the peak is left out where the system
+# does not report one. Only a run on the GPU has video memory figures.
+_EMBEDDING_OPTIONAL = frozenset(
+    {"recall_at_10", "mrr_at_10", "hit_at_1_questions", "hit_at_1", "peak_memory_mib"}
+)
+ROWS = (
+    RowShape(
+        re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cpu"),
+        _EMBEDDING_REQUIRED,
+        _EMBEDDING_OPTIONAL,
+    ),
+    RowShape(
+        re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cuda"),
+        _EMBEDDING_REQUIRED,
+        _EMBEDDING_OPTIONAL | {"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"},
+    ),
+)
+"""The metrics of each kind of row. A report read from a file must give every ``required`` one and
+nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another
+candidate's figures."""
+CANDIDATES = re.compile("|".join(f"(?:{shape.candidate.pattern})" for shape in ROWS))
 
 
 class Embedder(Protocol):
