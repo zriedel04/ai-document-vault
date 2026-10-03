@@ -371,15 +371,21 @@ class TestZipDirectoryIsBoundedBeforeItIsOpened:
         path.write_bytes(real[:end] + wide + b"X" * sector + locator + plain)
         return path
 
-    def test_an_honest_archive_with_an_extensible_data_sector_is_one_zipfile_opens(
+    def test_an_honest_archive_with_an_extensible_data_sector_is_judged_as_zipfile_does(
         self, tmp_path: Path
     ) -> None:
-        # The control: the layout of the next tests is one ``zipfile`` accepts, and a check that
-        # only looks 56 bytes before the locator does not see its record at all.
+        # The control for the next tests. Newer ``zipfile`` releases follow the locator to a record
+        # that sits before an extensible data sector and open this archive; older patch releases
+        # cannot read it at all. The verdict must agree with the library either way, and a check
+        # that only looks 56 bytes before the locator does not see the record in the first case.
         path = self.zip64_with_sector(tmp_path)
-        with zipfile.ZipFile(path) as archive:
-            assert "word/document.xml" in archive.namelist()
-        assert validate_file(path).ok
+        try:
+            with zipfile.ZipFile(path) as archive:
+                assert "word/document.xml" in archive.namelist()
+        except zipfile.BadZipFile:
+            assert validate_file(path).reason is Reason.UNREADABLE_ARCHIVE
+        else:
+            assert validate_file(path).ok
 
     def test_the_record_behind_an_extensible_data_sector_is_the_one_judged(
         self, tmp_path: Path
