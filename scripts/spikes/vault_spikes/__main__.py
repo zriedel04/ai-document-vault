@@ -232,6 +232,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "vec":
+        spike_vec.check_sizes(args.sizes)
         require_free(args.out, "vec")
         with tempfile.TemporaryDirectory() as folder:
             report = run_vec_spike(

@@ -361,6 +361,19 @@ class CliTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run("vec", "--sizes", "100", "0")
 
+    def test_vec_sizes_must_ascend_and_nothing_is_run_or_written_otherwise(self) -> None:
+        for sizes in (["100000", "10000"], ["500", "500"]):
+            with (
+                self.subTest(sizes=sizes),
+                tempfile.TemporaryDirectory() as folder,
+                mock.patch.object(cli, "probe_extension_loading") as probe,
+            ):
+                code, _out, err = run("vec", "--out", folder, "--sizes", *sizes)
+                self.assertNotEqual(code, 0)
+                self.assertIn("smallest to the largest", err)
+                probe.assert_not_called()
+                self.assertEqual(list(Path(folder).iterdir()), [])
+
     def test_merge_can_be_repeated_but_never_replaces_one_of_its_inputs(self) -> None:
         env = environment_of("embedding")
         with tempfile.TemporaryDirectory() as folder:

@@ -17,6 +17,7 @@ from vault_spikes import spike_ocr as ocr
 from vault_spikes import spike_pdf as pdf
 from vault_spikes import spike_vec as vec
 from vault_spikes.__main__ import KNOWN
+from vault_spikes.errors import OwnValueError
 from vault_spikes.report import Environment, Report, in_domain
 
 ENV = Environment("Windows-11", "3.12.1", "cpu", 8, 16.0, None, {})
@@ -167,6 +168,36 @@ class VecTest(unittest.TestCase):
             )
             self.assertEqual([r.candidate for r in report.rows][-2:], ["vectors-30", "vectors-40"])
             self.assertEqual(list(Path(folder).iterdir()), [])  # every database was removed
+
+    def test_sizes_out_of_order_or_repeated_are_refused_before_a_store_is_made(self) -> None:
+        """The peak is the process's high-water mark: a larger size run first would put its peak
+        in the row of every smaller one."""
+
+        def refuse(_dim: int) -> vec.PythonStore:
+            raise AssertionError("no store should be made")
+
+        for sizes in ((100_000, 10_000), (50, 50), (10, 50, 20)):
+            with self.subTest(sizes=sizes), self.assertRaises(OwnValueError):
+                vec.run_vec_spike(refuse, sizes=sizes, dim=4, check_size=10, environment=ENV)
+        vec.check_sizes(())
+        vec.check_sizes((7,))
+        vec.check_sizes((10, 20, 30))
+
+    def test_each_row_peak_is_its_own_when_sizes_ascend(self) -> None:
+        peaks = iter([111.0, 222.0])
+        with mock.patch.object(vec, "peak_memory_mib", side_effect=lambda: next(peaks)):
+            report = vec.run_vec_spike(
+                lambda _dim: vec.PythonStore(),
+                sizes=(20, 40),
+                dim=4,
+                queries=1,
+                k=3,
+                check_size=10,
+                environment=ENV,
+                clock=Clock(),
+            )
+        measured = {r.candidate: r.metrics["peak_memory_mib"] for r in report.rows[1:]}
+        self.assertEqual(measured, {"vectors-20": 111.0, "vectors-40": 222.0})
 
     def test_a_wrong_store_is_noticed(self) -> None:
         class Wrong(vec.PythonStore):

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
+from unittest import mock
 from xml.sax.saxutils import escape
 
 from vault_spikes import corpus as c
@@ -380,6 +381,50 @@ class ReadingTest(unittest.TestCase):
         for name in ("corrupt.docx", "nobody.docx"):
             with self.subTest(name):
                 self.assertIsNone(c.read_pages(self.root / "a" / name, self.docx_document(name)))
+
+    def test_a_text_file_that_cannot_be_opened_is_skipped_not_fatal(self) -> None:
+        """Another Windows program may hold a file with deny-read sharing after ``safe_file`` has
+        accepted it; the read fails with ``OSError`` and that is one skipped document."""
+        path = self.root / "a" / "held.txt"
+        path.write_text("readable text", encoding="utf-8")
+        document = c.Document("a/held.txt", "txt", None, False, None)
+        self.assertEqual(c.read_pages(path, document), ["readable text"])
+        for step in ("read_text", "stat"):
+            with (
+                self.subTest(step=step),
+                mock.patch.object(Path, step, side_effect=PermissionError("held")),
+            ):
+                self.assertIsNone(c.read_pages(path, document))
+        docx = self.root / "a" / "held.docx"
+        with zipfile.ZipFile(docx, "w") as archive:
+            archive.writestr("word/document.xml", "<w:p><w:t>x</w:t></w:p>")
+        with mock.patch.object(c, "_docx_pages", side_effect=PermissionError("held")):
+            self.assertIsNone(c.read_pages(docx, self.docx_document("held.docx")))
+
+    def test_a_held_file_is_counted_and_the_corpus_is_still_built(self) -> None:
+        for name in ("syllabus.txt", "copy.txt"):
+            (self.root / "a" / name).write_text("fine " * 10, encoding="utf-8")
+        real = Path.read_text
+
+        def held(path: Path, *args: object, **kwargs: object) -> str:
+            if path.name == "syllabus.txt":
+                raise PermissionError("held")
+            return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(Path, "read_text", held):
+            corpus = c.build_corpus(self.root, self.documents, lambda _path: None)
+        self.assertNotIn("a/syllabus.txt", corpus.readable)
+        self.assertNotIn("a/copy.txt", corpus.readable)  # its original could not be read
+        self.assertEqual(corpus.skipped, 4)  # scan, book.pdf, the held original and its copy
+
+    def test_a_copy_that_cannot_be_compared_is_left_out_and_counted(self) -> None:
+        for name in ("syllabus.txt", "copy.txt"):
+            (self.root / "a" / name).write_text("fine " * 10, encoding="utf-8")
+        with mock.patch.object(c, "same_bytes", side_effect=PermissionError("held")):
+            corpus = c.build_corpus(self.root, self.documents, lambda _path: None)
+        self.assertIn("a/syllabus.txt", corpus.readable)
+        self.assertNotIn("a/copy.txt", corpus.readable)  # the mark could not be verified
+        self.assertEqual(corpus.skipped, 3)  # scan, book.pdf and the copy
 
     def test_one_unreadable_document_does_not_stop_the_corpus(self) -> None:
         for name in ("syllabus.txt", "copy.txt"):  # the copy must stay a copy

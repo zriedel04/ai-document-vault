@@ -14,12 +14,12 @@ import re
 import sqlite3
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator
-from itertools import islice
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from itertools import islice, pairwise
 from pathlib import Path
 from typing import Protocol
 
-from vault_spikes.errors import OwnRuntimeError
+from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import mean, peak_memory_mib, per_second, percentile
 from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
 
@@ -223,6 +223,19 @@ def probe_extension_loading() -> dict[str, bool]:
     return facts
 
 
+def check_sizes(sizes: Sequence[int]) -> None:
+    """Refuse sizes that are not listed from the smallest to the largest, each once.
+
+    ``peak_memory_mib`` is the process's high-water mark and only grows, so a larger size run
+    first would put its peak in every later row (``vectors-10000`` would report the memory of a
+    100,000-vector store). In ascending order each row's peak is its own: nothing before it was
+    larger. A size listed twice would also give two rows the same name.
+    """
+    if any(smaller >= larger for smaller, larger in pairwise(sizes)):
+        msg = "sizes must be listed from the smallest to the largest, each once"
+        raise OwnValueError(msg)
+
+
 def run_vec_spike(
     make_store: StoreFactory,
     *,
@@ -241,6 +254,7 @@ def run_vec_spike(
     ``loading`` is the result of :func:`probe_extension_loading`. If the extension does not load,
     that is the whole result, and nothing else is measured.
     """
+    check_sizes(sizes)
     report = Report(
         "vec",
         TITLE,
