@@ -11,6 +11,7 @@ from unittest import mock
 
 from vault_spikes import __main__ as cli
 from vault_spikes import adapters
+from vault_spikes import spike_pdf as pdf
 from vault_spikes.report import Environment, Kind, Report
 
 KNOWN = cli.KNOWN
@@ -28,7 +29,12 @@ def complete_row(spike: str, candidate: str) -> dict[str, float]:
         Kind.RATIO: 0.5,
         Kind.FLAG: True,
     }
-    return {name: values[KNOWN[spike].metrics[name]] for name in sorted(shape.required)}
+    row = {name: values[KNOWN[spike].metrics[name]] for name in sorted(shape.required)}
+    if spike == "ocr":  # no call failed, so no time was lost in one
+        row["seconds_spent_in_failures"] = 0.0
+    if spike == "embedding":  # a run that got this far embedded something
+        row |= dict.fromkeys(("chunks", "dimensions", "batch_size", "vault_chunks_assumed"), 1)
+    return row
 
 
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
@@ -93,8 +99,12 @@ class CliTest(unittest.TestCase):
                     str(root / "out"),
                 )
             self.assertEqual(code, 0, err)
-            written = (root / "out" / "ocr-rapidocr-ppocrv5.json").read_text(encoding="utf-8")
-            markdown = (root / "out" / "ocr-rapidocr-ppocrv5.md").read_text(encoding="utf-8")
+            written = (root / "out" / "ocr-rapidocr-ppocrv5-private.json").read_text(
+                encoding="utf-8"
+            )
+            markdown = (root / "out" / "ocr-rapidocr-ppocrv5-private.md").read_text(
+                encoding="utf-8"
+            )
         for text in (written, markdown, out, err):
             self.assertNotIn(PRIVATE_TEXT, text)
         self.assertEqual(json.loads(written)["rows"][0]["metrics"]["cer_mean"], 0.0)
@@ -112,15 +122,21 @@ class CliTest(unittest.TestCase):
                     "ocr", "--engine", "rapidocr", "--images", str(images), "--out", str(private)
                 )
             self.assertEqual(code, 0, err)
-            self.assertTrue((private / "ocr-rapidocr-ppocrv5.json").is_file())
+            self.assertTrue((private / "ocr-rapidocr-ppocrv5-private.json").is_file())
         for text in (out, err):
             self.assertNotIn("Patient-Name", text)
             self.assertNotIn("Clients", text)
             self.assertNotIn(folder, text)
-        self.assertIn("report: ocr-rapidocr-ppocrv5.json and ocr-rapidocr-ppocrv5.md", out)
+        self.assertIn(
+            "report: ocr-rapidocr-ppocrv5-private.json and ocr-rapidocr-ppocrv5-private.md", out
+        )
 
     def embedding_run(
-        self, root: Path, *extra: str, factory: Callable[..., object] | None = None
+        self,
+        root: Path,
+        *extra: str,
+        factory: Callable[..., object] | None = None,
+        cited: str = "a.txt",
     ) -> tuple[int, str, str]:
         """One embedding run on a one-document corpus; the questions are the owner's own."""
         (root / "corpus").mkdir(exist_ok=True)
@@ -137,7 +153,7 @@ class CliTest(unittest.TestCase):
         )
         (root / "questions.yaml").write_text(
             "questions:\n- {id: q1, question: q, category: lookup, answerable: true,"
-            " sources: [{path: a.txt, quote: beta}]}\n",
+            f" sources: [{{path: {cited}, quote: beta}}]}}\n",
             encoding="utf-8",
         )
         with (
@@ -158,6 +174,24 @@ class CliTest(unittest.TestCase):
                 str(root / "out"),
                 *extra,
             )
+
+    def test_a_question_that_cites_an_unlisted_document_stops_the_run_before_it_starts(
+        self,
+    ) -> None:
+        class NeverLoaded(FakeEmbedder):
+            def load(self) -> None:
+                raise AssertionError("the model must not be loaded")
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, out, err = self.embedding_run(
+                root, cited="SECRET-b.txt", factory=lambda *_a: NeverLoaded()
+            )
+            written = (root / "out").exists()
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("question q1 cites a document the manifest does not list", err)
+        self.assertNotIn("SECRET", err)
+        self.assertFalse(written)
 
     def test_an_embedding_run_keeps_its_measurement_on_a_card_the_vocabulary_lacks(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -257,12 +291,12 @@ class CliTest(unittest.TestCase):
                     "ocr", "--engine", "tesseract", "--images", str(images), "--out", str(root)
                 )
             self.assertEqual(code, 0, err)
-            stored = json.loads((root / "ocr-tesseract.json").read_text(encoding="utf-8"))
+            stored = json.loads((root / "ocr-tesseract-private.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["environment"]["packages"]["tesseract"], "5.5.0")
             code, _, err = run(
                 "merge",
-                str(root / "ocr-rapidocr-ppocrv5.json"),
-                str(root / "ocr-tesseract.json"),
+                str(root / "ocr-rapidocr-ppocrv5-private.json"),
+                str(root / "ocr-tesseract-private.json"),
                 "--out",
                 str(root / "merged"),
             )
@@ -490,6 +524,101 @@ class CliTest(unittest.TestCase):
             cli.main(["embedding", "--candidate", "nonsense"])
 
 
+class FakePdfExtractor:
+    name = "pypdfium2"
+    detects_headings = False
+
+    def extract(self, path: Path) -> pdf.PdfText:
+        return pdf.PdfText(["page text"], [])
+
+
+class DatasetNameTest(unittest.TestCase):
+    """The OCR and PDF spikes run on the public synthetic files and on the owner's own, and ADRs
+    0014 and 0015 need both, so each report says which it measured and has its own file name."""
+
+    def test_only_the_public_corpus_and_what_lies_inside_it_is_public(self) -> None:
+        corpus = cli.REPO_ROOT / "demo" / "corpus"
+        self.assertTrue(cli.is_public_folder(corpus))
+        self.assertTrue(cli.is_public_folder(corpus / "scans", corpus / ".." / "corpus" / "notes"))
+        with tempfile.TemporaryDirectory() as folder:
+            elsewhere = Path(folder)
+            self.assertFalse(cli.is_public_folder(elsewhere))
+            # Every folder must be public: the images may be, and the references the owner's own.
+            self.assertFalse(cli.is_public_folder(corpus, elsewhere))
+            self.assertFalse(cli.is_public_folder(elsewhere, corpus))
+        self.assertFalse(cli.is_public_folder(corpus / ".."))
+        self.assertFalse(cli.is_public_folder(cli.REPO_ROOT / "demo" / "corpus-copy"))
+        self.assertFalse(cli.is_public_folder(corpus.parent))
+
+    def run_both(self, command: list[str], patches: list[mock._patch[object]]) -> Path:
+        """Run once on a folder inside a stand-in repository and once outside it, into one
+        output folder, and return that folder."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        public = root / "repo" / "demo" / "corpus" / "samples"
+        private = root / "owner" / "samples"
+        for samples in (public, private):
+            samples.mkdir(parents=True)
+            for name, body in (("a.png", "alpha"), ("a.txt", "alpha"), ("a.pdf", "alpha")):
+                (samples / name).write_text(body, encoding="utf-8")
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(mock.patch.object(cli, "REPO_ROOT", root / "repo"))
+            for samples in (public, private):
+                code, _, err = run(*command, str(samples), "--out", str(root / "out"))
+                self.assertEqual(code, 0, err)
+        return root / "out"
+
+    def test_ocr_runs_on_both_kinds_of_data_are_kept_apart(self) -> None:
+        out = self.run_both(
+            ["ocr", "--engine", "rapidocr", "--images"],
+            [mock.patch.object(adapters, "RapidOcrEngine", FakeRapid)],
+        )
+        flags = {}
+        for kind in ("public", "private"):
+            data = json.loads((out / f"ocr-rapidocr-ppocrv5-{kind}.json").read_text("utf-8"))
+            flags[kind] = data["rows"][0]["metrics"]["public_dataset"]
+        self.assertEqual(flags, {"public": True, "private": False})
+        code, _, err = run(
+            "merge",
+            str(out / "ocr-rapidocr-ppocrv5-public.json"),
+            str(out / "ocr-rapidocr-ppocrv5-private.json"),
+            "--out",
+            str(out / "merged"),
+        )
+        self.assertEqual(code, 0, err)
+        merged = json.loads((out / "merged" / "ocr.json").read_text("utf-8"))
+        self.assertEqual(
+            [row["metrics"]["public_dataset"] for row in merged["rows"]], [True, False]
+        )
+
+    def test_pdf_runs_on_both_kinds_of_data_are_kept_apart(self) -> None:
+        out = self.run_both(
+            ["pdf", "--extractor", "pypdfium2", "--pdfs"],
+            [mock.patch.object(adapters, "Pypdfium2Extractor", FakePdfExtractor)],
+        )
+        flags = {}
+        for kind in ("public", "private"):
+            data = json.loads((out / f"pdf-pypdfium2-{kind}.json").read_text("utf-8"))
+            flags[kind] = data["rows"][0]["metrics"]["public_dataset"]
+        self.assertEqual(flags, {"public": True, "private": False})
+
+    def test_a_row_without_its_dataset_flag_is_refused_on_merge(self) -> None:
+        for spike, candidate in (("ocr", "tesseract"), ("pdf", "pypdfium2")):
+            with self.subTest(spike=spike), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                row = complete_row(spike, candidate)
+                del row["public_dataset"]
+                report = Report(spike, *KNOWN[spike].text, MergeRowShapeTest.ENV)
+                report.add(candidate, **row)
+                path = str(report.write(root, stem=f"{spike}-x")[0])
+                code, _, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertEqual(code, 2)
+                self.assertIn("without metrics", err)
+
+
 class MergeRowShapeTest(unittest.TestCase):
     """What a merge accepts of a row is fixed per candidate, so ADR evidence cannot lose the
     context a figure needs (what it was measured on, how much was left out) or carry a figure the
@@ -606,6 +735,8 @@ class MergeRowShapeTest(unittest.TestCase):
             "seconds_per_image_p95": 1.0,
         }
         cpu = "qwen3-embedding-0.6b-cpu"
+        wer = {"wer_mean": 0.1, "wer_median": 0.1}
+        heading = {"heading_false_positives": 0}
         scored = {
             "questions_scored": 5,
             "recall_at_10": 0.5,
@@ -629,6 +760,20 @@ class MergeRowShapeTest(unittest.TestCase):
             ("pdf", "pypdfium2", {"files": 3, "files_ok": 2}),
             ("pdf", "pypdfium2", {"files": 3, "files_ok": 3, "references_used": 1}),
             ("pdf", "pypdfium2", {"pages": 1, "pages_without_text": 2}),
+            ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "references_used": 99, **wer}),
+            ("pdf", "pypdfium2", {"pages": 3}),  # pages come from files that were read
+            ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "files_with_heading_candidates": 2}),
+            (
+                "pdf",
+                "pypdfium2+pdfplumber",
+                {"files": 1, "files_ok": 1, "files_with_heading_reference": 5, **heading},
+            ),
+            ("pdf", "pypdfium2", {"pages": 0, "pages_per_second": 2.0}),
+            # OCR: time is lost in failures only when a call failed.
+            ("ocr", "tesseract", {"seconds_spent_in_failures": 4.0}),
+            # An embedding row has embedded something.
+            ("embedding", cpu, {"chunks": 0}),
+            ("embedding", cpu, {"batch_size": 0}),
             # sqlite-vec: an extension cannot load into a Python that cannot load extensions.
             ("vec", "extension-loading", {"can_load_extensions": False, "vec_loads": True}),
             ("vec", "exact-search-check", {"vectors": 0}),

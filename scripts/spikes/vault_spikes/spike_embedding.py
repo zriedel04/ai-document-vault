@@ -125,11 +125,17 @@ _EMBEDDING_GPU = frozenset({"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"})
 
 def _scores_fit_the_counts(row: Mapping[str, Number]) -> bool:
     """Scores exist exactly when questions were scored, and Hit@1 exactly when some of them are
-    find-the-document questions, which cannot be more than the questions scored."""
+    find-the-document questions, which cannot be more than the questions scored. A run that got
+    this far embedded at least one chunk, in vectors of at least one dimension, in batches of at
+    least one, and projected a vault of at least one chunk."""
     scored = row["questions_scored"] > 0
     marked = row.get("hit_at_1_questions", 0)
     return (
-        ("recall_at_10" in row) == scored
+        row["chunks"] >= 1
+        and row["dimensions"] >= 1
+        and row["batch_size"] >= 1
+        and row["vault_chunks_assumed"] >= 1
+        and ("recall_at_10" in row) == scored
         and ("hit_at_1" in row) == (marked > 0)
         and marked <= row["questions_scored"]
     )

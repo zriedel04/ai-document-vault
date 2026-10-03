@@ -48,13 +48,16 @@ METHOD = (
     "the share of detected headings that are expected, recall the share of expected headings that "
     "were detected, both summed over all files that have such a file; an empty file says the PDF "
     "has no headings, so every heading found in it is a false one. Extracted text and "
-    "headings are compared in memory and never stored; files and references stay outside the "
-    "repository unless they are the public synthetic fixtures."
+    "headings are compared in memory and never stored. The `public_dataset` metric is true only "
+    "when the PDFs and the reference files are both in the repository's public synthetic corpus "
+    "(`demo/corpus/`); otherwise they are the owner's own files, kept outside the repository, "
+    "and only numbers about them are reported."
 )
 PACKAGES = ("pypdfium2", "pdfplumber")
 # What a report of this spike may contain (checked when a report is read back for a merge).
 METRICS: dict[str, Kind] = {
     "files": Kind.COUNT,
+    "public_dataset": Kind.FLAG,
     "files_ok": Kind.COUNT,
     "files_encrypted": Kind.COUNT,
     "files_corrupt": Kind.COUNT,
@@ -77,6 +80,7 @@ METRICS: dict[str, Kind] = {
 _PDF_REQUIRED = frozenset(
     {
         "files",
+        "public_dataset",
         "files_ok",
         "files_encrypted",
         "files_corrupt",
@@ -112,7 +116,11 @@ def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
     return (
         outcomes == row["files"]
         and row["pages_without_text"] <= row["pages"]
-        and row["files_with_heading_candidates"] <= row["files_ok"]
+        and (row["pages"] == 0 or row["files_ok"] > 0)
+        and row["files_with_heading_candidates"] <= min(row["files_ok"], row["heading_candidates"])
+        and row["references_used"] <= row["files_ok"]
+        and row.get("files_with_heading_reference", 0) <= row["files_ok"]
+        and ("pages_per_second" not in row or row["pages"] > 0)
         and ("wer_mean" in row) == (row["references_used"] > 0)
     )
 
@@ -184,6 +192,7 @@ def run_pdf_spike(
     extractor: PdfExtractor,
     pdfs: list[Path],
     *,
+    public_dataset: bool = False,
     references_dir: Path | None = None,
     environment: Environment | None = None,
     clock: Callable[[], float] = time.perf_counter,
@@ -248,6 +257,7 @@ def run_pdf_spike(
 
     metrics: dict[str, int | float] = {
         "files": len(pdfs),
+        "public_dataset": public_dataset,
         "files_ok": outcomes[Outcome.OK],
         "files_encrypted": outcomes[Outcome.ENCRYPTED],
         "files_corrupt": outcomes[Outcome.CORRUPT],

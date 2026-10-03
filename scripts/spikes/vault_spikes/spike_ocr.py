@@ -51,7 +51,9 @@ METHOD = (
     "for an engine that runs inside it (RapidOCR); Tesseract runs as a separate program per "
     "image and has no memory figure here (read its peak working set in Task Manager while it "
     "runs, if it matters). Recognised text is compared in memory and never stored. The "
-    "reference texts and the images stay outside the repository."
+    "`public_dataset` metric is true only when the images and the reference texts are both in the "
+    "repository's public synthetic corpus (`demo/corpus/`); otherwise they are the owner's own "
+    "files, kept outside the repository, and only numbers about them are reported."
 )
 PACKAGES = ("rapidocr", "onnxruntime", "pillow")
 # What a report of this spike may contain (checked when a report is read back for a merge).
@@ -62,6 +64,7 @@ METRICS: dict[str, Kind] = {
     "failures": Kind.COUNT,
     "empty_results": Kind.COUNT,
     "references_unusable": Kind.COUNT,
+    "public_dataset": Kind.FLAG,
     "load_seconds": Kind.AMOUNT,
     "seconds_spent_in_failures": Kind.AMOUNT,
     "images_per_minute": Kind.AMOUNT,
@@ -79,6 +82,7 @@ _OCR_REQUIRED = frozenset(
         "failures",
         "empty_results",
         "references_unusable",
+        "public_dataset",
         "load_seconds",
         "seconds_spent_in_failures",
     }
@@ -110,6 +114,7 @@ def _read_figures_fit_the_counts(row: Mapping[str, Number]) -> bool:
     tried = row["images"] - row["references_unusable"]
     return (
         read >= 0
+        and (row["seconds_spent_in_failures"] == 0 or row["failures"] > 0)
         and row["empty_results"] <= read
         and ("cer_mean" in row) == (read > 0)
         and ("cer_mean_failures_as_errors" in row) == (tried > 0)
@@ -176,6 +181,7 @@ def run_ocr_spike(
     engine: OcrEngine,
     samples: list[LabelledImage],
     *,
+    public_dataset: bool = False,
     environment: Environment | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> Report:
@@ -227,6 +233,7 @@ def run_ocr_spike(
         "failures": failures,
         "empty_results": empty,
         "references_unusable": skipped_references,
+        "public_dataset": public_dataset,
         "load_seconds": load_seconds,
         "seconds_spent_in_failures": failed_seconds,
     }

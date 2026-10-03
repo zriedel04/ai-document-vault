@@ -19,6 +19,7 @@ from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_
 from vault_spikes.corpus import (
     SpikeInputError,
     build_corpus,
+    check_sources_listed,
     load_manifest,
     load_questions,
     overlap_for,
@@ -142,6 +143,15 @@ def is_public_dataset(corpus: Path, questions: Path) -> bool:
     )
 
 
+def is_public_folder(*folders: Path) -> bool:
+    """True only if every folder is the repository's public synthetic corpus or inside it. The
+    OCR and PDF spikes read images, PDFs and reference texts from folders of their own, so the
+    report says whether all of them were the public ones; anything else, a copy included, counts
+    as the owner's own data."""
+    public = (REPO_ROOT / "demo" / "corpus").resolve()
+    return all(folder.resolve().is_relative_to(public) for folder in folders)
+
+
 def available() -> dict[str, bool]:
     facts = {name: importlib.util.find_spec(name) is not None for name in OPTIONAL}
     facts["tesseract_on_path"] = shutil.which("tesseract") is not None
@@ -230,6 +240,7 @@ def run(args: argparse.Namespace) -> int:
         pdf_pages = adapters.pdf_pages_for_corpus if available()["pypdfium2"] else None
         documents = load_manifest(args.corpus / "manifest.json")
         questions = load_questions(args.questions)
+        check_sources_listed(questions, documents)
         overlap = overlap_for(questions)
         inputs = EmbeddingInputs(
             build_corpus(args.corpus, documents, pdf_pages, overlap=overlap),
@@ -254,12 +265,18 @@ def run(args: argparse.Namespace) -> int:
             if args.engine == "rapidocr"
             else adapters.TesseractEngine(args.tesseract_path)
         )
-        require_free(args.out, f"ocr-{engine.name}")
-        report = run_ocr_spike(engine, find_labelled_images(args.images, args.references))
+        # Each engine is measured on the public and on the private images, and both reports are
+        # needed, so the data set is part of the name; checked before the long run.
+        public = is_public_folder(args.images, args.references or args.images)
+        stem = f"ocr-{engine.name}-{'public' if public else 'private'}"
+        require_free(args.out, stem)
+        report = run_ocr_spike(
+            engine, find_labelled_images(args.images, args.references), public_dataset=public
+        )
         if isinstance(engine, adapters.TesseractEngine):
             # Rebuilt through the constructor, so the version is checked like any other.
             report.environment = with_package(report.environment, "tesseract", engine.version())
-        show(report, report.write(args.out, stem=f"ocr-{engine.name}"))
+        show(report, report.write(args.out, stem=stem))
         return 0
 
     if args.command == "pdf":
@@ -268,10 +285,14 @@ def run(args: argparse.Namespace) -> int:
             if args.extractor == "pypdfium2"
             else adapters.PypdfiumPlumberExtractor()
         )
-        require_free(args.out, f"pdf-{extractor.name.replace('+', '-')}")
+        public = is_public_folder(args.pdfs, args.references or args.pdfs)
+        stem = f"pdf-{extractor.name.replace('+', '-')}-{'public' if public else 'private'}"
+        require_free(args.out, stem)
         pdfs = sorted(p for p in args.pdfs.iterdir() if p.suffix.lower() == ".pdf" and p.is_file())
-        report = run_pdf_spike(extractor, pdfs, references_dir=args.references)
-        show(report, report.write(args.out, stem=f"pdf-{extractor.name.replace('+', '-')}"))
+        report = run_pdf_spike(
+            extractor, pdfs, public_dataset=public, references_dir=args.references
+        )
+        show(report, report.write(args.out, stem=stem))
         return 0
 
     reports = [

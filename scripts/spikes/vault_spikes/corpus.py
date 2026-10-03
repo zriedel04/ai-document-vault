@@ -231,6 +231,25 @@ def _check_duplicate_references(documents: list[Document]) -> None:
             current = listed[target]
 
 
+def check_sources_listed(questions: Sequence[Question], documents: Sequence[Document]) -> None:
+    """Refuse a question that cites a path the manifest does not list, before the model runs.
+
+    A misspelled or unlisted path would otherwise make the question unscorable, and it would be
+    left out of Recall and MRR and counted with the questions that need an unreadable scan,
+    where a data error reads as a limit of the reader. The spelling must be the manifest's own,
+    not one Windows would treat as the same file: scoring compares the paths as written, so a
+    path that differs only in case or slash would load, never match a chunk and score as a miss.
+    The error names the question's id, never the path.
+    """
+    listed = {doc.path for doc in documents}
+    for question in questions:
+        if any(
+            passage.path not in listed for passage in (*question.sources, *question.alternatives)
+        ):
+            msg = f"question {question.id} cites a document the manifest does not list"
+            raise SpikeInputError(msg)
+
+
 def file_digest(path: Path) -> str:
     """SHA-256 of a file's bytes, read in pieces (a listed file may be larger than is chunked)."""
     digest = hashlib.sha256()

@@ -376,6 +376,38 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(corpus.skipped, 3)  # scan, book.pdf and notes.docx
 
 
+class SourcesListedTest(unittest.TestCase):
+    """A path in the eval file that the manifest lacks is a data error, not an unreadable scan."""
+
+    DOCS: ClassVar[list[c.Document]] = [c.Document("a/x.txt", "text", None, False, None)]
+
+    def questions(self, source: str, alternative: str | None = None) -> list[c.Question]:
+        alternatives = (c.Source(alternative, "q"),) if alternative else ()
+        return [c.Question("q7", "t", "lookup", True, (c.Source(source, "q"),), alternatives)]
+
+    def test_listed_sources_pass(self) -> None:
+        c.check_sources_listed(self.questions("a/x.txt", "a/x.txt"), self.DOCS)
+        c.check_sources_listed([], self.DOCS)
+
+    def test_a_misspelled_or_unlisted_source_is_refused_naming_the_question_only(self) -> None:
+        for source in ("a/y.txt", "a/x.tx", "x.txt", "", "a/x.txt ", "a/x.txt\n"):
+            with self.subTest(source=source), self.assertRaises(c.SpikeInputError) as caught:
+                c.check_sources_listed(self.questions(source), self.DOCS)
+            self.assertIn("q7", str(caught.exception))
+            self.assertNotIn("a/", str(caught.exception))
+
+    def test_an_unlisted_alternative_is_refused_too(self) -> None:
+        with self.assertRaises(c.SpikeInputError):
+            c.check_sources_listed(self.questions("a/x.txt", "a/z.txt"), self.DOCS)
+
+    def test_a_spelling_windows_would_accept_is_still_refused(self) -> None:
+        # Scoring compares the paths as written, so these would load and then never match a
+        # chunk: a silent miss for every question that cites them.
+        for source in ("A/X.TXT", "a\\x.txt", "./a/x.txt", "a//x.txt"):
+            with self.subTest(source=source), self.assertRaises(c.SpikeInputError):
+                c.check_sources_listed(self.questions(source), self.DOCS)
+
+
 class SplitTest(unittest.TestCase):
     def test_windows_are_bounded_and_overlap(self) -> None:
         text = " ".join(f"word{i}" for i in range(200))
