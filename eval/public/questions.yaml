@@ -49,14 +49,16 @@ questions:
     page: 2
     quote: 'Final report: 25 percent'
 - id: q006
-  question: What is the penalty for handing work in late in CSE 485?
+  question: Which document gives the late-work penalty for CSE 485, and what is the penalty?
   category: lookup
   answerable: true
-  answer: 10 percent per day for up to five days; after five days the work is not accepted.
+  answer: 'The course syllabus: 10 percent per day for up to five days; after five days the work is not
+    accepted.'
   sources:
   - path: courses/cse485/syllabus.pdf
     page: 2
     quote: Late work loses 10 percent per day, up to five days. After five days the work is not accepted.
+  find_document: true
 - id: q007
   question: Is there a final exam in CSE 485?
   category: lookup
@@ -98,10 +100,11 @@ questions:
     page: 2
     quote: Submit the proposal as a single PDF file through the course portal.
 - id: q011
-  question: How long can the project proposal be, and what happens if it is longer?
+  question: Which assignment sheet limits the length of the project proposal, and what happens if it is
+    longer?
   category: lookup
   answerable: true
-  answer: No more than two pages; each extra page loses 5 points.
+  answer: 'The project proposal assignment sheet: no more than two pages; each extra page loses 5 points.'
   sources:
   - path: courses/cse485/assignment-1-project-proposal.pdf
     page: 1
@@ -109,15 +112,17 @@ questions:
   - path: courses/cse485/assignment-1-project-proposal.pdf
     page: 2
     quote: A proposal that exceeds two pages loses 5 points for each extra page.
+  find_document: true
 - id: q012
-  question: In MoSCoW prioritisation, what does 'could have' mean?
+  question: Which lecture notes cover MoSCoW prioritisation, and what does 'could have' mean in it?
   category: lookup
   answerable: true
-  answer: Nice to have if time allows.
+  answer: 'The slide notes on requirements engineering: nice to have if time allows.'
   sources:
   - path: courses/cse485/lecture-04-slide-notes.pdf
     page: 3
     quote: 'Could have: nice to have if time allows'
+  find_document: true
 - id: q013
   question: Which database did Jordan choose for the prototype?
   category: lookup
@@ -132,16 +137,17 @@ questions:
     page: null
     quote: 'Jordan: chose SQLite for the prototype.'
 - id: q014
-  question: How many items does a list endpoint return by default and what is the most a client can ask
-    for?
+  question: Which notes describe list endpoints, and how many items does one return by default and at
+    most?
   category: lookup
   answerable: true
-  answer: 20 by default and at most 100 per page.
+  answer: 'The API design notes: 20 by default and at most 100 per page.'
   sources:
   - path: notes/api-design-notes.md
     page: null
     quote: List endpoints return 20 items by default. A client may ask for at most 100 items per page
       with the limit parameter.
+  find_document: true
 - id: q015
   question: When is the Operating Systems final?
   category: lookup
@@ -175,15 +181,16 @@ questions:
     page: null
     quote: 'Tue Dec 8: Calculus II final at 9:00 AM'
 - id: q017
-  question: How long is each team's prototype demo and how is the time split?
+  question: Which announcement says how long each team's prototype demo is and how the time is split?
   category: lookup
   answerable: true
-  answer: '12 minutes: 8 to present and 4 for questions.'
+  answer: 'The class announcement about demo day: 12 minutes, 8 to present and 4 for questions.'
   sources:
   - path: emails/class-announcement-demo-day.txt
     page: null
     quote: 'Each team has 12 minutes for its prototype demo on Friday, November 20: 8 minutes to present
       and 4 minutes for questions.'
+  find_document: true
 - id: q018
   question: Which calculators may be used in the Calculus II final?
   category: lookup
@@ -261,10 +268,12 @@ questions:
 
       Peer evaluation,5,96,100'
 - id: q024
-  question: What was the design review score and what did the reviewer ask the team to add?
+  question: Which document records the design review, what was its score and what did the reviewer ask
+    the team to add?
   category: lookup
   answerable: true
-  answer: 92 out of 100; an index on the course code column for the group search query.
+  answer: 'The design review feedback: 92 out of 100; an index on the course code column for the group
+    search query.'
   sources:
   - path: project/design-review-feedback.docx
     page: null
@@ -272,6 +281,7 @@ questions:
   - path: project/design-review-feedback.docx
     page: null
     quote: The group search query needs an index on the course code column before the demo.
+  find_document: true
 - id: q025
   question: How did the decision about in-app chat develop over time?
   category: multi_doc
@@ -547,10 +557,10 @@ questions:
     page: null
     quote: Subtotal $174.00
 - id: q045
-  question: What is the total of the team's project budget?
+  question: Which file lists the team's project budget, and what is the total?
   category: numeric
   answerable: true
-  answer: $82.90.
+  answer: 'The project budget table: $82.90.'
   sources:
   - path: data/project-budget.csv
     page: null
@@ -565,6 +575,7 @@ questions:
       Demo day snacks,18.40
 
       Total,82.90'
+  find_document: true
 - id: q046
   question: Does the poster printing receipt agree with the project budget?
   category: multi_doc
