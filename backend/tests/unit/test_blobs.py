@@ -1,13 +1,19 @@
 import hashlib
+import importlib
 import io
 import os
 import stat
+import sys
 import threading
 import time
+from contextlib import AbstractContextManager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
+from vault.storage import blobs as blobs_module
 from vault.storage.blobs import (
     BlobBusyError,
     BlobIntegrityError,
@@ -33,6 +39,27 @@ def put(store: BlobStore, data: bytes, extension: str = "txt") -> Path:
 
 def is_read_only(path: Path) -> bool:
     return stat.S_IMODE(path.stat().st_mode) & 0o222 == 0
+
+
+def link(target: Path, name: Path) -> Path:
+    """A symbolic link at ``name`` to ``target``; the test is skipped where links cannot be made
+    (Windows without the privilege)."""
+    name.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, name, target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError):
+        pytest.skip("this system cannot make symbolic links here")
+    return name
+
+
+def outside_file(tmp_path: Path, data: bytes = HELLO) -> Path:
+    """A writable file that is not in the store, with the content of a blob: the original that an
+    import must never alter."""
+    path = tmp_path / "outside" / "original.txt"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(data)
+    path.chmod(0o644)
+    return path
 
 
 class TestStoring:
@@ -600,3 +627,284 @@ class TestDelete:
         put(store, HELLO)
         store.delete(HELLO_SHA)
         assert store.put(io.BytesIO(HELLO), "txt").created is True
+
+
+class TestLinksAreNotBlobs:
+    """A link where a blob or one of its folders belongs could lead outside the store. It is
+    damage: never read as a blob, never changed, published into or deleted through, and reported."""
+
+    @staticmethod
+    def untouched(original: Path) -> None:
+        assert original.read_bytes() == HELLO
+        assert stat.S_IMODE(original.stat().st_mode) == 0o644
+
+    def test_a_link_in_the_place_of_a_blob_is_not_found_and_the_target_is_left_alone(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        original = outside_file(tmp_path)
+        entry = link(original, store.path_for(HELLO_SHA, "txt"))
+        assert store.find(HELLO_SHA) is None
+        assert not store.exists(HELLO_SHA)
+        with pytest.raises(BlobNotFoundError):
+            store.open(HELLO_SHA)
+        self.untouched(original)
+        assert entry.is_symlink()
+
+    def test_importing_the_same_bytes_again_does_not_change_the_linked_file(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        original = outside_file(tmp_path)
+        entry = link(original, store.path_for(HELLO_SHA, "txt"))
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        # Under another extension the bytes are new to the store: a real blob is made beside the
+        # link, which is still not a blob, and a later import finds that one.
+        made = store.put(io.BytesIO(HELLO), "md")
+        assert made.created is True
+        assert made.path != entry
+        assert store.put(io.BytesIO(HELLO), "txt").path == made.path
+        self.untouched(original)  # the read-only mark would have followed the link
+        assert entry.is_symlink()
+        assert [path for _, path in store.scan().blobs] == [made.path]
+        assert store.scan().strays == (entry,)
+        assert list((store.root / ".tmp").iterdir()) == []
+
+    def test_a_link_that_leads_nowhere_is_the_same(self, store: BlobStore, tmp_path: Path) -> None:
+        entry = link(tmp_path / "missing", store.path_for(HELLO_SHA, "txt"))
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert entry.is_symlink()
+        assert not (tmp_path / "missing").exists()
+
+    def test_the_rename_fallback_does_not_replace_a_link_either(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        original = outside_file(tmp_path)
+        entry = link(original, store.path_for(HELLO_SHA, "txt"))
+        with (
+            mock.patch("os.link", side_effect=OSError("no hard links here")),
+            pytest.raises(BlobIntegrityError),
+        ):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert entry.is_symlink()
+        self.untouched(original)
+
+    def test_sealing_and_deleting_do_not_go_through_a_link(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        original = outside_file(tmp_path)
+        link(original, store.path_for(HELLO_SHA, "txt"))
+        assert store.seal() == 0
+        assert store.delete(HELLO_SHA) is False
+        self.untouched(original)
+
+    def test_the_helpers_that_change_a_file_refuse_a_link(self, tmp_path: Path) -> None:
+        original = outside_file(tmp_path)
+        entry = link(original, tmp_path / "entry")
+        for change in (blobs_module._read_only, blobs_module._writable, BlobStore._seal_file):
+            with pytest.raises(BlobIntegrityError):
+                change(entry)
+        self.untouched(original)
+
+    @pytest.mark.parametrize("level", [0, 1, 2])
+    def test_a_link_in_place_of_a_folder_level_is_not_published_into(
+        self, store: BlobStore, tmp_path: Path, level: int
+    ) -> None:
+        # level 0 is sha256/, 1 is sha256/aa, 2 is sha256/aa/bb
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        folder = store.folder_for(HELLO_SHA)
+        levels = [folder.parent.parent, folder.parent, folder]
+        link(outside, levels[level])
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert list(outside.iterdir()) == []  # nothing was published through the link
+        assert levels[level].is_symlink()
+        assert list((store.root / ".tmp").iterdir()) == []
+
+    @pytest.mark.parametrize("level", [0, 1, 2])
+    def test_a_real_blob_behind_a_linked_folder_is_not_found_sealed_or_deleted(
+        self, store: BlobStore, tmp_path: Path, level: int
+    ) -> None:
+        # A blob that lives outside the store, reached through a folder link, is not the store's.
+        folder = store.folder_for(HELLO_SHA)
+        levels = [folder.parent.parent, folder.parent, folder]
+        elsewhere = tmp_path / "elsewhere"
+        blob_folder = elsewhere / folder.relative_to(levels[level])
+        blob_folder.mkdir(parents=True)
+        blob = blob_folder / f"{HELLO_SHA}.txt"
+        blob.write_bytes(HELLO)
+        blob.chmod(0o644)
+        link(elsewhere, levels[level])
+        assert store.find(HELLO_SHA) is None
+        scan = store.scan()
+        assert scan.blobs == ()
+        assert levels[level] in scan.strays
+        assert store.seal() == 0
+        assert store.delete(HELLO_SHA) is False
+        assert blob.read_bytes() == HELLO
+        assert stat.S_IMODE(blob.stat().st_mode) == 0o644
+
+    def test_a_vault_folder_that_is_itself_a_link_still_works(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        store = BlobStore(link(real, tmp_path / "vault-link"))
+        stored = store.put(io.BytesIO(HELLO), "txt")
+        assert stored.created is True
+        assert store.find(HELLO_SHA) is not None
+        assert store.scan().strays == ()
+        assert (real / "sha256").is_dir()
+        assert store.delete(HELLO_SHA) is True
+
+    def test_a_windows_reparse_point_is_a_link_even_if_it_does_not_say_symlink(self) -> None:
+        # A junction has st_file_attributes with the reparse bit and is not S_ISLNK.
+        junction = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_file_attributes=0x400)
+        folder = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_file_attributes=0x10)
+        regular = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_file_attributes=0x20)
+        flagged_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_file_attributes=0x420)
+        symlink = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)  # no attributes off Windows
+        is_link, is_dir, is_file = (
+            blobs_module._is_link,
+            blobs_module._is_real_dir,
+            blobs_module._is_real_file,
+        )
+        assert is_link(junction)  # type: ignore[arg-type]
+        assert not is_dir(junction)  # type: ignore[arg-type]
+        assert is_dir(folder)  # type: ignore[arg-type]
+        assert is_file(regular)  # type: ignore[arg-type]
+        assert not is_file(flagged_file)  # type: ignore[arg-type]
+        assert is_link(symlink)  # type: ignore[arg-type]
+        assert not is_dir(None)
+        assert not is_file(None)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows feature")
+    def test_a_junction_is_treated_like_a_link(self, store: BlobStore, tmp_path: Path) -> None:
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        folder = store.folder_for(HELLO_SHA)
+        folder.parent.parent.mkdir(parents=True)
+        winapi = importlib.import_module("_winapi")  # typed only on Windows
+        winapi.CreateJunction(str(outside), str(folder.parent))
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert list(outside.iterdir()) == []
+        assert store.scan().strays == (folder.parent,)
+
+
+class TestAFailedDeleteKeepsTheBlobReadOnly:
+    @staticmethod
+    def failing_unlink(blob: Path, error: BaseException) -> AbstractContextManager[object]:
+        real = Path.unlink
+
+        def unlink(self: Path, *args: object, **kwargs: object) -> None:
+            if self == blob:
+                raise error
+            real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        return mock.patch.object(Path, "unlink", unlink)
+
+    @pytest.mark.parametrize(
+        "error", [PermissionError("sharing violation"), OSError("disk error"), KeyboardInterrupt()]
+    )
+    def test_a_refused_delete_leaves_the_blob_read_only_and_intact(
+        self, store: BlobStore, error: BaseException
+    ) -> None:
+        path = put(store, HELLO)
+        assert is_read_only(path)
+        with self.failing_unlink(path, error), pytest.raises(type(error)):
+            store.delete(HELLO_SHA)
+        assert is_read_only(path)
+        assert path.read_bytes() == HELLO
+        assert store.verify(HELLO_SHA)
+        assert list((store.root / ".tmp").iterdir()) == []  # the claim was released too
+
+    def test_a_blob_that_cannot_be_made_read_only_does_not_hide_the_original_error(
+        self, store: BlobStore
+    ) -> None:
+        path = put(store, HELLO)
+
+        def refuse(_path: Path) -> None:
+            msg = "cannot change the mode"
+            raise PermissionError(msg)
+
+        with (
+            self.failing_unlink(path, OSError("disk error")),
+            mock.patch("vault.storage.blobs._read_only", refuse),
+            pytest.raises(OSError, match="disk error"),
+        ):
+            store.delete(HELLO_SHA)
+
+    def test_the_delete_still_works_afterwards(self, store: BlobStore) -> None:
+        path = put(store, HELLO)
+        with self.failing_unlink(path, PermissionError("busy")), pytest.raises(PermissionError):
+            store.delete(HELLO_SHA)
+        assert store.delete(HELLO_SHA) is True
+        assert not path.exists()
+
+
+class TestScanReportsWhatIsOdd:
+    def test_valid_empty_structure_folders_are_not_reported(self, store: BlobStore) -> None:
+        (store.root / "sha256" / "ab" / "cd").mkdir(parents=True)
+        (store.root / "sha256" / "ef").mkdir()
+        scan = store.scan()
+        assert scan.blobs == ()
+        assert scan.strays == ()
+
+    def test_odd_folders_at_every_level_are_reported(self, store: BlobStore) -> None:
+        base = store.root / "sha256"
+        odd = [
+            base / "zz",  # not two hex digits
+            base / "ABC",
+            base / "ab" / "x",
+            base / "ab" / "cd" / "stuff",  # a folder where only blobs belong
+            base / "ab" / "cd" / ("1" * 64),  # a folder named like a blob
+            base / "ab" / "cd" / ("1" * 64 + ".txt"),
+        ]
+        for folder in odd:
+            folder.mkdir(parents=True)
+        (base / "zz" / "inside.txt").write_bytes(b"?")
+        scan = store.scan()
+        assert set(scan.strays) == set(odd)  # reported once, not entered
+        assert scan.blobs == ()
+
+    def test_a_folder_named_like_a_blob_does_not_hide_the_real_one(self, store: BlobStore) -> None:
+        good = put(store, HELLO)
+        (good.parent / ("2" * 64)).mkdir()
+        scan = store.scan()
+        assert {path for _, path in scan.blobs} == {good}
+        assert scan.strays == (good.parent / ("2" * 64),)
+
+    def test_links_at_every_level_are_reported_and_not_followed(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        real = put(store, HELLO)
+        outside = tmp_path / "elsewhere"
+        (outside / "ab").mkdir(parents=True)
+        (outside / "file.txt").write_bytes(HELLO)
+        base = store.root / "sha256"
+        links = [
+            link(outside, base / "cc"),
+            link(outside, base / "dd" / "ee"),
+            link(outside / "file.txt", real.parent / ("3" * 64 + ".txt")),
+        ]
+        scan = store.scan()
+        assert {path for _, path in scan.blobs} == {real}
+        assert set(scan.strays) == set(links)
+
+    def test_a_file_where_the_folder_for_all_blobs_belongs_is_reported(
+        self, store: BlobStore
+    ) -> None:
+        store.root.mkdir()
+        (store.root / "sha256").write_bytes(b"?")
+        assert store.scan().strays == (store.root / "sha256",)
+        assert store.scan().blobs == ()
+
+    def test_a_loose_file_at_each_level_is_reported(self, store: BlobStore) -> None:
+        good = put(store, HELLO)
+        loose = [
+            store.root / "sha256" / "readme.txt",
+            store.root / "sha256" / good.parent.parent.name / "loose.txt",
+        ]
+        for path in loose:
+            path.write_bytes(b"?")
+        assert set(store.scan().strays) == set(loose)

@@ -15,8 +15,15 @@ read-only mark can leave a finished blob writable, so start-up runs ``clean_temp
 
 Imports of the same bytes are serialised by a claim on the hash (a lock file in the temporary
 folder), whatever extension each import brings: the extension is part of the file name, so a rename
-or a link alone cannot make two imports under ``.txt`` and ``.md`` collide. Nothing here logs file
-names or content.
+or a link alone cannot make two imports under ``.txt`` and ``.md`` collide.
+
+Only real files and real folders are part of the store. A symbolic link, a Windows junction or any
+other reparse point where a blob or one of its folders belongs is treated as damage: it is never
+read as a blob, changed, published into or deleted through (a link could lead outside the store,
+and the store must never alter a file it does not own), and ``scan()`` reports it. The check is
+made on each level just before it is used, not held across the operation, so it guards a store
+that was damaged or edited by hand, not one under attack by a process that is racing it. The vault
+folder itself may be a link the owner set up. Nothing here logs file names or content.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ import stat
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Final
@@ -104,12 +111,49 @@ def normalise_extension(extension: str) -> str:
     return cleaned
 
 
+HEX_PAIR: Final = re.compile(r"[0-9a-f]{2}")
+
+
+def _lstat(path: Path) -> os.stat_result | None:
+    """The entry's own status, without following a link; None if it is not there."""
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _is_link(status: os.stat_result) -> bool:
+    """A symbolic link, or on Windows a junction or other reparse point (``st_file_attributes`` is
+    only there on Windows)."""
+    reparse = getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    return stat.S_ISLNK(status.st_mode) or bool(reparse)
+
+
+def _is_real_dir(status: os.stat_result | None) -> bool:
+    return status is not None and stat.S_ISDIR(status.st_mode) and not _is_link(status)
+
+
+def _is_real_file(status: os.stat_result | None) -> bool:
+    return status is not None and stat.S_ISREG(status.st_mode) and not _is_link(status)
+
+
+def _real_file_mode(path: Path) -> int:
+    """The permission bits of a regular file; anything else (a link, a folder) is not a blob."""
+    status = _lstat(path)
+    if not _is_real_file(status):
+        msg = "something that is not a regular file is where a blob belongs"
+        raise BlobIntegrityError(msg)
+    assert status is not None  # noqa: S101 - narrowed by the check above, for the type checker
+    return status.st_mode
+
+
 def _read_only(path: Path) -> None:
+    _real_file_mode(path)
     path.chmod(READ_ONLY)
 
 
 def _writable(path: Path) -> None:
-    path.chmod(path.stat().st_mode | WRITABLE)
+    path.chmod(_real_file_mode(path) | WRITABLE)
 
 
 class BlobStore:
@@ -130,14 +174,37 @@ class BlobStore:
         name = f"{sha256}.{suffix}" if suffix else sha256
         return self.folder_for(sha256) / name
 
-    def find(self, sha256: str) -> Path | None:
-        """The stored file for this hash, whatever extension it was stored under, or None."""
+    def _safe_folder(self, sha256: str, *, create: bool) -> Path | None:
+        """The folder for this hash, after checking that each level under the vault folder
+        (``sha256``, ``aa``, ``bb``) is a real folder and not a link. None if it is not there and
+        ``create`` is False; with ``create`` the missing levels are made, one at a time, so that
+        no level is ever made through another one. A link or a file in a level raises
+        ``BlobIntegrityError``."""
         folder = self.folder_for(sha256)
-        if not folder.is_dir():
+        for level in (folder.parent.parent, folder.parent, folder):
+            status = _lstat(level)
+            if status is None:
+                if not create:
+                    return None
+                level.mkdir(parents=level == folder.parent.parent, exist_ok=True)
+                status = _lstat(level)
+            if not _is_real_dir(status):
+                msg = "something that is not a folder is where a blob folder belongs"
+                raise BlobIntegrityError(msg)
+        return folder
+
+    def find(self, sha256: str) -> Path | None:
+        """The stored file for this hash, whatever extension it was stored under, or None. A link
+        is not a blob, whether it is the file or one of its folders."""
+        try:
+            folder = self._safe_folder(sha256, create=False)
+        except BlobIntegrityError:
+            return None
+        if folder is None:
             return None
         for entry in folder.iterdir():
             match = BLOB_NAME.fullmatch(entry.name)
-            if match and match.group(1) == sha256 and entry.is_file():
+            if match and match.group(1) == sha256 and _is_real_file(_lstat(entry)):
                 return entry
         return None
 
@@ -191,7 +258,7 @@ class BlobStore:
             self._seal_file(existing)  # a crash may have left it writable
             return StoredBlob(sha256, size, existing, created=False)
         final = self.path_for(sha256, suffix)
-        final.parent.mkdir(parents=True, exist_ok=True)
+        self._safe_folder(sha256, create=True)
         if not self._publish(temp, final):
             # The name is taken. Only a real blob counts as the winner: a folder or another
             # odd entry in its place is not one, and pointing a caller at it would be wrong.
@@ -209,7 +276,7 @@ class BlobStore:
 
     @staticmethod
     def _seal_file(path: Path) -> None:
-        if path.stat().st_mode & WRITABLE:
+        if _real_file_mode(path) & WRITABLE:
             _read_only(path)
 
     @contextmanager
@@ -268,13 +335,15 @@ class BlobStore:
         except FileExistsError:
             return False
         except OSError:
+            if os.path.lexists(final):  # never rename over an entry, whatever it is
+                return False
             try:
                 temp.rename(final)
             except FileExistsError:
                 return False
             except OSError:
                 # Windows reports a folder in the way as an access error, not as "exists".
-                if final.exists() or final.is_symlink():
+                if os.path.lexists(final):
                     return False
                 raise
         return True
@@ -307,7 +376,7 @@ class BlobStore:
         (An edit is found by ``verify``; sealing only closes the door.)"""
         sealed = 0
         for _, path in self.scan().blobs:
-            if path.stat().st_mode & WRITABLE:
+            if _real_file_mode(path) & WRITABLE:
                 _read_only(path)
                 sealed += 1
         return sealed
@@ -332,23 +401,44 @@ class BlobStore:
     def scan(self) -> Scan:
         """List every blob, and every entry under ``sha256/`` that is not one.
 
-        A blob is a file named ``<hash>`` or ``<hash>.<ext>`` in the folder its hash names. The
+        A blob is a regular file named ``<hash>`` or ``<hash>.<ext>`` in the folder its hash names.
+        The only folders that are part of the layout are ``aa`` and ``aa/bb`` (two hex digits each).
+        Anything else is reported and not entered: a file out of place, a folder where a blob
+        belongs (even one named like a blob), a folder with another name, and any link. The
         temporary folder is not part of the store's content.
         """
         blobs: list[tuple[str, Path]] = []
         strays: list[Path] = []
         base = self.root / ALGORITHM
-        if not base.is_dir():
+        status = _lstat(base)
+        if status is None:
             return Scan((), ())
-        for entry in sorted(base.rglob("*")):
-            if entry.is_dir():
+        if not _is_real_dir(status):
+            return Scan((), (base,))
+        for first in self._entries(base):
+            if not (HEX_PAIR.fullmatch(first.name) and _is_real_dir(_lstat(first))):
+                strays.append(first)
                 continue
-            match = BLOB_NAME.fullmatch(entry.name)
-            if match and entry.parent == self.folder_for(match.group(1)):
-                blobs.append((match.group(1), entry))
-            else:
-                strays.append(entry)
+            for second in self._entries(first):
+                if not (HEX_PAIR.fullmatch(second.name) and _is_real_dir(_lstat(second))):
+                    strays.append(second)
+                    continue
+                for entry in self._entries(second):
+                    match = BLOB_NAME.fullmatch(entry.name)
+                    if (
+                        match
+                        and _is_real_file(_lstat(entry))
+                        and entry.parent == self.folder_for(match.group(1))
+                    ):
+                        blobs.append((match.group(1), entry))
+                    else:
+                        strays.append(entry)
         return Scan(tuple(blobs), tuple(strays))
+
+    @staticmethod
+    def _entries(folder: Path) -> list[Path]:
+        """The entries of a real folder, in a fixed order."""
+        return sorted(folder.iterdir())
 
     def iter_hashes(self) -> Iterator[str]:
         yield from (sha256 for sha256, _ in self.scan().blobs)
@@ -365,7 +455,13 @@ class BlobStore:
             if path is None:
                 return False
             _writable(path)
-            path.unlink()
+            try:
+                path.unlink()
+            except BaseException:
+                # A blob that could not be removed must not stay writable under its hash.
+                with suppress(OSError):
+                    _read_only(path)
+                raise
             for folder in (path.parent, path.parent.parent):
                 try:
                     folder.rmdir()
