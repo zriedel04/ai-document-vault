@@ -91,11 +91,17 @@ _PDF_HEADING_ACCURACY = frozenset(
         "heading_f1",
     }
 )
+_PDF_WER = frozenset({"wer_mean", "wer_median"})
+# A heading reference gives its file count and the false positives together.
+_PDF_HEADING_REFERENCE = frozenset({"files_with_heading_reference", "heading_false_positives"})
 ROWS = (
     # Only the extractor that detects headings can be scored on them.
-    RowShape(re.compile(r"pypdfium2"), _PDF_REQUIRED, _PDF_OPTIONAL),
+    RowShape(re.compile(r"pypdfium2"), _PDF_REQUIRED, _PDF_OPTIONAL, (_PDF_WER,)),
     RowShape(
-        re.compile(r"pypdfium2\+pdfplumber"), _PDF_REQUIRED, _PDF_OPTIONAL | _PDF_HEADING_ACCURACY
+        re.compile(r"pypdfium2\+pdfplumber"),
+        _PDF_REQUIRED,
+        _PDF_OPTIONAL | _PDF_HEADING_ACCURACY,
+        (_PDF_WER, _PDF_HEADING_REFERENCE),
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

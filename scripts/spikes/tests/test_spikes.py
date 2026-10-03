@@ -56,6 +56,7 @@ def tearDownModule() -> None:
         assert emitted <= shape.allowed, (
             f"{spike}/{candidate} emits {sorted(emitted - shape.allowed)}"
         )
+        assert not shape.broken_groups(emitted), f"{spike}/{candidate} gives half a group"
         assert shape.required <= emitted, (
             f"{spike}/{candidate} lacks {sorted(shape.required - emitted)}"
         )

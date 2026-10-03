@@ -553,15 +553,47 @@ class MergeRowShapeTest(unittest.TestCase):
 
     def test_a_figure_a_run_may_lack_is_not_required(self) -> None:
         for spike, candidate, extra in (
-            ("embedding", "qwen3-embedding-0.6b-cuda", "gpu_peak_reserved_mib"),
-            ("ocr", "rapidocr-ppocrv5", "peak_memory_mib"),
+            (
+                "embedding",
+                "qwen3-embedding-0.6b-cuda",
+                ("gpu_peak_reserved_mib", "gpu_peak_allocated_mib"),
+            ),
+            ("ocr", "rapidocr-ppocrv5", ("peak_memory_mib",)),
         ):
             with self.subTest(candidate=candidate):
                 self.assertEqual(
                     self.merge(spike, candidate, complete_row(spike, candidate)), (0, "")
                 )
-                row = {**complete_row(spike, candidate), extra: 1.0}
+                row = {**complete_row(spike, candidate), **dict.fromkeys(extra, 1.0)}
                 self.assertEqual(self.merge(spike, candidate, row), (0, ""))
+
+    def test_half_a_group_of_figures_is_refused(self) -> None:
+        scores: dict[str, float | None] = {
+            "recall_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "hit_at_1_questions": 3,
+        }
+        reads: dict[str, float | None] = dict.fromkeys(("cer_mean", "cer_median", "cer_p90"), 0.1)
+        cases: list[tuple[str, str, dict[str, float | None]]] = [
+            ("embedding", "qwen3-embedding-0.6b-cpu", {"recall_at_10": 0.5}),
+            ("embedding", "qwen3-embedding-0.6b-cpu", {**scores, "mrr_at_10": None}),
+            ("embedding", "qwen3-embedding-0.6b-cuda", {"gpu_peak_reserved_mib": 1.0}),
+            ("ocr", "tesseract", reads),
+            ("pdf", "pypdfium2", {"wer_mean": 0.1}),
+            ("pdf", "pypdfium2+pdfplumber", {"heading_false_positives": 2}),
+        ]
+        for spike, candidate, part in cases:
+            with self.subTest(candidate=candidate, part=sorted(part)):
+                joined = {**complete_row(spike, candidate), **part}
+                row = {name: value for name, value in joined.items() if value is not None}
+                code, err = self.merge(spike, candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn("part of a group", err)
+
+    def test_a_whole_group_is_accepted(self) -> None:
+        scores = {"recall_at_10": 0.5, "mrr_at_10": 0.5, "hit_at_1_questions": 3}
+        row = {**complete_row("embedding", "qwen3-embedding-0.6b-cpu"), **scores}
+        self.assertEqual(self.merge("embedding", "qwen3-embedding-0.6b-cpu", row), (0, ""))
 
 
 if __name__ == "__main__":

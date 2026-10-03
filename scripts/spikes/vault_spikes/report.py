@@ -18,7 +18,7 @@ import math
 import os
 import platform
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from importlib import metadata
@@ -115,15 +115,22 @@ class RowShape(NamedTuple):
     """The metrics one kind of row has: the candidate names it applies to, the metrics every such
     row carries (the context a figure needs to be read: what was measured on, how much was left
     out) and the ones it may carry (a figure a run can lack, such as a peak the system does not
-    report). A metric in neither set is one the candidate could never emit."""
+    report). A metric in neither set is one the candidate could never emit. Each set in
+    ``together`` is a group of optional figures that a run gives all at once or not at all (the
+    scores of one set of questions, the two video-memory figures), so half a group is refused."""
 
     candidate: re.Pattern[str]
     required: frozenset[str]
     optional: frozenset[str] = frozenset()
+    together: tuple[frozenset[str], ...] = ()
 
     @property
     def allowed(self) -> frozenset[str]:
         return self.required | self.optional
+
+    def broken_groups(self, names: Collection[str]) -> list[frozenset[str]]:
+        """The groups of ``together`` of which ``names`` has some but not all."""
+        return [group for group in self.together if 0 < len(group & set(names)) < len(group)]
 
 
 class SpikeSchema(NamedTuple):
@@ -428,6 +435,9 @@ class Report:
                 raise OwnValueError(msg)
             if not shape.required <= set(metrics):
                 msg = "the report has a row without metrics that every row of its candidate has"
+                raise OwnValueError(msg)
+            if shape.broken_groups(metrics):
+                msg = "the report has a row with only part of a group of figures that go together"
                 raise OwnValueError(msg)
             report.add(candidate, **metrics)
             for name, value in report.rows[-1].metrics.items():

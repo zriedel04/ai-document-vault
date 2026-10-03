@@ -112,16 +112,20 @@ _EMBEDDING_REQUIRED = frozenset(
 _EMBEDDING_OPTIONAL = frozenset(
     {"recall_at_10", "mrr_at_10", "hit_at_1_questions", "hit_at_1", "peak_memory_mib"}
 )
+_EMBEDDING_SCORES = frozenset({"recall_at_10", "mrr_at_10", "hit_at_1_questions"})
+_EMBEDDING_GPU = frozenset({"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"})
 ROWS = (
     RowShape(
         re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cpu"),
         _EMBEDDING_REQUIRED,
         _EMBEDDING_OPTIONAL,
+        (_EMBEDDING_SCORES,),
     ),
     RowShape(
         re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cuda"),
         _EMBEDDING_REQUIRED,
-        _EMBEDDING_OPTIONAL | {"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"},
+        _EMBEDDING_OPTIONAL | _EMBEDDING_GPU,
+        (_EMBEDDING_SCORES, _EMBEDDING_GPU),
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

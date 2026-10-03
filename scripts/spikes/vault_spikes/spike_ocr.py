@@ -88,11 +88,20 @@ _OCR_OPTIONAL = frozenset(
         "seconds_per_image_p95",
     }
 )
+# Read-accuracy and timing figures come together, from the images that were read.
+_OCR_READ = frozenset(
+    {"cer_mean", "cer_median", "cer_p90", "seconds_per_image_p50", "seconds_per_image_p95"}
+)
 ROWS = (
     # RapidOCR runs inside this process, so its peak memory is this process's own.
-    RowShape(re.compile(r"rapidocr-ppocrv5"), _OCR_REQUIRED, _OCR_OPTIONAL | {"peak_memory_mib"}),
+    RowShape(
+        re.compile(r"rapidocr-ppocrv5"),
+        _OCR_REQUIRED,
+        _OCR_OPTIONAL | {"peak_memory_mib"},
+        (_OCR_READ,),
+    ),
     # Tesseract is a separate program for each image: no figure here stands for it.
-    RowShape(re.compile(r"tesseract"), _OCR_REQUIRED, _OCR_OPTIONAL),
+    RowShape(re.compile(r"tesseract"), _OCR_REQUIRED, _OCR_OPTIONAL, (_OCR_READ,)),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and
 nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another
