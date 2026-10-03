@@ -13,3 +13,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 - Backend skeleton in `backend/`: FastAPI app factory with `GET /api/health`, TOML settings with environment overrides, logging that never records document content, pytest, Ruff, mypy, a Python licence check and `pip-audit` in CI.
 - Repository foundation: ignore rules, repository safety check, pre-commit hooks, CI, templates and contributor docs.
 - Architecture plan (revision 2) in `docs/architecture.md`, a template and 15 ADRs (12 Accepted, 3 Proposed pending Windows spikes), and an ADR structure check.
+
+### Changed
+
+- Dependabot no longer proposes a TypeScript major version (TypeScript 7 does not install next to `openapi-typescript` and `typescript-eslint`, so the npm group failed to resolve) or a `uv-build` bump (the build backend is pinned to the tested minor series and is bumped by hand).
