@@ -146,6 +146,13 @@ def load_questions(path: Path) -> list[Question]:
         if find_document and (not answerable or len({s.path for s in sources}) != 1):
             msg = "a find_document question must be answerable from exactly one document"
             raise SpikeInputError(msg)
+        alternatives = _sources(row.get("alternatives"), "alternatives")
+        if alternatives and len(sources) != 1:
+            # An alternative is a whole answer in one passage (eval/README.md). It can stand for
+            # the one required passage; it cannot stand for one of several, so a question with
+            # several sources has no alternatives and each of its passages is judged on its own.
+            msg = "only a question with exactly one source can have alternatives"
+            raise SpikeInputError(msg)
         questions.append(
             Question(
                 qid,
@@ -153,7 +160,7 @@ def load_questions(path: Path) -> list[Question]:
                 category,
                 answerable,
                 sources,
-                _sources(row.get("alternatives"), "alternatives"),
+                alternatives,
                 find_document,
             )
         )

@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -25,7 +25,14 @@ from vault_spikes.metrics import (
     per_second,
     percentile,
 )
-from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
+from vault_spikes.report import (
+    Environment,
+    Kind,
+    Number,
+    Report,
+    RowShape,
+    collect_environment,
+)
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"})
 TITLE = "OCR engines on this PC"
@@ -92,6 +99,23 @@ _OCR_OPTIONAL = frozenset(
 _OCR_READ = frozenset(
     {"cer_mean", "cer_median", "cer_p90", "seconds_per_image_p50", "seconds_per_image_p95"}
 )
+
+
+def _read_figures_fit_the_counts(row: Mapping[str, Number]) -> bool:
+    """Accuracy figures exist exactly when some image was read: the images, less the references
+    that could not be scored and the calls that failed. The failures-as-errors mean also counts
+    the failed calls, so it exists when any scored image was tried. Empty results are among the
+    images read."""
+    read = row["images"] - row["references_unusable"] - row["failures"]
+    tried = row["images"] - row["references_unusable"]
+    return (
+        read >= 0
+        and row["empty_results"] <= read
+        and ("cer_mean" in row) == (read > 0)
+        and ("cer_mean_failures_as_errors" in row) == (tried > 0)
+    )
+
+
 ROWS = (
     # RapidOCR runs inside this process, so its peak memory is this process's own.
     RowShape(
@@ -99,9 +123,16 @@ ROWS = (
         _OCR_REQUIRED,
         _OCR_OPTIONAL | {"peak_memory_mib"},
         (_OCR_READ,),
+        _read_figures_fit_the_counts,
     ),
     # Tesseract is a separate program for each image: no figure here stands for it.
-    RowShape(re.compile(r"tesseract"), _OCR_REQUIRED, _OCR_OPTIONAL, (_OCR_READ,)),
+    RowShape(
+        re.compile(r"tesseract"),
+        _OCR_REQUIRED,
+        _OCR_OPTIONAL,
+        (_OCR_READ,),
+        _read_figures_fit_the_counts,
+    ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and
 nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another

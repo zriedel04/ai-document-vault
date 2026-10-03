@@ -17,10 +17,17 @@ KNOWN = cli.KNOWN
 
 
 def complete_row(spike: str, candidate: str) -> dict[str, float]:
-    """Every metric a row of this candidate must carry, each with a value its kind allows."""
+    """The metrics a row of this candidate must carry, each with a value its kind allows and
+    all of them consistent: nothing was tried or scored (zero counts), except for the sqlite-vec
+    rows, whose counts say that something was measured."""
     shape = KNOWN[spike].shape_of(candidate)
     assert shape is not None
-    values = {Kind.COUNT: 1, Kind.AMOUNT: 1.0, Kind.RATIO: 0.5, Kind.FLAG: True}
+    values = {
+        Kind.COUNT: 1 if spike == "vec" else 0,
+        Kind.AMOUNT: 1.0,
+        Kind.RATIO: 0.5,
+        Kind.FLAG: True,
+    }
     return {name: values[KNOWN[spike].metrics[name]] for name in sorted(shape.required)}
 
 
@@ -590,9 +597,100 @@ class MergeRowShapeTest(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertIn("part of a group", err)
 
+    def test_figures_that_contradict_the_counts_are_refused(self) -> None:
+        accuracy = {
+            "cer_mean": 0.1,
+            "cer_median": 0.1,
+            "cer_p90": 0.1,
+            "seconds_per_image_p50": 1.0,
+            "seconds_per_image_p95": 1.0,
+        }
+        cpu = "qwen3-embedding-0.6b-cpu"
+        scored = {
+            "questions_scored": 5,
+            "recall_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "hit_at_1_questions": 7,
+        }
+        cases: list[tuple[str, str, dict[str, float]]] = [
+            # Hit@1 is required exactly when find-the-document questions were scored.
+            ("embedding", cpu, {**scored, "hit_at_1_questions": 3}),  # a count but no hit_at_1
+            ("embedding", cpu, {**scored, "hit_at_1_questions": 0, "hit_at_1": 1.0}),
+            ("embedding", cpu, {**scored, "hit_at_1": 1.0}),  # more marked than scored
+            # Scores exist exactly when questions were scored.
+            ("embedding", cpu, {"recall_at_10": 0.5, "mrr_at_10": 0.5, "hit_at_1_questions": 0}),
+            ("embedding", cpu, {"questions_scored": 5}),
+            # OCR: accuracy exists exactly when an image was read.
+            ("ocr", "tesseract", {"images": 3}),
+            ("ocr", "tesseract", {"images": 3, "failures": 4}),
+            ("ocr", "tesseract", {"images": 3, "references_unusable": 3, **accuracy}),
+            ("ocr", "tesseract", {"images": 3, "empty_results": 4, **accuracy}),
+            # PDF: outcomes add up, and error rates need references.
+            ("pdf", "pypdfium2", {"files": 3, "files_ok": 2}),
+            ("pdf", "pypdfium2", {"files": 3, "files_ok": 3, "references_used": 1}),
+            ("pdf", "pypdfium2", {"pages": 1, "pages_without_text": 2}),
+            # sqlite-vec: an extension cannot load into a Python that cannot load extensions.
+            ("vec", "extension-loading", {"can_load_extensions": False, "vec_loads": True}),
+            ("vec", "exact-search-check", {"vectors": 0}),
+        ]
+        for spike, candidate, change in cases:
+            with self.subTest(candidate=candidate, change=change):
+                row = {**complete_row(spike, candidate), **change}
+                code, err = self.merge(spike, candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn("figures do not fit together", err)
+
+    def test_figures_that_agree_with_the_counts_are_accepted(self) -> None:
+        cpu = "qwen3-embedding-0.6b-cpu"
+        marked = {
+            "questions_scored": 5,
+            "recall_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "hit_at_1_questions": 2,
+        }
+        read = {"images": 4, "references_unusable": 1, "failures": 1, "empty_results": 1}
+        cases: list[tuple[str, str, dict[str, float]]] = [
+            ("embedding", cpu, {**marked, "hit_at_1": 0.5}),
+            ("embedding", cpu, {**marked, "hit_at_1_questions": 0}),
+            (
+                "ocr",
+                "tesseract",
+                {**read, "cer_mean_failures_as_errors": 0.5, "cer_mean": 0.2}
+                | {
+                    "cer_median": 0.2,
+                    "cer_p90": 0.3,
+                    "seconds_per_image_p50": 1.0,
+                    "seconds_per_image_p95": 2.0,
+                },
+            ),
+            ("pdf", "pypdfium2", {"files": 3, "files_ok": 2, "files_corrupt": 1}),
+            (
+                "pdf",
+                "pypdfium2",
+                {
+                    "files": 1,
+                    "files_ok": 1,
+                    "references_used": 1,
+                    "wer_mean": 0.1,
+                    "wer_median": 0.1,
+                },
+            ),
+        ]
+        for spike, candidate, change in cases:
+            with self.subTest(candidate=candidate, change=change):
+                row = {**complete_row(spike, candidate), **change}
+                self.assertEqual(self.merge(spike, candidate, row), (0, ""))
+
     def test_a_whole_group_is_accepted(self) -> None:
-        scores = {"recall_at_10": 0.5, "mrr_at_10": 0.5, "hit_at_1_questions": 3}
-        row = {**complete_row("embedding", "qwen3-embedding-0.6b-cpu"), **scores}
+        row = {
+            **complete_row("embedding", "qwen3-embedding-0.6b-cpu"),
+            **{
+                "questions_scored": 5,
+                "recall_at_10": 0.5,
+                "mrr_at_10": 0.5,
+                "hit_at_1_questions": 0,
+            },
+        }
         self.assertEqual(self.merge("embedding", "qwen3-embedding-0.6b-cpu", row), (0, ""))
 
 

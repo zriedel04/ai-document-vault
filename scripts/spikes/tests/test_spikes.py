@@ -24,7 +24,7 @@ PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
 
 EMITTED: dict[str, set[str]] = {}
 VALUES: list[tuple[str, str, object]] = []
-ROW_KEYS: list[tuple[str, str, frozenset[str]]] = []
+ROW_KEYS: list[tuple[str, str, dict[str, float]]] = []
 _real_add = Report.add
 
 
@@ -34,7 +34,7 @@ def setUpModule() -> None:
     def recording_add(self: Report, candidate: str, **metrics: float) -> None:
         EMITTED.setdefault(self.spike, set()).update(metrics)
         VALUES.extend((self.spike, name, value) for name, value in metrics.items())
-        ROW_KEYS.append((self.spike, candidate, frozenset(metrics)))
+        ROW_KEYS.append((self.spike, candidate, dict(metrics)))
         _real_add(self, candidate, **metrics)
 
     Report.add = recording_add  # type: ignore[method-assign]
@@ -50,15 +50,19 @@ def tearDownModule() -> None:
     assert set(EMITTED) == set(schemas), "a spike was not exercised by these tests"
     # Each row a spike wrote must fit the shape its candidate has, or merge would refuse the
     # report the script itself wrote; and no metric of the vocabulary may be one no row can have.
-    for spike, candidate, emitted in ROW_KEYS:
+    for spike, candidate, row in ROW_KEYS:
         shape = KNOWN[spike].shape_of(candidate)
         assert shape is not None, f"{spike}: no row shape fits a candidate it emits"
+        emitted = frozenset(row)
         assert emitted <= shape.allowed, (
             f"{spike}/{candidate} emits {sorted(emitted - shape.allowed)}"
         )
         assert not shape.broken_groups(emitted), f"{spike}/{candidate} gives half a group"
         assert shape.required <= emitted, (
             f"{spike}/{candidate} lacks {sorted(shape.required - emitted)}"
+        )
+        assert shape.consistent is None or shape.consistent(row), (
+            f"{spike}/{candidate} writes figures that do not fit together: {row}"
         )
     for spike, schema in KNOWN.items():
         used = {schema.shape_of(candidate) for name, candidate, _ in ROW_KEYS if name == spike}

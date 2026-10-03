@@ -55,10 +55,13 @@ ROWS = (
     RowShape(
         re.compile(r"extension-loading"),
         frozenset({"can_load_extensions", "vec_loads"}),
+        # An extension cannot load into a Python that cannot load extensions.
+        consistent=lambda row: bool(row["can_load_extensions"]) or not row["vec_loads"],
     ),
     RowShape(
         re.compile(r"exact-search-check"),
         frozenset({"vectors", "same_answer_as_python"}),
+        consistent=lambda row: row["vectors"] > 0,
     ),
     RowShape(
         re.compile(r"vectors-\d{1,9}"),
@@ -73,6 +76,7 @@ ROWS = (
             }
         ),
         frozenset({"peak_memory_mib"}),
+        consistent=lambda row: row["dim"] > 0 and row["queries_timed"] > 0,
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

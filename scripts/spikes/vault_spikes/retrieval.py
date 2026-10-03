@@ -25,6 +25,17 @@ def _normalise(text: str) -> str:
     return " ".join(text.split())
 
 
+def accepted_passages(question: Question) -> tuple[Source, ...]:
+    """The passages that count as the answer, one rule for every score: the required passages,
+    and, for a question with exactly one, its alternatives (each a whole answer on its own).
+    Several required passages are never replaced by an alternative, which cannot stand for one of
+    several; the loader refuses such a question, and this keeps a question built in code from
+    scoring Recall at 0 and MRR at 1 for the same retrieval."""
+    if len(question.sources) == 1:
+        return (*question.sources, *question.alternatives)
+    return question.sources
+
+
 def covers(chunk: Chunk, source: Source, canonical: Mapping[str, str]) -> bool:
     """Does this chunk hold the passage the source names?
 
@@ -67,7 +78,7 @@ def document_hit(
     """
     if not ranked:
         return 0.0
-    right = {canonical.get(s.path, s.path) for s in (*question.sources, *question.alternatives)}
+    right = {canonical.get(s.path, s.path) for s in accepted_passages(question)}
     return 1.0 if canonical.get(ranked[0].doc_path, ranked[0].doc_path) in right else 0.0
 
 
@@ -87,7 +98,7 @@ def score_question(
     """
     top = ranked[:k]
     required = question.sources
-    acceptable = (*required, *question.alternatives)
+    acceptable = accepted_passages(question)
     found = [s for s in required if any(covers(chunk, s, canonical) for chunk in top)]
     recall = len(found) / len(required)
     alternative_found = any(covers(c, a, canonical) for c in top for a in question.alternatives)
@@ -175,7 +186,7 @@ def sources_missing_from(
     missing = 0
     for q in questions:
         if len(q.sources) == 1:
-            acceptable = [p for p in (*q.sources, *q.alternatives) if p.path in readable]
+            acceptable = [p for p in accepted_passages(q) if p.path in readable]
             if acceptable and not any(held(p) for p in acceptable):
                 missing += 1
         else:

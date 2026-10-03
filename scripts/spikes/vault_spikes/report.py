@@ -18,7 +18,7 @@ import math
 import os
 import platform
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from importlib import metadata
@@ -117,12 +117,16 @@ class RowShape(NamedTuple):
     out) and the ones it may carry (a figure a run can lack, such as a peak the system does not
     report). A metric in neither set is one the candidate could never emit. Each set in
     ``together`` is a group of optional figures that a run gives all at once or not at all (the
-    scores of one set of questions, the two video-memory figures), so half a group is refused."""
+    scores of one set of questions, the two video-memory figures), so half a group is refused.
+    ``consistent`` judges what a row's own numbers say about each other, once every value is known
+    to be of its kind: a score exists only when questions were scored, a count of outcomes adds
+    up to the count of what was tried. A generated row always satisfies it."""
 
     candidate: re.Pattern[str]
     required: frozenset[str]
     optional: frozenset[str] = frozenset()
     together: tuple[frozenset[str], ...] = ()
+    consistent: Callable[[Mapping[str, Number]], bool] | None = None
 
     @property
     def allowed(self) -> frozenset[str]:
@@ -444,6 +448,9 @@ class Report:
                 if not in_domain(schema.metrics[name], value):
                     msg = f"metric {name} is outside the values this spike can produce"
                     raise OwnValueError(msg)
+            if shape.consistent is not None and not shape.consistent(report.rows[-1].metrics):
+                msg = "the report has a row whose figures do not fit together"
+                raise OwnValueError(msg)
             if (own := row.get("environment")) is not None:
                 report.rows[-1].environment = _known_environment(own, schema)
         return report

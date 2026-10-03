@@ -469,8 +469,35 @@ class RetrievalScoreTest(unittest.TestCase):
         self.assertEqual((recall, rr), (0.5, 1.0))
         both = [chunk("a", "first passage"), chunk("b", "second passage")]
         self.assertEqual(self.score(q, both)[0], 1.0)
-        # an alternative does not stand in for a passage of a multi-passage question
-        self.assertEqual(self.score(q, [chunk("alt", "alternative passage")])[0], 0.0)
+        # an alternative does not stand in for a passage of a multi-passage question, in Recall
+        # or in the reciprocal rank: the same retrieval is not a complete miss and a rank-one hit
+        self.assertEqual(self.score(q, [chunk("alt", "alternative passage")]), (0.0, 0.0))
+        self.assertEqual(rv.accepted_passages(q), (a, b))
+        self.assertEqual(rv.document_hit(q, [chunk("alt", "alternative passage")], {}), 0.0)
+        one = question((a,), (src("alt", "alternative passage"),))
+        self.assertEqual(self.score(one, [chunk("alt", "alternative passage")]), (1.0, 1.0))
+        self.assertEqual(rv.accepted_passages(one), (a, src("alt", "alternative passage")))
+
+    def test_only_a_question_with_one_source_can_have_alternatives(self) -> None:
+        head = "questions:\n- {id: a, question: q, category: c, "
+        alt = "alternatives: [{path: b.txt, quote: y}]}\n"
+        one = "sources: [{path: a.txt, quote: x}], "
+        two = "sources: [{path: a.txt, quote: x}, {path: c.txt, quote: z}], "
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "q.yaml"
+            for name, text in {
+                "two sources": head + "answerable: true, " + two + alt,
+                "no source": head + "answerable: false, " + alt,
+            }.items():
+                path.write_text(text, encoding="utf-8")
+                with self.subTest(name), self.assertRaisesRegex(c.SpikeInputError, "exactly one"):
+                    c.load_questions(path)
+            path.write_text(head + "answerable: true, " + one + alt, encoding="utf-8")
+            self.assertEqual(len(c.load_questions(path)[0].alternatives), 1)
+            path.write_text(
+                head + "answerable: true, " + two + "alternatives: []}\n", encoding="utf-8"
+            )
+            self.assertEqual(c.load_questions(path)[0].alternatives, ())
 
     def test_two_passages_of_one_document_are_two_sources(self) -> None:
         q = question((src("a", "first passage"), src("a", "second passage")))

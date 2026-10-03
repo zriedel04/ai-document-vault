@@ -10,14 +10,21 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Question, canonical_paths
 from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
-from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
+from vault_spikes.report import (
+    Environment,
+    Kind,
+    Number,
+    Report,
+    RowShape,
+    collect_environment,
+)
 from vault_spikes.retrieval import (
     K,
     can_be_scored,
@@ -114,18 +121,34 @@ _EMBEDDING_OPTIONAL = frozenset(
 )
 _EMBEDDING_SCORES = frozenset({"recall_at_10", "mrr_at_10", "hit_at_1_questions"})
 _EMBEDDING_GPU = frozenset({"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"})
+
+
+def _scores_fit_the_counts(row: Mapping[str, Number]) -> bool:
+    """Scores exist exactly when questions were scored, and Hit@1 exactly when some of them are
+    find-the-document questions, which cannot be more than the questions scored."""
+    scored = row["questions_scored"] > 0
+    marked = row.get("hit_at_1_questions", 0)
+    return (
+        ("recall_at_10" in row) == scored
+        and ("hit_at_1" in row) == (marked > 0)
+        and marked <= row["questions_scored"]
+    )
+
+
 ROWS = (
     RowShape(
         re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cpu"),
         _EMBEDDING_REQUIRED,
         _EMBEDDING_OPTIONAL,
         (_EMBEDDING_SCORES,),
+        _scores_fit_the_counts,
     ),
     RowShape(
         re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cuda"),
         _EMBEDDING_REQUIRED,
         _EMBEDDING_OPTIONAL | _EMBEDDING_GPU,
         (_EMBEDDING_SCORES, _EMBEDDING_GPU),
+        _scores_fit_the_counts,
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

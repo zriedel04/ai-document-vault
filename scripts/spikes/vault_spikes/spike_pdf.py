@@ -13,7 +13,7 @@ import contextlib
 import re
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -21,7 +21,14 @@ from typing import Protocol
 
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import mean, median, peak_memory_mib, per_second, word_error_rate
-from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
+from vault_spikes.report import (
+    Environment,
+    Kind,
+    Number,
+    Report,
+    RowShape,
+    collect_environment,
+)
 
 TITLE = "PDF extraction on this PC"
 QUESTION = (
@@ -94,14 +101,31 @@ _PDF_HEADING_ACCURACY = frozenset(
 _PDF_WER = frozenset({"wer_mean", "wer_median"})
 # A heading reference gives its file count and the false positives together.
 _PDF_HEADING_REFERENCE = frozenset({"files_with_heading_reference", "heading_false_positives"})
+
+
+def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
+    """Every file ends in exactly one outcome, the pages without text are among the pages, and the
+    word error rates exist exactly when references were used."""
+    outcomes = (
+        row["files_ok"] + row["files_encrypted"] + row["files_corrupt"] + row["files_other_error"]
+    )
+    return (
+        outcomes == row["files"]
+        and row["pages_without_text"] <= row["pages"]
+        and row["files_with_heading_candidates"] <= row["files_ok"]
+        and ("wer_mean" in row) == (row["references_used"] > 0)
+    )
+
+
 ROWS = (
     # Only the extractor that detects headings can be scored on them.
-    RowShape(re.compile(r"pypdfium2"), _PDF_REQUIRED, _PDF_OPTIONAL, (_PDF_WER,)),
+    RowShape(re.compile(r"pypdfium2"), _PDF_REQUIRED, _PDF_OPTIONAL, (_PDF_WER,), _outcomes_add_up),
     RowShape(
         re.compile(r"pypdfium2\+pdfplumber"),
         _PDF_REQUIRED,
         _PDF_OPTIONAL | _PDF_HEADING_ACCURACY,
         (_PDF_WER, _PDF_HEADING_REFERENCE),
+        _outcomes_add_up,
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and
