@@ -1,0 +1,12 @@
+# Settings for demo mode: a throwaway vault filled with the synthetic corpus in demo/corpus/.
+# Safe to commit: it holds no paths, keys or private data. The demo script (vault.ps1 demo, PR 6)
+# creates a temporary vault folder and passes it in, so there is no [vault] path here.
+# Later sections (offline answer mode, the corpus location) arrive with the phases that read them.
+
+[server]
+host = "127.0.0.1"
+# One above the default so a demo can run next to a real vault.
+port = 8766
+
+[logging]
+level = "INFO"

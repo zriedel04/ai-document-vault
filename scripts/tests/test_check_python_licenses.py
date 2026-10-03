@@ -172,6 +172,13 @@ class ViolationsTest(unittest.TestCase):
         self.assertEqual(licences.licence_source(package(field="y\nz")), ())
         self.assertEqual(licences.licence_source(package()), ())
 
+    def test_pillow_exception_is_for_mit_cmu_only_and_never_strict(self) -> None:
+        mit_cmu = package("Pillow", "MIT-CMU")
+        self.assertEqual(licences.violations([mit_cmu]), [])
+        self.assertEqual(len(licences.violations([mit_cmu], strict=True)), 1)
+        self.assertEqual(len(licences.violations([package("Pillow", "GPL-3.0-only")])), 1)
+        self.assertEqual(len(licences.violations([package("not-pillow", "MIT-CMU")])), 1)
+
     def test_exception_is_per_package(self) -> None:
         other = package("something-else", classifiers=("Mozilla Public License 2.0 (MPL 2.0)",))
         self.assertEqual(len(licences.violations([other])), 1)

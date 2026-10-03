@@ -1,0 +1,7 @@
+Team Northwind standup, Tuesday, September 22, 2026
+Attendees: Alex, Jordan, Sam
+
+Alex: the proposal was submitted on September 17. Dr. Raman approved our team today.
+Jordan: the API skeleton is running with two endpoints.
+Sam: set up the kanban board.
+Blockers: we need to decide whether the first release has in-app chat.

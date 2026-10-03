@@ -1,0 +1,126 @@
+%PDF-1.3
+%“Œ‹ž ReportLab Generated PDF document (opensource)
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/Contents 9 0 R /MediaBox [ 0 0 612 792 ] /Parent 8 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+5 0 obj
+<<
+/Contents 10 0 R /MediaBox [ 0 0 612 792 ] /Parent 8 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+6 0 obj
+<<
+/PageMode /UseNone /Pages 8 0 R /Type /Catalog
+>>
+endobj
+7 0 obj
+<<
+/Author (AI Document Vault demo corpus) /CreationDate (D:20000101000000+00'00') /Creator (demo/generate) /Keywords () /ModDate (D:20000101000000+00'00') /Producer (ReportLab PDF Library - \(opensource\)) 
+  /Subject (unspecified) /Title (courses/cse485/lecture-05-slide-notes.pdf) /Trapped /False
+>>
+endobj
+8 0 obj
+<<
+/Count 2 /Kids [ 4 0 R 5 0 R ] /Type /Pages
+>>
+endobj
+9 0 obj
+<<
+/Length 803
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 18 Tf 21.6 TL ET
+BT 1 0 0 1 72 694 Tm (Lecture 5 Slide Notes: Design and Reviews) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 668 Tm (Slide 1: From requirements to design) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 649 Tm (Every design decision should trace back to at least one requirement.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 625 Tm (Slide 2: Layers) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 606 Tm (-) Tj T* ET
+BT 1 0 0 1 86 606 Tm (Presentation: what the user sees) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 588 Tm (-) Tj T* ET
+BT 1 0 0 1 86 588 Tm (Logic: the rules of the application) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 570 Tm (-) Tj T* ET
+BT 1 0 0 1 86 570 Tm (Data: where information is stored) Tj T* ET
+ 
+endstream
+endobj
+10 0 obj
+<<
+/Length 770
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 702 Tm (Slide 3: Interfaces first) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 683 Tm (Agree on the interface between two components before either one is built. Write down inputs,) Tj T* ET
+BT 1 0 0 1 72 668 Tm (outputs and errors.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 72 644 Tm (Slide 4: Running a design review) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 625 Tm (A design review is a meeting where the team explains its design and a reviewer asks questions.) Tj T* ET
+BT 1 0 0 1 72 610 Tm (Bring a diagram, a traceability table and a list of open risks.) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 72 589 Tm (The design reviews in this course are on October 30.) Tj T* ET
+ 
+endstream
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000061 00000 n 
+0000000102 00000 n 
+0000000209 00000 n 
+0000000321 00000 n 
+0000000514 00000 n 
+0000000708 00000 n 
+0000000776 00000 n 
+0000001094 00000 n 
+0000001159 00000 n 
+0000002012 00000 n 
+trailer
+<<
+/ID 
+[<9f7fe88b0c682e48ae9110c01150a4a6><9f7fe88b0c682e48ae9110c01150a4a6>]
+% ReportLab generated PDF document -- digest (opensource)
+
+/Info 7 0 R
+/Root 6 0 R
+/Size 11
+>>
+startxref
+2833
+%%EOF

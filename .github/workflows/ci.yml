@@ -193,3 +193,56 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+
+  demo-corpus:
+    name: Demo corpus (Linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo/generate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "uv==${UV_VERSION}"
+      - name: Install from the lock file
+        run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - name: Validation tests (every cited document, page and quote exists)
+        run: uv run python -m unittest discover -s tests -v
+      - name: Committed corpus and eval set match the generator
+        run: uv run python build.py --check
+      - name: Licence check (generator tools, reviewed exceptions allowed)
+        run: uv run python ../../scripts/check_python_licenses.py --ignore demo-generate
+      - name: Dependency audit
+        run: |
+          python -m pip install "pip-audit==${PIP_AUDIT_VERSION}"
+          uv export --locked --no-dev --no-emit-project --no-hashes --output-file ../../runtime.txt
+          uv export --locked --only-dev --no-hashes --output-file ../../dev.txt
+          pip-audit --requirement ../../runtime.txt --no-deps --disable-pip --strict
+          pip-audit --requirement ../../dev.txt --no-deps --disable-pip --strict
+
+  demo-corpus-windows:
+    name: Demo corpus (Windows)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: demo/generate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "uv==$env:UV_VERSION"
+      - run: uv sync --locked
+      # Byte-for-byte comparison with the committed files is Linux-only (libraries can differ in
+      # their compression); here the tests check that the corpus is valid and deterministic.
+      - run: uv run python -m unittest discover -s tests -v

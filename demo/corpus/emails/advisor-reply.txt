@@ -1,0 +1,13 @@
+From: Dr. Priya Raman <priya.raman@lit.example>
+To: Alex Rivera <alex.rivera@lit.example>
+Date: Sun, Oct 4, 2026 at 9:40 AM
+Subject: Re: Extension request for Assignment 2
+
+Alex,
+
+The extension is approved. Your team may submit Assignment 2 by Monday, October 12 at 11:59 PM with no late penalty. This applies to Assignment 2 only.
+
+Please add a short note on the first page of the specification that says the deadline was extended.
+
+Best,
+Priya Raman
