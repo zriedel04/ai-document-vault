@@ -368,7 +368,7 @@ class EvalSetTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         lines = "\n".join(DOCS["courses/cse485/syllabus.pdf"].page_texts()).splitlines()
         start = lines.index("Grading") + 1
-        items = []
+        items: list[str] = []
         for line in lines[start:]:
             if not line.startswith("- "):
                 if items:
