@@ -1109,3 +1109,73 @@ class TestAFileWithAnotherNameIsNotABlob:
         ):
             assert blobs_module._blob_status(entry) is None
         assert lstat.call_count == 1
+
+
+class TestOneHashIsOneFile:
+    """A restored or hand-edited store can hold ``<hash>.txt`` and ``<hash>.md`` side by side.
+
+    Neither is known to be the imported one, so nothing may pick one, and a delete may not report
+    success while the other stays readable."""
+
+    @staticmethod
+    def two_names(store: BlobStore) -> tuple[Path, Path]:
+        first = put(store, HELLO, "txt")
+        second = first.with_suffix(".md")
+        second.write_bytes(HELLO)
+        second.chmod(0o444)
+        return first, second
+
+    def test_the_lookup_refuses_to_choose(self, store: BlobStore) -> None:
+        self.two_names(store)
+        for lookup in (store.find, store.exists, store.open, store.verify):
+            with pytest.raises(BlobIntegrityError):
+                lookup(HELLO_SHA)
+
+    def test_importing_the_same_bytes_again_does_not_add_a_third(self, store: BlobStore) -> None:
+        first, second = self.two_names(store)
+        with pytest.raises(BlobIntegrityError):
+            store.put(io.BytesIO(HELLO), "pdf")
+        assert sorted(first.parent.iterdir()) == sorted([first, second])
+
+    def test_the_scan_reports_every_name_and_trusts_none(self, store: BlobStore) -> None:
+        first, second = self.two_names(store)
+        other = put(store, b"another document")
+        scan = store.scan()
+        assert [path for _, path in scan.blobs] == [other]
+        assert set(scan.strays) == {first, second}
+        assert HELLO_SHA not in set(store.iter_hashes())
+
+    def test_a_delete_removes_every_name_before_it_says_so(self, store: BlobStore) -> None:
+        first, second = self.two_names(store)
+        assert store.delete(HELLO_SHA) is True
+        assert not first.exists()
+        assert not second.exists()
+        assert not first.parent.exists()  # the emptied folders go too
+        assert store.find(HELLO_SHA) is None
+        assert store.delete(HELLO_SHA) is False
+
+    def test_a_delete_that_stops_halfway_does_not_claim_success(self, store: BlobStore) -> None:
+        removed, stays = sorted(self.two_names(store))  # the delete goes in this order
+        real = Path.unlink
+
+        def unlink(self: Path, *args: object, **kwargs: object) -> None:
+            if self == stays:
+                raise PermissionError("busy")
+            real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(Path, "unlink", unlink), pytest.raises(PermissionError):
+            store.delete(HELLO_SHA)
+        assert not removed.exists()
+        assert stays.exists()
+        assert is_read_only(stays)  # the one that stayed is sealed again
+        assert store.delete(HELLO_SHA) is True  # a later delete finishes the job
+        assert not stays.exists()
+
+    def test_one_real_blob_beside_a_link_with_the_same_hash_is_still_that_blob(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        path = put(store, HELLO, "txt")
+        link(outside_file(tmp_path), path.with_suffix(".md"))
+        assert store.find(HELLO_SHA) == path
+        assert store.delete(HELLO_SHA) is True
+        assert not path.exists()

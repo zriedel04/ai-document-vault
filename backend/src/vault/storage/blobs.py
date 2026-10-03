@@ -219,20 +219,36 @@ class BlobStore:
                 raise BlobIntegrityError(msg)
         return folder
 
-    def find(self, sha256: str) -> Path | None:
-        """The stored file for this hash, whatever extension it was stored under, or None. A link
-        is not a blob, whether it is the file or one of its folders."""
+    def _blobs_for(self, sha256: str) -> list[Path]:
+        """Every real blob stored under this hash, in a fixed order (normally none or one).
+
+        A link or a folder named like the blob is not one. More than one real blob is damage (a
+        restored or hand-edited store holding ``<hash>.txt`` and ``<hash>.md``), and the callers
+        say so instead of choosing one at random.
+        """
         try:
             folder = self._safe_folder(sha256, create=False)
         except BlobIntegrityError:
-            return None
+            return []
         if folder is None:
-            return None
-        for entry in folder.iterdir():
-            match = BLOB_NAME.fullmatch(entry.name)
-            if match and match.group(1) == sha256 and _blob_status(entry) is not None:
-                return entry
-        return None
+            return []
+        return sorted(
+            entry
+            for entry in folder.iterdir()
+            if (match := BLOB_NAME.fullmatch(entry.name))
+            and match.group(1) == sha256
+            and _blob_status(entry) is not None
+        )
+
+    def find(self, sha256: str) -> Path | None:
+        """The stored file for this hash, whatever extension it was stored under, or None. A link
+        is not a blob, whether it is the file or one of its folders. Two real blobs under one hash
+        raise ``BlobIntegrityError``: neither can be trusted to be the one that was imported."""
+        found = self._blobs_for(sha256)
+        if len(found) > 1:
+            msg = "more than one file is stored under this hash"
+            raise BlobIntegrityError(msg)
+        return found[0] if found else None
 
     def exists(self, sha256: str) -> bool:
         return self.find(sha256) is not None
@@ -468,6 +484,7 @@ class BlobStore:
                 if not (HEX_PAIR.fullmatch(second.name) and _is_real_dir(_lstat(second))):
                     strays.append(second)
                     continue
+                found: dict[str, list[Path]] = {}
                 for entry in self._entries(second):
                     match = BLOB_NAME.fullmatch(entry.name)
                     if (
@@ -475,9 +492,15 @@ class BlobStore:
                         and _blob_status(entry) is not None
                         and entry.parent == self.folder_for(match.group(1))
                     ):
-                        blobs.append((match.group(1), entry))
+                        found.setdefault(match.group(1), []).append(entry)
                     else:
                         strays.append(entry)
+                for sha256, entries in found.items():
+                    if len(entries) == 1:
+                        blobs.append((sha256, entries[0]))
+                    else:
+                        # One hash under two names: none of them is known to be the real one.
+                        strays.extend(entries)
         return Scan(tuple(blobs), tuple(strays))
 
     @staticmethod
@@ -493,21 +516,24 @@ class BlobStore:
     def delete(self, sha256: str) -> bool:
         """Permanently remove a blob (the one place a read-only original is ever touched).
 
-        Returns False if there was no such blob. Empty folders it leaves are removed too.
+        Returns False if there was no such blob, and True only when no blob is left under the hash:
+        a damaged store that holds the same hash under two names loses both, so a deleted document
+        cannot stay readable under the other one. Empty folders it leaves are removed too.
         """
         with self._claim(sha256):
-            path = self.find(sha256)
-            if path is None:
+            paths = self._blobs_for(sha256)
+            if not paths:
                 return False
-            _writable(path)
-            try:
-                path.unlink()
-            except BaseException:
-                # A blob that could not be removed must not stay writable under its hash.
-                with suppress(OSError):
-                    _read_only(path)
-                raise
-            for folder in (path.parent, path.parent.parent):
+            for path in paths:
+                _writable(path)
+                try:
+                    path.unlink()
+                except BaseException:
+                    # A blob that could not be removed must not stay writable under its hash.
+                    with suppress(OSError):
+                        _read_only(path)
+                    raise
+            for folder in (paths[0].parent, paths[0].parent.parent):
                 try:
                     folder.rmdir()
                 except OSError:
