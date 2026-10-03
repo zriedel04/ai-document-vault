@@ -246,3 +246,72 @@ jobs:
       # Byte-for-byte comparison with the committed files is Linux-only (libraries can differ in
       # their compression); here the tests check that the corpus is valid and deterministic.
       - run: uv run python -m unittest discover -s tests -v
+
+  launcher-windows:
+    name: Launcher (Windows)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install "uv==$env:UV_VERSION"
+
+      - name: Tests, in Windows PowerShell 5.1 and in PowerShell 7
+        shell: pwsh
+        run: |
+          foreach ($edition in 'powershell', 'pwsh') {
+            Write-Host "== $edition"
+            & $edition -NoProfile -File .\scripts\tests\launcher.tests.ps1
+            if ($LASTEXITCODE -ne 0) { throw "the launcher tests failed in $edition" }
+          }
+      - name: Install
+        shell: pwsh
+        run: |
+          .\vault.ps1 install
+          if ($LASTEXITCODE -ne 0) { throw 'install failed' }
+      - name: Settings for a throwaway vault outside the repository
+        shell: pwsh
+        run: |
+          $vault = Join-Path $env:RUNNER_TEMP 'vault'
+          $config = Join-Path $env:RUNNER_TEMP 'config.toml'
+          Set-Content -LiteralPath $config -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", "port = 18766")
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'no-vault.toml') -Encoding ASCII -Value @("[server]", "port = 18766")
+          "AIVAULT_CONFIG=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run, serve the app and stop, in both PowerShell editions
+        shell: pwsh
+        run: |
+          foreach ($edition in 'powershell', 'pwsh') {
+            Write-Host "== $edition"
+            & $edition -NoProfile -File .\vault.ps1 run -NoBrowser
+            if ($LASTEXITCODE -ne 0) { throw "run failed in $edition" }
+            if (-not (Test-Path (Join-Path $env:RUNNER_TEMP 'vault\local-token'))) { throw 'the server did not create the token file' }
+            python scripts/smoke_test_server.py http://127.0.0.1:18766
+            if ($LASTEXITCODE -ne 0) { throw 'the server did not serve the app' }
+            $again = & $edition -NoProfile -File .\vault.ps1 run -NoBrowser | Out-String
+            if ($again -notmatch 'already running') { throw 'a second run did not notice the first' }
+            & $edition -NoProfile -File .\vault.ps1 stop
+            if ($LASTEXITCODE -ne 0) { throw "stop failed in $edition" }
+            if (Test-Path .run\server.json) { throw 'stop left its record behind' }
+            $up = $true
+            try { Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:18766/api/health -TimeoutSec 2 | Out-Null } catch { $up = $false }
+            if ($up) { throw 'the server still answers after stop' }
+            $idle = & $edition -NoProfile -File .\vault.ps1 stop | Out-String
+            if ($idle -notmatch 'not running') { throw 'stop did not say the server was not running' }
+          }
+      - name: A settings file without a vault folder is refused
+        shell: pwsh
+        run: |
+          $env:AIVAULT_CONFIG = Join-Path $env:RUNNER_TEMP 'no-vault.toml'
+          $text = & powershell -NoProfile -File .\vault.ps1 run -NoBrowser 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) { throw 'run started without a vault folder' }
+          if ($text -notmatch 'no vault folder is set') { throw "unexpected message: $text" }
+          if (Test-Path .run\server.json) { throw 'a server was started anyway' }
