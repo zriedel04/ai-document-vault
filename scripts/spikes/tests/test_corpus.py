@@ -147,6 +147,22 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual(canonical["a/copy.txt"], "a/syllabus.txt")
         self.assertEqual(canonical["a/syllabus.txt"], "a/syllabus.txt")
 
+    def test_a_blank_id_question_or_category_is_refused(self) -> None:
+        # A blank question is encoded as an empty query, and its arbitrary ranking would be scored.
+        for field in ("id", "question", "category"):
+            for blank in ('""', '"  "', r'"\t"', r'"\n"'):  # YAML double quotes: a tab, a newline
+                fields = {"id": "a", "question": "q", "category": "c", field: blank}
+                text = (
+                    "questions:\n- {"
+                    + ", ".join(f"{key}: {value}" for key, value in fields.items())
+                    + ", answerable: false}\n"
+                )
+                with (
+                    self.subTest(field=field, blank=blank),
+                    self.assertRaisesRegex(c.SpikeInputError, "non-empty"),
+                ):
+                    c.load_questions(self.write("blank.yaml", text))
+
     def test_a_document_listed_twice_is_refused(self) -> None:
         # Chunked twice, the copies would take several of the ten ranked places. Spellings that
         # Windows treats as one file count as the same document.

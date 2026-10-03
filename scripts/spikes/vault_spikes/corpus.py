@@ -123,8 +123,10 @@ def load_questions(path: Path) -> list[Question]:
         if not (isinstance(text, str) and isinstance(qid, str) and isinstance(category, str)):
             msg = "a question needs id, question and category as text"
             raise SpikeInputError(msg)
-        if not qid.strip():
-            msg = "a question needs a non-empty id"
+        if not (qid.strip() and text.strip() and category.strip()):
+            # A blank question is encoded as an empty query, whose arbitrary ranking would enter
+            # Recall and MRR; a blank id or category is no name at all.
+            msg = "a question needs a non-empty id, question and category"
             raise SpikeInputError(msg)
         if qid in seen:
             # Scores are kept per id, so a repeated id would silently score two questions with

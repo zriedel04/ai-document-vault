@@ -120,13 +120,16 @@ class RowShape(NamedTuple):
     scores of one set of questions, the two video-memory figures), so half a group is refused.
     ``consistent`` judges what a row's own numbers say about each other, once every value is known
     to be of its kind: a score exists only when questions were scored, a count of outcomes adds
-    up to the count of what was tried. A generated row always satisfies it."""
+    up to the count of what was tried. A generated row always satisfies it. ``packages`` are the
+    versions only this candidate's rows have (the Tesseract program's, which is not a Python
+    package), required in the environment that applies to the row: its own, else the report's."""
 
     candidate: re.Pattern[str]
     required: frozenset[str]
     optional: frozenset[str] = frozenset()
     together: tuple[frozenset[str], ...] = ()
     consistent: Callable[[Mapping[str, Number]], bool] | None = None
+    packages: frozenset[str] = frozenset()
 
     @property
     def allowed(self) -> frozenset[str]:
@@ -457,6 +460,10 @@ class Report:
                 raise OwnValueError(msg)
             if (own := row.get("environment")) is not None:
                 report.rows[-1].environment = _known_environment(own, schema)
+            applies = report.rows[-1].environment or report.environment
+            if not shape.packages <= set(applies.packages):
+                msg = "the report has a row whose environment lacks a version its candidate needs"
+                raise OwnValueError(msg)
         return report
 
     def to_markdown(self) -> str:

@@ -14,6 +14,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
 from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
 from vault_spikes.corpus import (
@@ -81,8 +82,28 @@ def positive_int(text: str) -> int:
     return value
 
 
+class FixedErrorParser(argparse.ArgumentParser):
+    """An argument parser whose errors are fixed text.
+
+    ``argparse`` quotes the rejected token in its message (``unrecognized arguments: <a folder>``,
+    ``invalid positive_int value: '<a folder>'``, ``invalid choice``), and parsing happens before
+    the exception boundary in :func:`main`, so a mistyped command line that contained a private
+    folder or file name would leave it in redirected console output. The usage line, which is
+    written from the definitions in this file, still says what the arguments are.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            "error: the command line is not valid; its arguments are listed above "
+            "(the rejected text is not repeated because it could be a file name)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def parser() -> argparse.ArgumentParser:
-    main = argparse.ArgumentParser(prog="vault_spikes", description=__doc__)
+    main = FixedErrorParser(prog="vault_spikes", description=__doc__)
     commands = main.add_subparsers(dest="command", required=True)
     commands.add_parser("check", help="list which optional libraries and programs are available")
 

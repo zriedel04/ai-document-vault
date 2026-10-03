@@ -137,6 +137,8 @@ ROWS = (
         _OCR_OPTIONAL,
         (_OCR_READ,),
         _read_figures_fit_the_counts,
+        # The program's own version, added by the command line, is part of the evidence.
+        packages=frozenset({"tesseract"}),
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

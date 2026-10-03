@@ -17,9 +17,12 @@ from vault_spikes.report import Environment, Kind, Report, collect_environment
 KNOWN = cli.KNOWN
 
 
-def environment_of(spike: str, **extra: str) -> Environment:
-    """A machine description with the package versions every report of this spike carries."""
-    packages = dict.fromkeys(KNOWN[spike].required_packages, "1.0") | extra
+def environment_of(spike: str, candidate: str = "", **extra: str) -> Environment:
+    """A machine description with the package versions every report of this spike carries, and
+    those of the candidate (the version of the Tesseract program)."""
+    shape = KNOWN[spike].shape_of(candidate) if candidate else None
+    wanted = KNOWN[spike].required_packages | (shape.packages if shape else frozenset())
+    packages = dict.fromkeys(wanted, "1.0") | extra
     return Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, packages)
 
 
@@ -535,6 +538,49 @@ class CliTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.main(["embedding", "--candidate", "nonsense"])
 
+    def test_a_malformed_command_line_never_repeats_what_was_typed(self) -> None:
+        private = "D:\\Clients\\Patient-Name"
+        cases = {
+            "an extra positional": ["check", private],
+            "a path where a number belongs": ["vec", "--dim", private],
+            "a path in a list of numbers": ["vec", "--sizes", "10", private],
+            "a path as the batch size": [
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--batch-size",
+                private,
+            ],
+            "a path as a candidate": ["embedding", "--candidate", private],
+            "a path as the command": [private],
+            "an unknown option": ["ocr", "--engine", "tesseract", f"--{private}", "x"],
+            "an abbreviation that fits two options": ["merge", "--o", private],
+            "a missing value": ["pdf", "--pdfs"],
+            "a path as the engine": ["ocr", "--engine", private, "--images", "x"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(name):
+                out, err = io.StringIO(), io.StringIO()
+                with (
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                    self.assertRaises(SystemExit) as caught,
+                ):
+                    cli.main(argv)
+                self.assertEqual(caught.exception.code, 2)
+                self.assertEqual(out.getvalue(), "")
+                for private_part in ("Clients", "Patient", "D:"):
+                    self.assertNotIn(private_part, err.getvalue())
+                self.assertIn("the command line is not valid", err.getvalue())
+                self.assertIn("usage:", err.getvalue())
+
+    def test_help_still_works(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as caught:
+            cli.main(["--help"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("embedding", out.getvalue())
+
 
 class FakePdfExtractor:
     name = "pypdfium2"
@@ -634,6 +680,33 @@ class DatasetNameTest(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertIn("lacks a package version", err)
 
+    def test_a_tesseract_row_needs_the_version_of_the_program(self) -> None:
+        for candidate, extra, accepted in (
+            ("tesseract", {}, False),
+            ("tesseract", {"tesseract": "5.5.0"}, True),
+            ("rapidocr-ppocrv5", {}, True),
+        ):
+            with self.subTest(candidate=candidate, extra=extra), tempfile.TemporaryDirectory() as f:
+                root = Path(f)
+                report = Report("ocr", *KNOWN["ocr"].text, environment_of("ocr", **extra))
+                report.add(candidate, **complete_row("ocr", candidate))
+                path = str(report.write(root, stem="ocr-x")[0])
+                code, _, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertEqual(code, 0 if accepted else 2, err)
+                if not accepted:
+                    self.assertIn("lacks a version its candidate needs", err)
+
+    def test_a_row_environment_of_its_own_must_carry_the_version_too(self) -> None:
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f)
+            report = Report("ocr", *KNOWN["ocr"].text, environment_of("ocr", "tesseract"))
+            report.add("tesseract", **complete_row("ocr", "tesseract"))
+            report.rows[0].environment = environment_of("ocr")  # its own, without the version
+            path = str(report.write(root, stem="ocr-x")[0])
+            code, _, err = run("merge", path, "--out", str(root / "merged"))
+        self.assertEqual(code, 2)
+        self.assertIn("lacks a version its candidate needs", err)
+
     def test_every_spike_writes_the_baseline_it_requires(self) -> None:
         # What the script records must satisfy the rule that merge applies to it.
         for spike, schema in KNOWN.items():
@@ -653,7 +726,7 @@ class DatasetNameTest(unittest.TestCase):
                 root = Path(folder)
                 row = complete_row(spike, candidate)
                 del row["public_dataset"]
-                report = Report(spike, *KNOWN[spike].text, environment_of(spike))
+                report = Report(spike, *KNOWN[spike].text, environment_of(spike, candidate))
                 report.add(candidate, **row)
                 path = str(report.write(root, stem=f"{spike}-x")[0])
                 code, _, err = run("merge", path, "--out", str(root / "merged"))
@@ -669,7 +742,7 @@ class MergeRowShapeTest(unittest.TestCase):
     def merge(self, spike: str, candidate: str, metrics: dict[str, float]) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            report = Report(spike, *KNOWN[spike].text, environment_of(spike))
+            report = Report(spike, *KNOWN[spike].text, environment_of(spike, candidate))
             report.add(candidate, **metrics)
             path = str(report.write(root, stem=f"{spike}-x")[0])
             code, _, err = run("merge", path, "--out", str(root / "merged"))
