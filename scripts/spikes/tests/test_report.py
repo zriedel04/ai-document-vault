@@ -303,6 +303,23 @@ class OutputTest(unittest.TestCase):
         ):
             self.assertEqual(r.system_description(), "unknown")
 
+    def test_a_gpu_found_after_the_run_is_stored_like_one_found_before_it(self) -> None:
+        # The CLI learns the card after the measurement, so a name with a word the list lacks must
+        # become ``unknown``, not an error that throws the measurement away.
+        env = make().environment
+        for name, expected in (
+            ("NVIDIA GeForce RTX 3080", "NVIDIA GeForce RTX 3080"),
+            ("NVIDIA RTX 4000 Ada Generation", "unknown"),
+            ("Patient diagnosis confidential", "unknown"),
+            ("RTX 3080\n", "RTX 3080"),  # the line break is stripped, not kept
+        ):
+            with self.subTest(name=name):
+                added = r.with_gpu(env, name)
+                self.assertEqual(added.gpu, expected)
+                self.assertEqual(r.Environment.from_json(added.to_json()), added)
+        self.assertIsNone(r.with_gpu(env, None).gpu)
+        self.assertEqual(env.gpu, make().environment.gpu)  # the original is untouched
+
     def test_a_cpu_or_gpu_name_the_vocabulary_lacks_is_stored_as_unknown(self) -> None:
         with mock.patch("platform.processor", return_value="Acme Quantum Wibble 9"):
             env = r.collect_environment(gpu="Acme Frobnicator")

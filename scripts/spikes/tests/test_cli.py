@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -87,6 +88,63 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("Clients", text)
             self.assertNotIn(folder, text)
         self.assertIn("report: ocr-rapidocr-ppocrv5.json and ocr-rapidocr-ppocrv5.md", out)
+
+    def test_an_embedding_run_keeps_its_measurement_on_a_card_the_vocabulary_lacks(self) -> None:
+        class Embedder:
+            name = "qwen3-embedding-0.6b-cpu"
+
+            def load(self) -> None:
+                pass
+
+            def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+            def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "corpus").mkdir()
+            (root / "corpus" / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
+            (root / "corpus" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "documents": [
+                            {"path": "a.txt", "kind": "text", "pages": None, "needs_ocr": False}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "questions.yaml").write_text(
+                "questions:\n- {id: q1, question: q, category: lookup, answerable: true,"
+                " sources: [{path: a.txt, quote: beta}]}\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(adapters, "SentenceTransformerEmbedder", lambda *_a: Embedder()),
+                mock.patch.object(
+                    adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"
+                ),
+            ):
+                code, _, err = run(
+                    "embedding",
+                    "--candidate",
+                    "qwen3-embedding-0.6b",
+                    "--corpus",
+                    str(root / "corpus"),
+                    "--questions",
+                    str(root / "questions.yaml"),
+                    "--out",
+                    str(root / "out"),
+                )
+            self.assertEqual(code, 0, err)
+            written = json.loads(
+                (root / "out" / "embedding-qwen3-embedding-0.6b-cpu.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(written["environment"]["gpu"], "unknown")
 
     def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
         # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and

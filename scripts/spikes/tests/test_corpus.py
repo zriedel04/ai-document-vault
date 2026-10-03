@@ -461,7 +461,32 @@ class RetrievalScoreTest(unittest.TestCase):
     def test_sources_no_chunk_holds_are_counted(self) -> None:
         q = question((src("a", "alpha"), src("b", "beta"), src("c", "gamma")))
         chunks = [chunk("a", "alpha here"), chunk("c", "something else")]
-        self.assertEqual(rv.sources_missing_from([q], chunks, {}), 2)
+        readable = frozenset({"a", "b", "c"})
+        self.assertEqual(rv.sources_missing_from([q], chunks, {}, readable), 2)
+
+    def test_a_source_in_a_document_the_run_could_not_read_is_not_counted_as_missing(self) -> None:
+        # That is the reader's limit (a scan), not a mistyped quote or a cut boundary.
+        q = question((src("scan", "alpha"),), (src("a", "alpha"),))
+        chunks = [chunk("a", "alpha here")]
+        self.assertEqual(rv.sources_missing_from([q], chunks, {}, frozenset({"a"})), 0)
+        self.assertEqual(rv.sources_missing_from([q], chunks, {}, frozenset({"a", "scan"})), 1)
+
+    def test_a_question_can_be_scored_when_all_sources_or_a_lone_sources_alternative_is_readable(
+        self,
+    ) -> None:
+        one = question((src("scan"),), (src("alt"),))
+        self.assertTrue(rv.can_be_scored(one, frozenset({"scan"})))  # the primary is enough
+        self.assertTrue(rv.can_be_scored(one, frozenset({"alt"})))  # so is the alternative
+        self.assertFalse(rv.can_be_scored(one, frozenset({"other"})))
+        two = question((src("a"), src("scan")), (src("alt"),))
+        self.assertTrue(rv.can_be_scored(two, frozenset({"a", "scan"})))
+        # With two required passages an alternative does not stand in for the unreadable one,
+        # as score_question gives it that power only for a lone required passage.
+        self.assertFalse(rv.can_be_scored(two, frozenset({"a", "alt"})))
+        self.assertFalse(rv.can_be_scored(question((), (src("alt"),)), frozenset({"alt"})))
+        self.assertFalse(
+            rv.can_be_scored(question((src("a"),), answerable=False), frozenset({"a"}))
+        )
 
     def test_ranking_by_similarity(self) -> None:
         vectors = [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]

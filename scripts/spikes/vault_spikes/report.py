@@ -229,6 +229,16 @@ def with_package(env: Environment, name: str, version: str) -> Environment:
     return replace(env, packages={**env.packages, name: version})
 
 
+def with_gpu(env: Environment, gpu: str | None) -> Environment:
+    """The environment with the GPU found after the run, in the vocabulary of ``machine_text``.
+
+    ``collect_environment`` does the same for a name given up front. A card whose name has a word
+    the list lacks (``NVIDIA RTX 4000 Ada Generation``) is stored as ``unknown`` rather than
+    refused here, because this runs after the measurement and a refusal would throw it away.
+    """
+    return replace(env, gpu=None if gpu is None else machine_text(gpu))
+
+
 def total_ram_gib() -> float | None:
     """Installed memory in GiB, or None if the OS will not say."""
     try:

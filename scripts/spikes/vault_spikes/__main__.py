@@ -13,7 +13,6 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 
 from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
@@ -25,7 +24,7 @@ from vault_spikes.corpus import (
     overlap_for,
 )
 from vault_spikes.errors import OwnMessage
-from vault_spikes.report import Report, SpikeSchema, SpikeText, merge, with_package
+from vault_spikes.report import Report, SpikeSchema, SpikeText, merge, with_gpu, with_package
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
 from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
 from vault_spikes.spike_pdf import run_pdf_spike
@@ -217,7 +216,7 @@ def run(args: argparse.Namespace) -> int:
             vault_chunks=args.vault_chunks,
             public_dataset=is_public_dataset(args.corpus, args.questions),
         )
-        report.environment = replace(report.environment, gpu=adapters.gpu_name())
+        report.environment = with_gpu(report.environment, adapters.gpu_name())
         show(report, report.write(args.out, stem=f"embedding-{embedder.name}"))
         return 0
 

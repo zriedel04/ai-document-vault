@@ -132,19 +132,40 @@ def score_all(
     )
 
 
+def can_be_scored(question: Question, readable: frozenset[str]) -> bool:
+    """Can this question be ranked at all, given the documents the run could read?
+
+    Every required source must be readable. The exception follows ``score_question``: a question
+    with one required passage is also answered in full by any of its alternatives, so it can be
+    scored when the primary document is unreadable (a scan, say) but an alternative one is not.
+    A question that needs several passages is never saved by an alternative.
+    """
+    if not (question.answerable and question.sources):
+        return False
+    if set(question.source_paths) <= readable:
+        return True
+    return len(question.sources) == 1 and any(a.path in readable for a in question.alternatives)
+
+
 def sources_missing_from(
-    questions: Sequence[Question], chunks: Sequence[Chunk], canonical: Mapping[str, str]
+    questions: Sequence[Question],
+    chunks: Sequence[Chunk],
+    canonical: Mapping[str, str],
+    readable: frozenset[str],
 ) -> int:
-    """How many required passages no chunk of the corpus holds at all.
+    """How many required passages of a readable document no chunk of the corpus holds at all.
 
     Such a passage can never be retrieved, whatever the model does (a quote that is mistyped, text
     the reader cannot extract, a quote longer than the chunk overlap that a boundary cut), so the
-    count is reported next to the scores instead of silently lowering them.
+    count is reported next to the scores instead of silently lowering them. A passage in a
+    document the run could not read is not counted: that is the reader's limit, already visible in
+    the skipped documents, and the question is scored by an alternative or left out.
     """
     return sum(
         1
         for q in questions
         for source in q.sources
+        if source.path in readable
         if not any(covers(chunk, source, canonical) for chunk in chunks)
     )
 

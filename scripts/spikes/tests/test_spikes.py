@@ -305,6 +305,27 @@ class EmbeddingTest(unittest.TestCase):
         self.assertEqual(metrics["chunks_per_second"], 2.0)
         self.assertEqual(metrics["hours_for_vault_of_chunks"], 1.0)
 
+    def test_a_question_whose_scan_has_a_readable_alternative_is_still_scored(self) -> None:
+        inputs = corpus_inputs()
+        saved = c.Question(
+            "q6",
+            "Who is the instructor?",
+            "lookup",
+            True,
+            (c.Source("scan.pdf", "Dr. Example is the instructor"),),
+            (c.Source("a.txt", "Dr. Example"),),
+        )
+        inputs = emb.EmbeddingInputs(inputs.corpus, inputs.documents, [saved])
+        metrics = (
+            emb.run_embedding_spike(FakeEmbedder(), inputs, environment=ENV, clock=Clock())
+            .rows[0]
+            .metrics
+        )
+        self.assertEqual(metrics["questions_scored"], 1)
+        self.assertEqual(metrics["questions_left_out"], 0)
+        self.assertEqual(metrics["recall_at_10"], 1.0)  # found through the alternative
+        self.assertEqual(metrics["sources_not_in_any_chunk"], 0)  # the scan is not a typo
+
     def test_the_right_document_with_the_wrong_passage_does_not_score(self) -> None:
         inputs = corpus_inputs()
         wrong = c.Question(

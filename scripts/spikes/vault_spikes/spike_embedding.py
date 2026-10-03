@@ -18,7 +18,13 @@ from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Questi
 from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
 from vault_spikes.report import Environment, Kind, Report, collect_environment
-from vault_spikes.retrieval import K, rank_by_similarity, score_all, sources_missing_from
+from vault_spikes.retrieval import (
+    K,
+    can_be_scored,
+    rank_by_similarity,
+    score_all,
+    sources_missing_from,
+)
 
 TITLE = "Embedding models on this PC"
 QUESTION = (
@@ -136,11 +142,7 @@ def run_embedding_spike(
     chunks_per_second = per_second(len(texts), embed_seconds)
 
     readable = corpus.readable
-    scored = [
-        q
-        for q in inputs.questions
-        if q.answerable and q.source_paths and set(q.source_paths) <= readable
-    ]
+    scored = [q for q in inputs.questions if can_be_scored(q, readable)]
     canonical = canonical_paths(inputs.documents)
     ranked: dict[str, list[Chunk]] = {}
     if scored:
@@ -161,7 +163,9 @@ def run_embedding_spike(
         "questions_scored": scores.questions if scores else 0,
         "questions_left_out": len([q for q in inputs.questions if q.answerable])
         - (scores.questions if scores else 0),
-        "sources_not_in_any_chunk": sources_missing_from(scored, corpus.chunks, canonical),
+        "sources_not_in_any_chunk": sources_missing_from(
+            scored, corpus.chunks, canonical, readable
+        ),
         "public_dataset": public_dataset,
     }
     if scores:
