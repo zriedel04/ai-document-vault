@@ -469,7 +469,24 @@ class RetrievalScoreTest(unittest.TestCase):
         q = question((src("scan", "alpha"),), (src("a", "alpha"),))
         chunks = [chunk("a", "alpha here")]
         self.assertEqual(rv.sources_missing_from([q], chunks, {}, frozenset({"a"})), 0)
-        self.assertEqual(rv.sources_missing_from([q], chunks, {}, frozenset({"a", "scan"})), 1)
+        # A readable primary that no chunk holds is not missing while an alternative is held:
+        # the scorer gives the alternative full credit.
+        self.assertEqual(rv.sources_missing_from([q], chunks, {}, frozenset({"a", "scan"})), 0)
+
+    def test_a_lone_passage_is_missing_only_when_no_acceptable_passage_is_held(self) -> None:
+        chunks = [chunk("a", "alpha here")]
+        readable = frozenset({"a", "b", "scan"})
+        mistyped_alt = question((src("scan", "alpha"),), (src("a", "alpha-typo"),))
+        self.assertEqual(rv.sources_missing_from([mistyped_alt], chunks, {}, readable), 1)
+        both_missing = question((src("b", "beta"),), (src("a", "alpha-typo"),))
+        self.assertEqual(rv.sources_missing_from([both_missing], chunks, {}, readable), 1)
+        held_alt = question((src("b", "beta"),), (src("a", "alpha"),))
+        self.assertEqual(rv.sources_missing_from([held_alt], chunks, {}, readable), 0)
+        # Nothing readable to hold: the reader's limit, not a data problem.
+        self.assertEqual(rv.sources_missing_from([mistyped_alt], chunks, {}, frozenset()), 0)
+        # Several required passages are judged one by one; an alternative stands in for none.
+        two = question((src("a", "alpha"), src("b", "beta")), (src("a", "alpha"),))
+        self.assertEqual(rv.sources_missing_from([two], chunks, {}, readable), 1)
 
     def test_a_question_can_be_scored_when_all_sources_or_a_lone_sources_alternative_is_readable(
         self,

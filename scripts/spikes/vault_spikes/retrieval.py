@@ -153,21 +153,34 @@ def sources_missing_from(
     canonical: Mapping[str, str],
     readable: frozenset[str],
 ) -> int:
-    """How many required passages of a readable document no chunk of the corpus holds at all.
+    """How many required passages that a readable document should hold no chunk holds at all.
 
     Such a passage can never be retrieved, whatever the model does (a quote that is mistyped, text
     the reader cannot extract, a quote longer than the chunk overlap that a boundary cut), so the
     count is reported next to the scores instead of silently lowering them. A passage in a
     document the run could not read is not counted: that is the reader's limit, already visible in
-    the skipped documents, and the question is scored by an alternative or left out.
+    the skipped documents.
+
+    A question with one required passage is answered in full by any of its alternatives (see
+    ``score_question``), so the passage counts as missing only if none of them, the required one
+    or an alternative, is held by a chunk. That also covers a question scored through an
+    alternative because the primary document is unreadable: a mistyped alternative is the only
+    passage that could have been found, and is counted. A question with several required passages
+    is judged passage by passage.
     """
-    return sum(
-        1
-        for q in questions
-        for source in q.sources
-        if source.path in readable
-        if not any(covers(chunk, source, canonical) for chunk in chunks)
-    )
+
+    def held(passage: Source) -> bool:
+        return any(covers(chunk, passage, canonical) for chunk in chunks)
+
+    missing = 0
+    for q in questions:
+        if len(q.sources) == 1:
+            acceptable = [p for p in (*q.sources, *q.alternatives) if p.path in readable]
+            if acceptable and not any(held(p) for p in acceptable):
+                missing += 1
+        else:
+            missing += sum(1 for p in q.sources if p.path in readable and not held(p))
+    return missing
 
 
 def rank_by_similarity(

@@ -49,8 +49,9 @@ METHOD = (
     "passage. Hit@1 is scored by document and only for the questions the eval file marks as "
     "find-the-document questions (`find_document: true`, evidence in one document): whether the "
     "top chunk comes from a document that holds it. Required passages that "
-    "no chunk holds at all are counted separately. Questions whose "
-    "documents the script cannot read (scans, pictures) are left out and counted. The "
+    "no chunk holds at all are counted separately. Documents the script cannot "
+    "read (scans, pictures, damaged files) are counted as `documents_skipped`, and the questions "
+    "that need them are left out and counted. The "
     "`public_dataset` metric is true only when the corpus and the questions are the repository's "
     "public synthetic ones (`demo/corpus/`, `eval/public/`); otherwise they are the owner's own "
     "files, kept outside the repository, and only numbers about them are reported."
@@ -67,6 +68,7 @@ METRICS: dict[str, Kind] = {
     "chunks_per_second": Kind.AMOUNT,
     "hours_for_vault_of_chunks": Kind.AMOUNT,
     "vault_chunks_assumed": Kind.COUNT,
+    "documents_skipped": Kind.COUNT,
     "questions_scored": Kind.COUNT,
     "questions_left_out": Kind.COUNT,
     "sources_not_in_any_chunk": Kind.COUNT,
@@ -160,6 +162,7 @@ def run_embedding_spike(
         "chunks_per_second": chunks_per_second,
         "hours_for_vault_of_chunks": vault_chunks / chunks_per_second / 3600,
         "vault_chunks_assumed": vault_chunks,
+        "documents_skipped": corpus.skipped,
         "questions_scored": scores.questions if scores else 0,
         "questions_left_out": len([q for q in inputs.questions if q.answerable])
         - (scores.questions if scores else 0),

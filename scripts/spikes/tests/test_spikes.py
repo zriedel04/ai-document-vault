@@ -305,6 +305,7 @@ class EmbeddingTest(unittest.TestCase):
         self.assertEqual(metrics["questions_scored"], 2)
         self.assertEqual(metrics["questions_left_out"], 1)  # the scan question
         self.assertEqual(metrics["sources_not_in_any_chunk"], 0)
+        self.assertEqual(metrics["documents_skipped"], 1)  # the scan, so scores can be read fairly
         self.assertEqual(metrics["chunks"], 2)
         self.assertEqual(metrics["chunk_overlap_chars"], 100)  # the default; set by the caller
         self.assertEqual(metrics["dimensions"], 3)
@@ -333,6 +334,30 @@ class EmbeddingTest(unittest.TestCase):
         self.assertEqual(metrics["questions_left_out"], 0)
         self.assertEqual(metrics["recall_at_10"], 1.0)  # found through the alternative
         self.assertEqual(metrics["sources_not_in_any_chunk"], 0)  # the scan is not a typo
+
+    def test_an_alternative_that_no_chunk_holds_is_counted_when_it_is_what_scores_the_question(
+        self,
+    ) -> None:
+        # The scan is unreadable, so only the alternative could be found; it is mistyped, so the
+        # question is an unavoidable miss that must show in the report and not only in the score.
+        inputs = corpus_inputs()
+        mistyped = c.Question(
+            "q7",
+            "Who is the instructor?",
+            "lookup",
+            True,
+            (c.Source("scan.pdf", "Dr. Example is the instructor"),),
+            (c.Source("a.txt", "Dr. Exmaple"),),
+        )
+        inputs = emb.EmbeddingInputs(inputs.corpus, inputs.documents, [mistyped])
+        metrics = (
+            emb.run_embedding_spike(FakeEmbedder(), inputs, environment=ENV, clock=Clock())
+            .rows[0]
+            .metrics
+        )
+        self.assertEqual(metrics["questions_scored"], 1)
+        self.assertEqual(metrics["recall_at_10"], 0.0)
+        self.assertEqual(metrics["sources_not_in_any_chunk"], 1)
 
     def test_the_right_document_with_the_wrong_passage_does_not_score(self) -> None:
         inputs = corpus_inputs()
