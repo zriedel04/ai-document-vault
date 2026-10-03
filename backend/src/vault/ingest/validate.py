@@ -190,17 +190,21 @@ def _decodes_as_text(data: bytes, encoding: str, *, complete: bool) -> bool:
     return controls <= MAX_BINARY_SHARE * len(text)
 
 
-def _zip64_claim(stream: BinaryIO, locator_start: int) -> tuple[int, int] | None:
-    """The entry count and directory size the ZIP64 records claim, None if there is no ZIP64
-    locator. Raises ``BadZipFile`` if there is a locator that does not lead to a ZIP64 end record.
+ZIP_ENTRIES_SENTINEL: Final = 0xFFFF  # "see the ZIP64 record" in the plain record
+ZIP_SIZE_SENTINEL: Final = 0xFFFFFFFF
 
-    This follows the locator the way ``zipfile`` does: the record is where the locator says it is,
-    and a record of the fixed 56 bytes right before the locator is used only when the locator's
-    offset does not lead to one. A ZIP64 "extensible data sector" between the record and the
-    locator is therefore found, and a crafted archive cannot put small counts in the classic record
-    and the real ones where a fixed-offset check does not look. A locator without a record is
-    refused here (the same error), because ``zipfile`` would refuse it only after reading the
-    central directory.
+
+def _zip64_claims(stream: BinaryIO, locator_start: int) -> list[tuple[int, int]] | None:
+    """The (entries, directory bytes) claim of every ZIP64 end record that a supported ``zipfile``
+    may read, None if there is no ZIP64 locator. Raises ``BadZipFile`` if there is a locator and
+    no record at any of the places.
+
+    Python releases disagree about where the record is. Newer ones follow the offset in the
+    locator (so an extensible data sector between the record and the locator is found) and fall
+    back to the fixed 56 bytes before the locator; some patch releases of 3.12, including the
+    one on the Windows runner, read only those fixed 56 bytes. A file can hold a small record in
+    one place and a large one in the other, so both places are read and both claims are judged,
+    whichever one the installed ``zipfile`` ends up using.
     """
     if locator_start < 0:
         return None
@@ -208,31 +212,33 @@ def _zip64_claim(stream: BinaryIO, locator_start: int) -> tuple[int, int] | None
     locator = stream.read(ZIP64_LOCATOR_SIZE)
     if len(locator) != ZIP64_LOCATOR_SIZE or locator[:4] != ZIP64_LOCATOR_SIGNATURE:
         return None
-    _, disk, record_start, disks = struct.unpack("<4sLQL", locator)
+    _, disk, named_start, disks = struct.unpack("<4sLQL", locator)
     if disk != 0 or disks > 1:
         raise zipfile.BadZipFile(MALFORMED_ZIP64)
     fixed_start = locator_start - ZIP64_END_SIZE
-    if fixed_start < 0 or record_start > fixed_start:
-        raise zipfile.BadZipFile(MALFORMED_ZIP64)
-    stream.seek(record_start)
-    wide = stream.read(ZIP64_END_SIZE)
-    if not wide.startswith(ZIP64_END_SIGNATURE) and record_start != fixed_start:
-        stream.seek(fixed_start)
+    places = {fixed_start} if fixed_start >= 0 else set()
+    if named_start <= fixed_start:
+        places.add(named_start)
+    claims: list[tuple[int, int]] = []
+    for place in sorted(places):
+        stream.seek(place)
         wide = stream.read(ZIP64_END_SIZE)
-    if len(wide) != ZIP64_END_SIZE or not wide.startswith(ZIP64_END_SIGNATURE):
+        if len(wide) == ZIP64_END_SIZE and wide.startswith(ZIP64_END_SIGNATURE):
+            fields = struct.unpack("<4sQ2H2L4Q", wide)
+            claims.append((fields[7], fields[8]))  # the total entries and the directory size
+    if not claims:
         raise zipfile.BadZipFile(MALFORMED_ZIP64)
-    fields = struct.unpack("<4sQ2H2L4Q", wide)
-    return fields[8], fields[9]
+    return claims
 
 
-def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
-    """Read only the end-of-directory record and refuse a zip that claims a directory too large to
-    open. None if the claim is within the limits.
+def _directory_claims(path: Path, size: int) -> list[tuple[int, int]] | Reason:
+    """Read only the end records of a zip and return every (entries, directory bytes) claim a
+    supported ``zipfile`` might act on, or why the archive cannot be judged.
 
-    This finds the record the way ``zipfile`` does (the last 22 bytes if they are a record with no
-    comment, else the last signature in the final 64 KiB), so it judges the record ``zipfile`` would
-    use, and follows the ZIP64 records the same way. ``zipfile`` reads ``size_cd`` bytes and builds
-    an object for every record in them, so ``size_cd`` is what is bounded.
+    The end record is found the way ``zipfile`` does (the last 22 bytes if they are a record with
+    no comment, else the last signature in the final 64 KiB). The plain record is a claim too,
+    except for a field that holds the "see ZIP64" marker when a ZIP64 record exists: some releases
+    use the plain record even where a ZIP64 locator is present.
     """
     with path.open("rb") as stream:
         if size < ZIP_END_SIZE:
@@ -253,12 +259,29 @@ def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
                 return Reason.UNREADABLE_ARCHIVE
         _, _, _, _, entries, directory_bytes, _, _ = struct.unpack("<4s4H2LH", record)
         try:
-            wide = _zip64_claim(stream, start - ZIP64_LOCATOR_SIZE)
+            wide = _zip64_claims(stream, start - ZIP64_LOCATOR_SIZE)
         except zipfile.BadZipFile:
             return Reason.UNREADABLE_ARCHIVE
-        if wide is not None:
-            entries, directory_bytes = wide
-    if entries > limits.max_zip_entries or directory_bytes > limits.max_zip_directory_bytes:
+    if wide is None:
+        return [(entries, directory_bytes)]
+    plain = (
+        0 if entries == ZIP_ENTRIES_SENTINEL else entries,
+        0 if directory_bytes == ZIP_SIZE_SENTINEL else directory_bytes,
+    )
+    return [plain, *wide]
+
+
+def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
+    """Refuse a zip whose end records claim a directory too large to open. None if every claim is
+    within the limits. ``zipfile`` reads ``size_cd`` bytes and builds an object for every record in
+    them, so the directory size is what is bounded, and the entry count with it."""
+    claims = _directory_claims(path, size)
+    if isinstance(claims, Reason):
+        return claims
+    if any(
+        entries > limits.max_zip_entries or directory_bytes > limits.max_zip_directory_bytes
+        for entries, directory_bytes in claims
+    ):
         return Reason.UNSAFE_ARCHIVE
     return None
 

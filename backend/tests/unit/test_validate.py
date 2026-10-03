@@ -15,6 +15,8 @@ from vault.ingest.validate import (
     Kind,
     Limits,
     Reason,
+    _directory_claims,
+    _directory_size_ok,
     sniff,
     validate_file,
 )
@@ -386,6 +388,122 @@ class TestZipDirectoryIsBoundedBeforeItIsOpened:
             assert validate_file(path).reason is Reason.UNREADABLE_ARCHIVE
         else:
             assert validate_file(path).ok
+
+    @staticmethod
+    def two_records(
+        tmp_path: Path,
+        *,
+        named: tuple[int, int] | None = None,
+        fixed: tuple[int, int] | None = None,
+        gap: int = 10,
+    ) -> Path:
+        """A real DOCX with two ZIP64 end records: one where the locator names it, and one in the
+        fixed 56 bytes before the locator, with ``gap`` bytes between them. Newer ``zipfile``
+        releases read the first (and need it to be consistent with the gap), some 3.12 patch
+        releases read only the second."""
+        real = TestZipDirectoryIsBoundedBeforeItIsOpened.docx(tmp_path).read_bytes()
+        end = len(real) - ZIP_END
+        _, _, _, _, entries, directory, offset, _ = struct.unpack("<4s4H2LH", real[end:])
+        first = named or (entries, directory)
+        second = fixed or (entries, directory)
+        first_record = struct.pack(
+            "<4sQ2H2L4Q",
+            b"PK\x06\x06",
+            44 + 56 + gap,
+            45,
+            45,
+            0,
+            0,
+            first[0],
+            first[0],
+            first[1],
+            offset,
+        )
+        # The size field of the first record must be 44 + the bytes after the record's 56.
+        second_record = struct.pack(
+            "<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, second[0], second[0], second[1], offset
+        )
+        locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, end, 1)
+        plain = struct.pack(
+            "<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+        )
+        path = tmp_path / "two.docx"
+        path.write_bytes(real[:end] + first_record + b"G" * gap + second_record + locator + plain)
+        return path
+
+    @staticmethod
+    def claim_used_by_this_zipfile(path: Path) -> tuple[int, int] | None:
+        """(entries, directory bytes) as this ``zipfile`` reads them; None if it refuses."""
+        with path.open("rb") as stream:
+            try:
+                record = zipfile._EndRecData(stream)  # type: ignore[attr-defined]
+            except (zipfile.BadZipFile, OSError):
+                return None
+        return record[zipfile._ECD_ENTRIES_TOTAL], record[zipfile._ECD_SIZE]  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize(
+        ("named", "fixed"),
+        [
+            (None, None),  # both honest
+            (None, (4_000_000, 190 << 20)),  # newer zipfile reads the first, 3.12.10 the second
+            ((4_000_000, 190 << 20), None),  # and the other way round
+            ((4_000_000, 190 << 20), (4_000_000, 190 << 20)),
+        ],
+    )
+    def test_every_record_a_supported_zipfile_may_read_is_bounded(
+        self, tmp_path: Path, named: tuple[int, int] | None, fixed: tuple[int, int] | None
+    ) -> None:
+        path = self.two_records(tmp_path, named=named, fixed=fixed)
+        claims = _directory_claims(path, path.stat().st_size)
+        assert not isinstance(claims, Reason)
+        used = self.claim_used_by_this_zipfile(path)
+        if used is not None:
+            assert used in claims  # whichever record this Python reads is one that was judged
+        if named is None and fixed is None:
+            # Honest records: within the limits, so the verdict is whatever the library makes of
+            # the file (older patch releases cannot read the gap between the records).
+            try:
+                with zipfile.ZipFile(path):
+                    pass
+            except zipfile.BadZipFile:
+                assert validate_file(path).reason is Reason.UNREADABLE_ARCHIVE
+            else:
+                assert validate_file(path).ok
+        else:
+            with self.never_opened():
+                assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+
+    def test_the_claim_this_python_uses_is_always_among_those_judged(self, tmp_path: Path) -> None:
+        # Across the layouts above and the sector layout: whatever the installed zipfile reads, the
+        # preflight has looked at it. This is the property that differs between Python releases.
+        for layout in (
+            self.two_records(tmp_path),
+            self.zip64_with_sector(tmp_path, claim=(10, 4000)),
+            self.zip64_with_sector(tmp_path, sector=0),
+            self.docx(tmp_path),
+        ):
+            claims = _directory_claims(layout, layout.stat().st_size)
+            assert not isinstance(claims, Reason)
+            used = self.claim_used_by_this_zipfile(layout)
+            assert used is None or used in claims, layout
+
+    def test_the_zip64_claim_is_the_entry_count_and_the_directory_size_not_the_offset(
+        self, tmp_path: Path
+    ) -> None:
+        # Entries 7, directory 1234 bytes, directory starting 50 MB into the file: only the first
+        # two are claims. (The offset once stood in for the size, which refused a large honest
+        # archive and let a large claimed directory through behind a small offset.)
+        body = b"PK\x03\x04" + b"\x00" * 100
+        wide = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, 7, 7, 1234, 50_000_000)
+        locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, len(body), 1)
+        plain = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 7, 7, 1234, 0xFFFFFFFF, 0)
+        path = write(tmp_path, "a.docx", body + wide + locator + plain)
+        claims = _directory_claims(path, path.stat().st_size)
+        assert claims == [(7, 1234), (7, 1234)]
+        small = Limits(max_zip_entries=10, max_zip_directory_bytes=2000)
+        assert _directory_size_ok(path, path.stat().st_size, small) is None
+        tight = Limits(max_zip_entries=10, max_zip_directory_bytes=1000)
+        assert _directory_size_ok(path, path.stat().st_size, tight) is Reason.UNSAFE_ARCHIVE
 
     def test_the_record_behind_an_extensible_data_sector_is_the_one_judged(
         self, tmp_path: Path
