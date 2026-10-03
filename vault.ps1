@@ -149,9 +149,17 @@ function Get-StartStamp {
 }
 
 function Write-Record {
-    param([System.Diagnostics.Process]$Process)
+    <# Remember the server: its process id and start time, and the settings it was started with, so
+       a later "run" talks to the server that is up and not to whatever the settings say now. #>
+    param([System.Diagnostics.Process]$Process, [object]$Facts)
     New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
-    $record = [ordered]@{ pid = $Process.Id; started = (Get-StartStamp $Process) }
+    $record = [ordered]@{
+        pid     = $Process.Id
+        started = (Get-StartStamp $Process)
+        host    = [string]$Facts.host
+        port    = [int]$Facts.port
+        vault   = [string]$Facts.vault
+    }
     $record | ConvertTo-Json | Set-Content -LiteralPath $script:RecordFile -Encoding ASCII
 }
 
@@ -160,14 +168,35 @@ function Remove-Record {
 }
 
 function Get-RunningServer {
-    <# The process the last "run" started, or $null. The record holds the process id and its start
-       time, so a process that only reuses the number is never taken for the server. A record that
-       cannot be read, or that names a process that has ended, is removed. #>
+    <# The server the last "run" started, or $null: its Process and the settings it was started with
+       (Host, Port and Vault, each $null if the record lacks it). The record holds the process id
+       and its start time, so a process that only reuses the number is never taken for the server.
+       A record that cannot be read, or that names a process that has ended, is removed. #>
     if (-not (Test-Path -LiteralPath $script:RecordFile -PathType Leaf)) { return $null }
     try {
         $record = Get-Content -LiteralPath $script:RecordFile -Raw | ConvertFrom-Json
         $process = Get-Process -Id ([int]$record.pid) -ErrorAction Stop
-        if ((Get-StartStamp $process) -eq [int64]$record.started) { return $process }
+        if ((Get-StartStamp $process) -eq [int64]$record.started) {
+            $names = @($record.PSObject.Properties.Name)
+            $recordedHost = $null
+            $recordedPort = $null
+            $recordedVault = $null
+            if (($names -contains 'host') -and ($record.host -is [string]) -and $record.host) {
+                $recordedHost = $record.host
+            }
+            if (($names -contains 'port') -and ($record.port -is [ValueType]) -and ($record.port -isnot [bool]) -and ([int]$record.port -ge 1) -and ([int]$record.port -le 65535)) {
+                $recordedPort = [int]$record.port
+            }
+            if (($names -contains 'vault') -and ($record.vault -is [string]) -and $record.vault) {
+                $recordedVault = $record.vault
+            }
+            return [pscustomobject]@{
+                Process = $process
+                Host    = $recordedHost
+                Port    = $recordedPort
+                Vault   = $recordedVault
+            }
+        }
     }
     catch {
         # unreadable, or no such process: stale either way
@@ -178,14 +207,16 @@ function Get-RunningServer {
 
 function Start-Backend {
     <# Start the server hidden, remember it and wait until it answers. #>
-    param([Parameter(Mandatory)][string]$HostName, [Parameter(Mandatory)][int]$Port)
+    param([Parameter(Mandatory)][object]$Facts)
+    $HostName = [string]$Facts.host
+    $Port = [int]$Facts.port
     $python = Get-BackendPython
     New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
     $process = Start-Process -FilePath $python -ArgumentList @('-m', 'vault') `
         -WorkingDirectory $script:BackendDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $script:RunDir 'server.out.log') `
         -RedirectStandardError (Join-Path $script:RunDir 'server.err.log')
-    Write-Record $process
+    Write-Record $process $Facts
     $url = "http://${HostName}:${Port}/api/health"
     if ($HostName.Contains(':')) { $url = "http://[${HostName}]:${Port}/api/health" }
     $deadline = (Get-Date).AddSeconds(60)
@@ -238,13 +269,27 @@ function Invoke-Install {
 }
 
 function Invoke-Run {
-    $facts = Get-VaultFacts
     $running = Get-RunningServer
     if ($running) {
+        # Talk to the server that is up, whatever the settings say now.
+        if (-not ($running.Host -and $running.Port -and $running.Vault)) {
+            throw 'the running server was started by an older launcher and its settings are not recorded; stop it with .\vault.ps1 stop and run again'
+        }
+        $facts = [pscustomobject]@{ host = $running.Host; port = $running.Port; vault = $running.Vault }
         Write-Host 'The server is already running.'
+        try {
+            $now = Get-VaultFacts
+            if (($now.host -ne $facts.host) -or ($now.port -ne $facts.port) -or ($now.vault -ne $facts.vault)) {
+                Write-Host 'The settings have changed since it started. Stop it with .\vault.ps1 stop and run again to use them.'
+            }
+        }
+        catch {
+            Write-Host 'The settings cannot be read now; opening the server that is running.'
+        }
     }
     else {
-        $null = Start-Backend -HostName $facts.host -Port $facts.port
+        $facts = Get-VaultFacts
+        $null = Start-Backend $facts
     }
     $token = Read-Token $facts.vault
     $address = Get-AppAddress -HostName $facts.host -Port $facts.port -Token $token
@@ -258,7 +303,7 @@ function Invoke-Stop {
         Write-Host 'The server is not running.'
         return
     }
-    Stop-Backend $running
+    Stop-Backend $running.Process
     Write-Host 'The server is stopped.'
 }
 
@@ -268,14 +313,15 @@ function Invoke-Dev {
         throw 'the frontend is not installed yet; run .\vault.ps1 install first'
     }
     $facts = Get-VaultFacts
-    if ($facts.port -ne 8765) {
-        # frontend/vite.config.ts forwards /api to port 8765.
-        throw "dev expects server.port 8765 (the Vite proxy is fixed to it), but the settings say $($facts.port)"
+    if ($facts.port -ne 8765 -or $facts.host -ne '127.0.0.1') {
+        # frontend/vite.config.ts forwards /api to http://127.0.0.1:8765, so the server has to be
+        # there. "localhost" is not enough: it can resolve to ::1.
+        throw "dev expects server.host 127.0.0.1 and server.port 8765 (the Vite proxy is fixed to that address), but the settings say $($facts.host) and $($facts.port)"
     }
     if (Get-RunningServer) {
         throw 'a server started by "run" is already running; stop it first with .\vault.ps1 stop'
     }
-    $server = Start-Backend -HostName $facts.host -Port $facts.port
+    $server = Start-Backend $facts
     try {
         $token = Read-Token $facts.vault
         $address = Get-AppAddress -HostName '127.0.0.1' -Port $script:DevPort -Token $token

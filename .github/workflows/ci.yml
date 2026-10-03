@@ -285,6 +285,8 @@ jobs:
           $config = Join-Path $env:RUNNER_TEMP 'config.toml'
           Set-Content -LiteralPath $config -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", "port = 18766")
           Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'no-vault.toml') -Encoding ASCII -Value @("[server]", "port = 18766")
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'other-port.toml') -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", "port = 18767")
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'ipv6.toml') -Encoding ASCII -Value @("[vault]", "path = '$vault'", "[server]", 'host = "::1"')
           "AIVAULT_CONFIG=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Run, serve the app and stop, in both PowerShell editions
         shell: pwsh
@@ -298,6 +300,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'the server did not serve the app' }
             $again = & $edition -NoProfile -File .\vault.ps1 run -NoBrowser | Out-String
             if ($again -notmatch 'already running') { throw 'a second run did not notice the first' }
+            # Changed settings must not redirect a second run to a port nothing listens on.
+            $kept = $env:AIVAULT_CONFIG
+            $env:AIVAULT_CONFIG = Join-Path $env:RUNNER_TEMP 'other-port.toml'
+            $changed = & $edition -NoProfile -File .\vault.ps1 run -NoBrowser | Out-String
+            $env:AIVAULT_CONFIG = $kept
+            if (($changed -notmatch 'settings have changed') -or ($changed -notmatch ':18766/') -or ($changed -match '18767')) { throw "a second run with other settings did not keep to the running server: $changed" }
             & $edition -NoProfile -File .\vault.ps1 stop
             if ($LASTEXITCODE -ne 0) { throw "stop failed in $edition" }
             if (Test-Path .run\server.json) { throw 'stop left its record behind' }
@@ -307,6 +315,15 @@ jobs:
             $idle = & $edition -NoProfile -File .\vault.ps1 stop | Out-String
             if ($idle -notmatch 'not running') { throw 'stop did not say the server was not running' }
           }
+      - name: dev refuses a host the Vite proxy cannot reach
+        shell: pwsh
+        run: |
+          $env:AIVAULT_CONFIG = Join-Path $env:RUNNER_TEMP 'ipv6.toml'
+          $text = & powershell -NoProfile -File .\vault.ps1 dev -NoBrowser 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) { throw 'dev started with an IPv6 host' }
+          if ($text -notmatch 'dev expects server.host 127.0.0.1') { throw "unexpected message: $text" }
+          if (Test-Path .run\server.json) { throw 'a server was started anyway' }
+          exit 0
       - name: A settings file without a vault folder is refused
         shell: pwsh
         run: |

@@ -71,10 +71,36 @@ try {
 
     Assert-That 'no record means no server' ($null -eq (Get-RunningServer))
 
-    Write-Record $self
+    $facts = [pscustomobject]@{ host = '127.0.0.1'; port = 8765; vault = 'C:\AIVault' }
+    Write-Record $self $facts
     $found = Get-RunningServer
     Assert-That 'a record of a live process with the same start time is found' `
-        (($null -ne $found) -and ($found.Id -eq $PID))
+        (($null -ne $found) -and ($found.Process.Id -eq $PID))
+    Assert-That 'the settings the server was started with come back with it' `
+        (($found.Host -ceq '127.0.0.1') -and ($found.Port -eq 8765) -and ($found.Vault -ceq 'C:\AIVault'))
+
+    # A record without settings (or with unusable ones) still finds the process, so stop works,
+    # but run is told that the settings are not known.
+    $now = Get-StartStamp $self
+    foreach ($case in @(
+            @{ name = 'no settings'; extra = '' },
+            @{ name = 'port 0'; extra = ', "host": "127.0.0.1", "port": 0, "vault": "C:\\v"' },
+            @{ name = 'port 70000'; extra = ', "host": "127.0.0.1", "port": 70000, "vault": "C:\\v"' },
+            @{ name = 'port true'; extra = ', "host": "127.0.0.1", "port": true, "vault": "C:\\v"' },
+            @{ name = 'port text'; extra = ', "host": "127.0.0.1", "port": "x", "vault": "C:\\v"' },
+            @{ name = 'empty host'; extra = ', "host": "", "port": 8765, "vault": "C:\\v"' },
+            @{ name = 'empty vault'; extra = ', "host": "127.0.0.1", "port": 8765, "vault": ""' }
+        )) {
+        Set-Content -LiteralPath $script:RecordFile -Encoding ASCII -Value ('{"pid": ' + $PID + ', "started": ' + $now + $case.extra + '}')
+        $partial = Get-RunningServer
+        $lacksASetting = $false
+        if ($null -ne $partial) {
+            $lacksASetting = ($null -eq $partial.Host) -or ($null -eq $partial.Port) -or ($null -eq $partial.Vault)
+        }
+        Assert-That ("a record with $($case.name) finds the process and lacks a setting") `
+            (($null -ne $partial) -and ($partial.Process.Id -eq $PID) -and $lacksASetting)
+    }
+    Write-Record $self $facts
 
     $record = Get-Content -LiteralPath $script:RecordFile -Raw | ConvertFrom-Json
     $record.started = 630822816000000000   # the year 2000, as ticks
