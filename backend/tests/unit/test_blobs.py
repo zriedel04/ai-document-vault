@@ -201,6 +201,84 @@ class TestOneBlobPerHash:
         assert store.clean_temp() == 1
         assert store.put(io.BytesIO(HELLO), "txt").created is True
 
+    def test_windows_saying_access_denied_for_a_name_being_deleted_means_busy(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows, creating a name whose deletion is pending raises PermissionError. This
+        # happened in CI when eight imports raced; the importer must wait, not fail.
+        real = os.open
+        refused: list[str] = []
+
+        def open_(path: str | Path, flags: int, *args: int) -> int:
+            if str(path).endswith(".lock") and len(refused) < 3:
+                refused.append(str(path))
+                raise PermissionError(13, "Permission denied")
+            return real(path, flags, *args)
+
+        monkeypatch.setattr("vault.storage.blobs.IS_WINDOWS", True)
+        monkeypatch.setattr("vault.storage.blobs.os.open", open_)
+        assert store.put(io.BytesIO(HELLO), "txt").created is True
+        assert len(refused) == 3
+        assert list((store.root / ".tmp").iterdir()) == []
+
+    def test_a_real_permission_error_elsewhere_is_not_mistaken_for_a_busy_lock(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def denied(*_args: object, **_kwargs: object) -> int:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("vault.storage.blobs.IS_WINDOWS", False)
+        monkeypatch.setattr("vault.storage.blobs.os.open", denied)
+        with pytest.raises(PermissionError):
+            store.put(io.BytesIO(HELLO), "txt")
+
+    def test_a_lock_that_cannot_be_removed_for_a_moment_is_retried_on_windows(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = Path.unlink
+        refused: list[int] = []
+
+        def unlink(self: Path, missing_ok: bool = False) -> None:
+            if self.name.endswith(".lock") and len(refused) < 3:
+                refused.append(1)
+                raise PermissionError(13, "in use by another process")
+            real(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr("vault.storage.blobs.IS_WINDOWS", True)
+        monkeypatch.setattr(Path, "unlink", unlink)
+        assert store.put(io.BytesIO(HELLO), "txt").created is True
+        assert len(refused) == 3
+        assert list((store.root / ".tmp").iterdir()) == []
+
+    def test_a_lock_that_stays_locked_is_an_error_not_a_silent_leftover(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def unlink(self: Path, missing_ok: bool = False) -> None:
+            if self.name.endswith(".lock"):
+                raise PermissionError(13, "in use by another process")
+
+        monkeypatch.setattr("vault.storage.blobs.IS_WINDOWS", True)
+        monkeypatch.setattr("vault.storage.blobs.UNLINK_TRIES", 3)
+        monkeypatch.setattr(Path, "unlink", unlink)
+        with pytest.raises(PermissionError):
+            store.put(io.BytesIO(HELLO), "txt")
+
+    def test_a_refused_removal_elsewhere_is_not_retried(
+        self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
+
+        def unlink(self: Path, missing_ok: bool = False) -> None:
+            if self.name.endswith(".lock"):
+                calls.append(1)
+                raise PermissionError(13, "denied")
+
+        monkeypatch.setattr("vault.storage.blobs.IS_WINDOWS", False)
+        monkeypatch.setattr(Path, "unlink", unlink)
+        with pytest.raises(PermissionError):
+            store.put(io.BytesIO(HELLO), "txt")
+        assert calls == [1]
+
     def test_other_hashes_are_not_blocked_by_a_lock(
         self, store: BlobStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:

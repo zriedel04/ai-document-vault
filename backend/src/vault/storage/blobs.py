@@ -45,6 +45,8 @@ WRITABLE: Final = stat.S_IWUSR
 LOCK_SUFFIX: Final = ".lock"
 LOCK_WAIT_SECONDS: Final = 60.0
 LOCK_POLL_SECONDS: Final = 0.01
+UNLINK_TRIES: Final = 100
+IS_WINDOWS: Final = os.name == "nt"
 
 
 class BlobError(Exception):
@@ -221,14 +223,35 @@ class BlobStore:
                 os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
                 break
             except FileExistsError:
-                if time.monotonic() > deadline:
-                    msg = "another import of the same file did not finish"
-                    raise BlobBusyError(msg) from None
-                time.sleep(LOCK_POLL_SECONDS)
+                pass
+            except PermissionError:
+                # Windows refuses to create a name whose deletion is still pending (the holder has
+                # just released it), and says "access denied" instead of "exists". That is the
+                # lock being busy, not a missing permission; elsewhere it is a real error.
+                if not IS_WINDOWS:
+                    raise
+            if time.monotonic() > deadline:
+                msg = "another import of the same file did not finish"
+                raise BlobBusyError(msg) from None
+            time.sleep(LOCK_POLL_SECONDS)
         try:
             yield
         finally:
-            lock.unlink(missing_ok=True)
+            self._release(lock)
+
+    @staticmethod
+    def _release(lock: Path) -> None:
+        """Remove the lock. Windows can refuse for a moment while another program (a virus scanner)
+        has the file open, so it tries again before giving up; a lock that stays would block the
+        hash until the next start-up."""
+        for attempt in range(UNLINK_TRIES):
+            try:
+                lock.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                if not IS_WINDOWS or attempt == UNLINK_TRIES - 1:
+                    raise
+                time.sleep(LOCK_POLL_SECONDS)
 
     @staticmethod
     def _publish(temp: Path, final: Path) -> bool:
