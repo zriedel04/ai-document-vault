@@ -852,6 +852,50 @@ class MergeRowShapeTest(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertIn("part of a group", err)
 
+    def test_heading_scores_need_a_reference_and_agree_with_each_other(self) -> None:
+        """A hand-edited report cannot claim heading accuracy with no labelled PDFs behind it, nor
+        scores that the script could not have written together."""
+        candidate = "pypdfium2+pdfplumber"
+        base = {"files": 2, "files_ok": 2, "files_with_heading_reference": 1}
+
+        def attempt(**figures: float) -> int:
+            row = {**complete_row("pdf", candidate), **figures}
+            return self.merge("pdf", candidate, row)[0]
+
+        accepted: list[dict[str, float]] = [
+            {**base, "heading_false_positives": 0},  # a reference with nothing expected or found
+            {**base, "heading_false_positives": 2, "heading_precision": 0.5, "heading_f1": 0.0},
+            {**base, "heading_false_positives": 0, "heading_recall": 1.0, "heading_precision": 1.0}
+            | {"heading_f1": 1.0},
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
+            | {"heading_f1": 0.6667},
+            {**base, "heading_false_positives": 0, "heading_recall": 0.0, "heading_f1": 0.0},
+        ]
+        for figures in accepted:
+            with self.subTest(accepted=figures):
+                self.assertEqual(attempt(**figures), 0)
+        refused: list[dict[str, float]] = [
+            {"heading_recall": 1.0, "heading_precision": 1.0, "heading_f1": 1.0},  # no reference
+            {"heading_f1": 1.0},
+            {"files": 1, "files_ok": 1, "heading_false_positives": 0},  # a group without a count
+            {
+                "files": 1,
+                "files_ok": 1,
+                "files_with_heading_reference": 0,
+                "heading_false_positives": 0,
+            },
+            {**base, "heading_false_positives": 0, "heading_recall": 1.0},  # recall but no F1
+            {**base, "heading_false_positives": 0, "heading_f1": 1.0},  # F1 from nothing
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
+            | {"heading_f1": 0.9},  # not the harmonic mean
+            {**base, "heading_false_positives": 0, "heading_recall": 1.0, "heading_f1": 1.0},
+            {**base, "heading_false_positives": 3},  # false positives, but nothing was detected
+            {**base, "heading_false_positives": 0, "heading_precision": 0.5, "heading_f1": 0.0},
+        ]
+        for figures in refused:
+            with self.subTest(refused=figures):
+                self.assertEqual(attempt(**figures), 2)
+
     def test_figures_that_contradict_the_counts_are_refused(self) -> None:
         accuracy = {
             "cer_mean": 0.1,

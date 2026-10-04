@@ -107,6 +107,36 @@ _PDF_WER = frozenset({"wer_mean", "wer_median"})
 _PDF_HEADING_REFERENCE = frozenset({"files_with_heading_reference", "heading_false_positives"})
 
 
+def _heading_scores_fit(row: Mapping[str, Number]) -> bool:
+    """What ``run_pdf_spike`` can say about headings, and nothing it cannot.
+
+    The scores exist only after a reference file was read, so any of them needs a positive
+    ``files_with_heading_reference``, and so does a false-positive count. Recall needs expected
+    headings and precision needs detected ones, and F1 is written when either exists, so F1 is
+    there exactly when recall or precision is. F1 is the harmonic mean of the two when both exist
+    and 0 when only one does. A precision that is missing means nothing was detected, so there
+    are no false positives, and no false positives means every detection was right.
+    """
+    scores = ("heading_recall", "heading_precision", "heading_f1")
+    reference = row.get("files_with_heading_reference", 0)
+    if reference < 1:
+        return not any(name in row for name in (*scores, "heading_false_positives"))
+    recall, precision = row.get("heading_recall"), row.get("heading_precision")
+    if ("heading_f1" in row) != (recall is not None or precision is not None):
+        return False
+    if "heading_f1" in row:
+        if recall is not None and precision is not None:
+            both = recall + precision
+            expected = 2 * precision * recall / both if both else 0.0
+        else:
+            expected = 0.0
+        if abs(row["heading_f1"] - expected) > 1e-3:
+            return False
+    if precision is None:
+        return row["heading_false_positives"] == 0
+    return row["heading_false_positives"] > 0 or precision == 1.0
+
+
 def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
     """Every file ends in exactly one outcome, the pages without text are among the pages, and the
     word error rates exist exactly when references were used."""
@@ -122,6 +152,7 @@ def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
         and row.get("files_with_heading_reference", 0) <= row["files_ok"]
         and ("pages_per_second" not in row or row["pages"] > 0)
         and ("wer_mean" in row) == (row["references_used"] > 0)
+        and _heading_scores_fit(row)
     )
 
 
