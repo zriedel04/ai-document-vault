@@ -3,8 +3,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
+import sys
 import tempfile
 import unittest
+import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from unittest import mock
@@ -12,6 +15,7 @@ from unittest import mock
 from vault_spikes import __main__ as cli
 from vault_spikes import adapters, spike_embedding, spike_ocr, spike_vec
 from vault_spikes import spike_pdf as pdf
+from vault_spikes.corpus import DEFAULT_OVERLAP
 from vault_spikes.report import Environment, Kind, Report, collect_environment
 
 KNOWN = cli.KNOWN
@@ -41,8 +45,17 @@ def complete_row(spike: str, candidate: str) -> dict[str, float]:
     row = {name: values[KNOWN[spike].metrics[name]] for name in sorted(shape.required)}
     if spike == "ocr":  # no call failed, so no time was lost in one
         row["seconds_spent_in_failures"] = 0.0
-    if spike == "embedding":  # a run that got this far embedded something
-        row |= dict.fromkeys(("chunks", "dimensions", "batch_size", "vault_chunks_assumed"), 1)
+    if spike == "embedding":
+        # A run that got this far embedded something, with the overlap the chunker gives, and
+        # projected 36,000 chunks at one chunk a second: ten hours.
+        row |= dict.fromkeys(("chunks", "dimensions", "batch_size"), 1)
+        row |= {
+            "chunk_overlap_chars": DEFAULT_OVERLAP,
+            "vault_chunks_assumed": 36_000,
+            "hours_for_vault_of_chunks": 10.0,
+        }
+    if "same_answer_as_python" in row:  # every probe query got the same answer
+        row["same_answer_as_python"] = 1.0
     return row
 
 
@@ -88,7 +101,7 @@ class CliTest(unittest.TestCase):
         ):
             code, out, _ = run("check")
         self.assertEqual(code, 0)
-        self.assertIn("pypdfium2: no   (uv sync --extra pdf)", out)
+        self.assertIn("pypdfium2: no   (pdf extra: uv sync --python 3.12 --all-extras)", out)
         self.assertIn("sqlite can load extensions:", out)
 
     def test_an_ocr_run_writes_a_report_with_numbers_only(self) -> None:
@@ -172,6 +185,7 @@ class CliTest(unittest.TestCase):
             mock.patch.object(
                 adapters, "SentenceTransformerEmbedder", factory or (lambda *_a: FakeEmbedder())
             ),
+            mock.patch.object(adapters, "require_embedding_libraries"),
             mock.patch.object(adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"),
             mock.patch.object(adapters, "model_revision", return_value=revision),
         ):
@@ -540,6 +554,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out.strip(), f"qwen3-embedding-0.6b: downloaded (revision {REVISION})")
 
+    def test_fetch_model_also_downloads_the_ocr_models_outside_the_timed_load(self) -> None:
+        with mock.patch.object(adapters, "fetch_model") as fetch:
+            code, out, err = run("fetch-model", "--candidate", "rapidocr-ppocrv5")
+        self.assertEqual((code, err), (0, ""))
+        fetch.assert_called_once_with("rapidocr-ppocrv5")
+        self.assertEqual(out.strip(), "rapidocr-ppocrv5: downloaded")
+
     def test_errors_are_one_line_on_stderr_with_exit_code_two(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             code, out, err = run("pdf", "--extractor", "pypdfium2", "--pdfs", folder)
@@ -627,7 +648,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("cannot find the corpus manifest", err)
         self.assertIn("and the eval questions", err)
-        self.assertIn("demo corpus change", err)
+        self.assertIn("public synthetic corpus and eval set", err)
         embedder.assert_not_called()
 
     def test_only_the_missing_input_is_named(self) -> None:
@@ -694,9 +715,139 @@ class CliTest(unittest.TestCase):
         self.assertIn("embedding", out.getvalue())
 
 
+class MissingLibraryRunTest(unittest.TestCase):
+    """A missing library stops a run before anything is measured or written: it is a fact about
+    the install, not a result about the technology, and a report would say otherwise."""
+
+    def test_a_pdf_run_without_its_library_writes_no_report(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "pdfs").mkdir()
+            (root / "pdfs" / "a.pdf").write_bytes(b"%PDF-1.4")
+            for extractor, missing in (
+                ("pypdfium2", "pypdfium2"),
+                ("pypdfium2+pdfplumber", "pdfplumber"),
+            ):
+                with (
+                    self.subTest(extractor=extractor),
+                    mock.patch.dict(sys.modules, {"pypdfium2": mock.MagicMock()}),
+                    mock.patch.dict(sys.modules, {"pdfplumber": mock.MagicMock(), missing: None}),
+                ):
+                    code, out, err = run(
+                        "pdf",
+                        "--extractor",
+                        extractor,
+                        "--pdfs",
+                        str(root / "pdfs"),
+                        "--out",
+                        str(root / "out"),
+                    )
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn(f"{missing} is not installed", err)
+                    self.assertEqual(list((root / "out").iterdir()), [])
+
+    def test_a_vec_run_without_sqlite_vec_does_not_report_that_it_fails_to_load(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            mock.patch.dict(sys.modules, {"sqlite_vec": None}),
+            mock.patch.object(cli, "probe_extension_loading") as probe,
+        ):
+            code, out, err = run("vec", "--out", folder, "--sizes", "10")
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("sqlite_vec is not installed", err)
+            probe.assert_not_called()
+            self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_an_embedding_run_without_the_pdf_reader_stops_before_the_corpus_is_read(
+        self,
+    ) -> None:
+        class NeverLoaded(FakeEmbedder):
+            def load(self) -> None:
+                raise AssertionError("the model must not be loaded")
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "manifest.json").write_text('{"documents": []}', encoding="utf-8")
+            (root / "questions.yaml").write_text("questions: []\n", encoding="utf-8")
+            with (
+                mock.patch.dict(
+                    sys.modules, {"sentence_transformers": mock.MagicMock(), "pypdfium2": None}
+                ),
+                mock.patch.object(
+                    adapters, "SentenceTransformerEmbedder", lambda *_a: NeverLoaded()
+                ),
+                mock.patch.object(cli, "load_manifest") as manifest,
+            ):
+                code, out, err = run(
+                    "embedding",
+                    "--candidate",
+                    "qwen3-embedding-0.6b",
+                    "--corpus",
+                    str(root),
+                    "--questions",
+                    str(root / "questions.yaml"),
+                    "--out",
+                    str(root / "out"),
+                )
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("pypdfium2 is not installed", err)
+            manifest.assert_not_called()
+            self.assertEqual(list((root / "out").iterdir()), [])
+
+
+class LibraryOutputTest(unittest.TestCase):
+    """The libraries' own log records and warnings never reach the console: pdfminer logs the
+    tokens of a malformed page (the words on it among them), and others log paths."""
+
+    @staticmethod
+    def chatty(_args: object) -> int:
+        # pdfminer's way: a module logger with no handler, which Python's last-resort handler
+        # prints on the console from the warning level up.
+        logging.getLogger("pdfminer.pdfinterp").warning("not floats: %r", (PRIVATE_TEXT, 0))
+        # RapidOCR's way: a logger with a console handler of its own that does not propagate.
+        own = logging.getLogger("vault_spikes_tests.rapidocr")
+        own.propagate = False
+        own.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stderr)
+        own.addHandler(handler)
+        try:
+            own.info("Using %s", PRIVATE_TEXT)
+        finally:
+            own.removeHandler(handler)
+        # huggingface_hub's way: a warning, also one that a filter of the library lets through.
+        warnings.warn(PRIVATE_TEXT, UserWarning, stacklevel=1)
+        warnings.simplefilter("always")
+        warnings.warn(PRIVATE_TEXT, UserWarning, stacklevel=1)
+        print("numbers only")
+        return 0
+
+    def test_nothing_a_library_logs_or_warns_is_printed(self) -> None:
+        filters = list(warnings.filters)
+        with mock.patch.object(cli, "run", side_effect=self.chatty):
+            code, out, err = run("check")
+        self.assertEqual((code, out, err), (0, "numbers only\n", ""))
+        # Switched back on afterwards: the switch belongs to the command, not to the process.
+        self.assertTrue(logging.getLogger("pdfminer.pdfinterp").isEnabledFor(logging.WARNING))
+        self.assertEqual(warnings.filters, filters)
+
+    def test_the_switch_is_undone_when_a_command_fails(self) -> None:
+        def failing(args: object) -> int:
+            self.chatty(args)
+            raise LookupError(PRIVATE_TEXT)
+
+        with mock.patch.object(cli, "run", side_effect=failing):
+            code, _, err = run("check")
+        self.assertEqual(code, 1)
+        self.assertNotIn(PRIVATE_TEXT, err)
+        self.assertTrue(logging.getLogger("pdfminer.pdfinterp").isEnabledFor(logging.WARNING))
+
+
 class FakePdfExtractor:
     name = "pypdfium2"
     detects_headings = False
+
+    def load(self) -> None:
+        pass
 
     def extract(self, path: Path) -> pdf.PdfText:
         return pdf.PdfText(["page text"], [])
@@ -964,10 +1115,12 @@ class MergeRowShapeTest(unittest.TestCase):
         needs = [
             ("embedding", "qwen3-embedding-0.6b-cpu", "torch"),
             ("embedding", "embeddinggemma-300m-cuda", "sentence-transformers"),
+            ("embedding", "qwen3-embedding-0.6b-cpu", "pypdfium2"),  # it read the corpus PDFs
             ("ocr", "rapidocr-ppocrv5", "onnxruntime"),
             ("ocr", "tesseract", "tesseract"),
             ("pdf", "pypdfium2", "pypdfium2"),
             ("pdf", "pypdfium2+pdfplumber", "pdfplumber"),
+            ("vec", "extension-loading", "sqlite-vec"),  # the command refuses to run without it
             ("vec", "exact-search-check", "sqlite-vec"),
             ("vec", "vectors-10000", "sqlite-vec"),
         ]
@@ -988,7 +1141,6 @@ class MergeRowShapeTest(unittest.TestCase):
         for spike, candidate, other in (
             ("ocr", "tesseract", "rapidocr"),
             ("pdf", "pypdfium2", "pdfplumber"),
-            ("vec", "extension-loading", "sqlite-vec"),
         ):
             with self.subTest(candidate=candidate, absent=other):
                 report = Report(
@@ -1020,6 +1172,17 @@ class MergeRowShapeTest(unittest.TestCase):
             {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
             | {"heading_f1": 0.6667},
             {**base, "heading_false_positives": 0, "heading_recall": 0.0, "heading_f1": 0.0},
+            # Three detected, two right: precision two thirds, and F1 with full recall 0.8.
+            {
+                **base,
+                "heading_false_positives": 1,
+                "heading_recall": 1.0,
+                "heading_precision": 0.6667,
+            }
+            | {"heading_f1": 0.8},
+            # A stored 1.0 can be a precision just below it, over many detections.
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 1.0}
+            | {"heading_f1": 1.0},
         ]
         for figures in accepted:
             with self.subTest(accepted=figures):
@@ -1041,6 +1204,12 @@ class MergeRowShapeTest(unittest.TestCase):
             {**base, "heading_false_positives": 0, "heading_recall": 1.0, "heading_f1": 1.0},
             {**base, "heading_false_positives": 3},  # false positives, but nothing was detected
             {**base, "heading_false_positives": 0, "heading_precision": 0.5, "heading_f1": 0.0},
+            # One wrong detection leaves 1/2, 2/3, 3/4 ... right, never 0.6.
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.6}
+            | {"heading_f1": 0.75},
+            # F1 of 1.0 and 0.5 is 0.6667: more than the rounding of the three figures away.
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
+            | {"heading_f1": 0.667},
         ]
         for figures in refused:
             with self.subTest(refused=figures):
@@ -1063,6 +1232,25 @@ class MergeRowShapeTest(unittest.TestCase):
             "mrr_at_10": 0.5,
             "hit_at_1_questions": 7,
         }
+        # Two of four images read with a mean error of 0.2, one failed call, one reference unusable.
+        two_read = {
+            "images": 4,
+            "references_unusable": 1,
+            "failures": 1,
+            "seconds_spent_in_failures": 1.0,
+            "cer_mean_failures_as_errors": 0.4667,
+            **accuracy,
+            "cer_mean": 0.2,
+        }
+        all_failed = {
+            "images": 2,
+            "failures": 2,
+            "seconds_spent_in_failures": 3.0,
+            "cer_mean_failures_as_errors": 1.0,
+        }
+        for whole in (two_read, all_failed):  # the cases below each break one of these
+            row = {**complete_row("ocr", "tesseract"), **whole}
+            self.assertEqual(self.merge("ocr", "tesseract", row), (0, ""))
         cases: list[tuple[str, str, dict[str, float]]] = [
             # Hit@1 is required exactly when find-the-document questions were scored.
             ("embedding", cpu, {**scored, "hit_at_1_questions": 3}),  # a count but no hit_at_1
@@ -1094,9 +1282,64 @@ class MergeRowShapeTest(unittest.TestCase):
             # An embedding row has embedded something.
             ("embedding", cpu, {"chunks": 0}),
             ("embedding", cpu, {"batch_size": 0}),
+            # The projection is the assumed chunks at the measured throughput (36,000 chunks at
+            # one a second is ten hours), so neither can be edited alone.
+            ("embedding", cpu, {"hours_for_vault_of_chunks": 10.01}),
+            ("embedding", cpu, {"vault_chunks_assumed": 72_000}),
+            ("embedding", cpu, {"chunks_per_second": 2.0}),
+            ("embedding", cpu, {"chunks_per_second": 0.0}),
+            # Chunks hold 1 to 800 characters and overlap by 100 to 400 (corpus.overlap_for).
+            ("embedding", cpu, {"chunk_overlap_chars": 99}),
+            ("embedding", cpu, {"chunk_overlap_chars": 401}),
+            ("embedding", cpu, {"mean_chunk_chars": 0.5}),
+            ("embedding", cpu, {"mean_chunk_chars": 800.5}),
+            # Hit@1 is a whole number of hits out of its questions (here 2).
+            ("embedding", cpu, {**scored, "hit_at_1_questions": 2, "hit_at_1": 0.3}),
+            # Only the passages of scored questions are looked for.
+            ("embedding", cpu, {"sources_not_in_any_chunk": 1}),
+            # torch never allocates more than its allocator reserved.
+            (
+                "embedding",
+                "qwen3-embedding-0.6b-cuda",
+                {"gpu_peak_allocated_mib": 2.0, "gpu_peak_reserved_mib": 1.0},
+            ),
+            # OCR: the failures-as-errors mean follows from the mean of the images read.
+            ("ocr", "tesseract", {**two_read, "cer_mean_failures_as_errors": 0.5}),
+            ("ocr", "tesseract", {**all_failed, "cer_mean_failures_as_errors": 0.9}),
+            # A median is never above the higher percentile of the same figures.
+            ("ocr", "tesseract", {**two_read, "cer_median": 0.4, "cer_p90": 0.3}),
+            (
+                "ocr",
+                "tesseract",
+                {**two_read, "seconds_per_image_p50": 3.0, "seconds_per_image_p95": 2.0},
+            ),
+            # Images per minute needs some OCR work, and is above 0 exactly when one was read.
+            ("ocr", "tesseract", {"images_per_minute": 5.0}),
+            ("ocr", "tesseract", {"images": 2, "references_unusable": 2, "images_per_minute": 0.0}),
+            ("ocr", "tesseract", {**two_read, "images_per_minute": 0.0}),
+            ("ocr", "tesseract", {**all_failed, "images_per_minute": 3.0}),
+            # PDF: heading candidates come from some file, and pypdfium2 alone finds none.
+            ("pdf", "pypdfium2+pdfplumber", {"files": 1, "files_ok": 1, "heading_candidates": 2}),
+            (
+                "pdf",
+                "pypdfium2",
+                {
+                    "files": 1,
+                    "files_ok": 1,
+                    "heading_candidates": 2,
+                    "files_with_heading_candidates": 1,
+                },
+            ),
+            ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "pages": 3, "pages_per_second": 0.0}),
             # sqlite-vec: an extension cannot load into a Python that cannot load extensions.
             ("vec", "extension-loading", {"can_load_extensions": False, "vec_loads": True}),
             ("vec", "exact-search-check", {"vectors": 0}),
+            # The check asks five queries, so its share is a whole number of fifths.
+            ("vec", "exact-search-check", {"same_answer_as_python": 0.5}),
+            # A measured size inserted something into a file of some size.
+            ("vec", "vectors-10000", {"insert_vectors_per_second": 0.0}),
+            ("vec", "vectors-10000", {"database_mib": 0.0}),
+            ("vec", "vectors-10000", {"query_ms_p50": 2.0, "query_ms_p95": 1.0}),
         ]
         for spike, candidate, change in cases:
             with self.subTest(candidate=candidate, change=change):
@@ -1117,18 +1360,74 @@ class MergeRowShapeTest(unittest.TestCase):
         cases: list[tuple[str, str, dict[str, float]]] = [
             ("embedding", cpu, {**marked, "hit_at_1": 0.5}),
             ("embedding", cpu, {**marked, "hit_at_1_questions": 0}),
+            # A scored question's passage that no chunk holds is counted.
+            ("embedding", cpu, {**marked, "hit_at_1": 0.5, "sources_not_in_any_chunk": 2}),
+            # The projection is checked within the rounding of both figures: a throughput stored
+            # as 0.0123 was between 0.01225 and 0.01235 chunks a second.
+            (
+                "embedding",
+                cpu,
+                {
+                    "chunks_per_second": 37.1234,
+                    "vault_chunks_assumed": 100_000,
+                    "hours_for_vault_of_chunks": 0.7483,
+                },
+            ),
+            (
+                "embedding",
+                cpu,
+                {
+                    "chunks_per_second": 0.0123,
+                    "vault_chunks_assumed": 100_000,
+                    "hours_for_vault_of_chunks": 2250.1,
+                },
+            ),
+            ("embedding", cpu, {"chunk_overlap_chars": 400, "mean_chunk_chars": 800.0}),
+            (
+                "embedding",
+                "qwen3-embedding-0.6b-cuda",
+                {"gpu_peak_allocated_mib": 1.0, "gpu_peak_reserved_mib": 2.0},
+            ),
+            # Every call failed: each counts as a wrong image, and nothing was read in the time.
             (
                 "ocr",
                 "tesseract",
-                {**read, "cer_mean_failures_as_errors": 0.5, "cer_mean": 0.2}
+                {
+                    "images": 2,
+                    "failures": 2,
+                    "seconds_spent_in_failures": 3.0,
+                    "cer_mean_failures_as_errors": 1.0,
+                    "images_per_minute": 0.0,
+                },
+            ),
+            (
+                "ocr",
+                "tesseract",
+                # Two images read with a mean of 0.2 and one failure: (0.2 * 2 + 1) / 3.
+                {**read, "cer_mean_failures_as_errors": 0.4667, "cer_mean": 0.2}
                 | {
                     "cer_median": 0.2,
                     "cer_p90": 0.3,
                     "seconds_per_image_p50": 1.0,
                     "seconds_per_image_p95": 2.0,
+                    "images_per_minute": 12.5,
                 },
             ),
             ("pdf", "pypdfium2", {"files": 3, "files_ok": 2, "files_corrupt": 1}),
+            (
+                "pdf",
+                "pypdfium2+pdfplumber",
+                {
+                    "files": 2,
+                    "files_ok": 2,
+                    "pages": 4,
+                    "pages_per_second": 8.0,
+                    "heading_candidates": 3,
+                    "files_with_heading_candidates": 2,
+                },
+            ),
+            ("vec", "exact-search-check", {"same_answer_as_python": 0.8}),
+            ("vec", "vectors-10000", {"query_ms_p50": 2.0, "query_ms_p95": 2.0}),
             (
                 "pdf",
                 "pypdfium2",

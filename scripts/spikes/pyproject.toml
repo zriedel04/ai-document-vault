@@ -8,7 +8,8 @@ dependencies = ["pyyaml>=6.0"]
 # Heavy or hardware-specific libraries are extras, so CI never installs them.
 [project.optional-dependencies]
 vec = ["sqlite-vec>=0.1.6"]
-embedding = ["sentence-transformers>=5.0"]
+# The embedding spike reads the PDFs of the corpus with pypdfium2.
+embedding = ["sentence-transformers>=5.0", "pypdfium2>=4.30"]
 ocr = ["rapidocr>=3.4", "onnxruntime>=1.20"]
 pdf = ["pypdfium2>=4.30", "pdfplumber>=0.11"]
 

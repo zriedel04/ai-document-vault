@@ -429,6 +429,48 @@ class MetricValueTest(unittest.TestCase):
         self.assertTrue(r.in_domain(r.Kind.AMOUNT, 2))
 
 
+class RoundingTest(unittest.TestCase):
+    """The rules that compare a figure with the ones it was computed from allow exactly the
+    rounding that ``Report.add`` applies, so a report the script wrote always passes and an edited
+    figure does not."""
+
+    def test_a_stored_value_may_lie_half_a_last_decimal_from_the_computed_one(self) -> None:
+        self.assertEqual(r.ROUNDING, 0.00005)
+        computed = 2 / 3
+        self.assertTrue(r.rounded_within(round(computed, r.DECIMALS), computed, computed))
+        self.assertTrue(r.rounded_within(0.6667, 0.66672, 0.7))
+        self.assertFalse(r.rounded_within(0.6667, 0.66676, 0.7))  # more than 0.00005 below
+        self.assertFalse(r.rounded_within(0.7001, 0.6, 0.70004))  # more than 0.00005 above
+        # A large figure keeps its last decimal: the slack does not grow with the value.
+        self.assertFalse(r.rounded_within(1000.0002, 1000.0, 1000.0))
+
+    def test_a_whole_share_is_a_whole_number_of_parts(self) -> None:
+        for share, count in (
+            (0.0, 3),
+            (0.3333, 3),
+            (0.6667, 3),
+            (1.0, 3),
+            (0.5, 2),
+            (0.0001, 7000),
+        ):
+            with self.subTest(share=share, count=count):
+                self.assertTrue(r.whole_share(share, count))
+        for share, count in ((0.5, 3), (0.3, 2), (0.333, 3), (0.5, 0)):
+            with self.subTest(share=share, count=count):
+                self.assertFalse(r.whole_share(share, count))
+
+    def test_a_right_share_leaves_room_for_its_wrong_answers(self) -> None:
+        # (right, wrong) -> right / (right + wrong), rounded as a report stores it.
+        for right, wrong in ((0, 1), (1, 1), (2, 1), (3, 1), (3, 2), (0, 4), (999, 1), (5, 0)):
+            share = round(right / (right + wrong), r.DECIMALS)
+            with self.subTest(right=right, wrong=wrong):
+                self.assertTrue(r.right_share(share, wrong))
+        self.assertTrue(r.right_share(1.0, 1))  # 1 wrong among 20,000 or more rounds to 1.0
+        for share, wrong in ((0.6, 1), (0.85, 1), (0.7, 2), (0.9999, 0), (0.5, 0)):
+            with self.subTest(share=share, wrong=wrong):
+                self.assertFalse(r.right_share(share, wrong))
+
+
 class PackageBaselineTest(unittest.TestCase):
     """A report must list the packages every report of its spike lists (the versions that make a
     measurement reproducible), and may add only the extras the spike allows."""
@@ -556,6 +598,20 @@ class MergeTest(unittest.TestCase):
         self.assertIn("- GPU: none reported", text)
         self.assertIn("- GPU: NVIDIA RTX", text)
         self.assertIn("torch: 2.8+cu128", text)
+
+    def test_rows_of_one_candidate_on_both_data_sets_are_told_apart(self) -> None:
+        # The public and the private run of one candidate are two rows with one name; when the
+        # second ran in another environment (a model revision that moved, say), the Markdown must
+        # say which row it belongs to.
+        public, private = make(), make()
+        private.environment = self.gpu_environment()
+        public.add("model-cpu", public_dataset=True, n=1)
+        private.add("model-cpu", public_dataset=False, n=2)
+        text = r.merge([public, private]).to_markdown()
+        self.assertIn("Environment of model-cpu (public data):", text)
+        self.assertIn("Environment of model-cpu (private data):", text)
+        self.assertIn("| model-cpu (public data) |", text)
+        self.assertIn("| model-cpu (private data) |", text)
 
     def test_a_report_with_one_environment_reads_as_before(self) -> None:
         one, two = make(), make()

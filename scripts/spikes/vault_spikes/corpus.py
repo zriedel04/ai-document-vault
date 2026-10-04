@@ -7,6 +7,7 @@ same way, but the scripts never print or store any of its text.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import posixpath
@@ -75,6 +76,45 @@ class Chunk:
     text: str
 
 
+def decode_text(data: bytes, errors: str = "strict") -> str:
+    """Text from the bytes of a file: UTF-8 with or without a byte order mark, or UTF-16 or UTF-32
+    with one.
+
+    Windows tools save text in more than one way: Windows PowerShell 5.1 writes UTF-16 with ``>``
+    and ``Out-File``, UTF-32 with ``-Encoding UTF32``, and puts a byte order mark in front of
+    UTF-8 with ``Set-Content -Encoding UTF8``, and Notepad can save "UTF-8 with BOM". Each is read
+    as the text it holds; a mark read as a character would stick to the first word or heading and
+    lower a score without a warning, and would make a manifest invalid JSON. Line endings become
+    ``\n``, as when Python reads a file as text.
+    """
+    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):  # before UTF-16: FF FE 00 00
+        text = data.decode("utf-32", errors)  # the mark gives the byte order and is removed
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = data.decode("utf-16", errors)
+    else:
+        text = data.decode("utf-8-sig", errors)  # removes a UTF-8 mark if there is one
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_owner_text(path: Path, what: str) -> str:
+    """The text of a file the owner writes by hand (the manifest, the eval file, a reference text,
+    a list of headings), decoded by :func:`decode_text`. Bytes that are not text in those encodings
+    stop the run; the message names ``what``, fixed text of the caller, and never the file.
+
+    UTF-16 or UTF-32 without a byte order mark is valid UTF-8 when the text is mostly ASCII, with a
+    NUL between the letters, so a NUL, which no one types, stops the run too instead of becoming a
+    reference that matches nothing.
+    """
+    try:
+        text: str | None = decode_text(path.read_bytes())
+    except UnicodeDecodeError:
+        text = None
+    if text is None or "\x00" in text:
+        msg = f"{what} is not text this script can read; save it as UTF-8"
+        raise SpikeInputError(msg)
+    return text
+
+
 def _mapping(value: object, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         msg = f"{what} must be a mapping"
@@ -106,7 +146,7 @@ def _sources(entries: object, what: str) -> tuple[Source, ...]:
 def load_questions(path: Path) -> list[Question]:
     """Read ``eval/public/questions.yaml`` (format in ``eval/README.md``)."""
     try:
-        data = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "the eval file")
+        data = _mapping(yaml.safe_load(read_owner_text(path, "the eval file")), "the eval file")
     except (OSError, yaml.YAMLError) as error:
         msg = f"cannot read the eval file: {type(error).__name__}"
         raise SpikeInputError(msg) from None
@@ -172,7 +212,9 @@ def load_questions(path: Path) -> list[Question]:
 def load_manifest(path: Path) -> list[Document]:
     """Read ``demo/corpus/manifest.json``."""
     try:
-        data = _mapping(json.loads(path.read_text(encoding="utf-8")), "the manifest")
+        data = _mapping(json.loads(read_owner_text(path, "the manifest")), "the manifest")
+    except SpikeInputError:
+        raise
     except (OSError, ValueError) as error:
         msg = f"cannot read the manifest: {type(error).__name__}"
         raise SpikeInputError(msg) from None
@@ -350,7 +392,7 @@ def read_pages(path: Path, doc: Document, pdf_pages: PdfPages | None = None) -> 
         if path.stat().st_size > MAX_FILE_BYTES:
             return None
         if suffix in TEXT_SUFFIXES:
-            return [path.read_text(encoding="utf-8", errors="replace")]
+            return [decode_text(path.read_bytes(), errors="replace")]
         if suffix == ".docx":
             return _docx_pages(path)
     except (zipfile.BadZipFile, KeyError, OSError, SpikeInputError):

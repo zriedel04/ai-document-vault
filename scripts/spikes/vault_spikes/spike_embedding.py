@@ -8,22 +8,34 @@ whole spike with a fake and CI never downloads a model.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from vault_spikes.corpus import DEFAULT_OVERLAP, Chunk, Corpus, Document, Question, canonical_paths
+from vault_spikes.corpus import (
+    DEFAULT_MAX_CHARS,
+    DEFAULT_OVERLAP,
+    Chunk,
+    Corpus,
+    Document,
+    Question,
+    canonical_paths,
+)
 from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
 from vault_spikes.report import (
+    ROUNDING,
     Environment,
     Kind,
     Number,
     Report,
     RowShape,
     collect_environment,
+    rounded_within,
+    whole_share,
 )
 from vault_spikes.retrieval import (
     K,
@@ -45,7 +57,7 @@ METHOD = (
     "`fetch-model` and loaded only from the local cache, so the load time never includes a "
     "download. Memory is the process's peak working set (host RAM); a CUDA run also reports the "
     "peak video memory torch allocated and reserved, since the working set does not include it. "
-    "The corpus is cut "
+    "The text of PDF pages is read with pypdfium2. The corpus is cut "
     "into chunks of at most 800 characters that overlap by at least the longest evidence quote, "
     "so no quote is split between two chunks (the overlap is reported); throughput is chunks "
     "embedded per second in batches of `batch_size`, which is reported with every row because it "
@@ -71,7 +83,8 @@ METHOD = (
     "public synthetic ones (`demo/corpus/`, `eval/public/`); otherwise they are the owner's own "
     "files, kept outside the repository, and only numbers about them are reported."
 )
-PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
+# pypdfium2 reads the PDFs of the corpus, so the text that is chunked depends on its version.
+PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy", "pypdfium2")
 HAS_MODEL = True  # the environment records the revision of the model files that were loaded
 # What a report of this spike may contain (checked when a report is read back for a merge).
 METRICS: dict[str, Kind] = {
@@ -124,11 +137,28 @@ _EMBEDDING_SCORES = frozenset({"recall_at_10", "mrr_at_10", "hit_at_1_questions"
 _EMBEDDING_GPU = frozenset({"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"})
 
 
+def _projection_fits(row: Mapping[str, Number]) -> bool:
+    """``hours_for_vault_of_chunks`` is ``vault_chunks_assumed / chunks_per_second / 3600``,
+    worked out before either figure was rounded, so it must lie in the range that the stored
+    throughput allows; the throughput of a run that embedded something is above 0."""
+    speed = row["chunks_per_second"]
+    if speed <= 0:
+        return False
+    vault = row["vault_chunks_assumed"]
+    low = vault / (speed + ROUNDING) / 3600
+    high = vault / (speed - ROUNDING) / 3600 if speed > ROUNDING else math.inf
+    return rounded_within(row["hours_for_vault_of_chunks"], low, high)
+
+
 def _scores_fit_the_counts(row: Mapping[str, Number]) -> bool:
     """Scores exist exactly when questions were scored, and Hit@1 exactly when some of them are
-    find-the-document questions, which cannot be more than the questions scored. A run that got
-    this far embedded at least one chunk, in vectors of at least one dimension, in batches of at
-    least one, and projected a vault of at least one chunk."""
+    find-the-document questions, which cannot be more than the questions scored; Hit@1 is a whole
+    number of hits out of those. A run that got this far embedded at least one chunk, in vectors
+    of at least one dimension, in batches of at least one, and projected a vault of at least one
+    chunk at the throughput it measured. Its chunks hold 1 to ``DEFAULT_MAX_CHARS`` characters and
+    overlap by what ``corpus.overlap_for`` can give (``DEFAULT_OVERLAP`` to half a chunk). Only
+    the passages of scored questions are looked for in the chunks, and torch never allocates more
+    video memory than its allocator has reserved."""
     scored = row["questions_scored"] > 0
     marked = row.get("hit_at_1_questions", 0)
     return (
@@ -136,9 +166,18 @@ def _scores_fit_the_counts(row: Mapping[str, Number]) -> bool:
         and row["dimensions"] >= 1
         and row["batch_size"] >= 1
         and row["vault_chunks_assumed"] >= 1
+        and _projection_fits(row)
+        and 1 <= row["mean_chunk_chars"] <= DEFAULT_MAX_CHARS
+        and DEFAULT_OVERLAP <= row["chunk_overlap_chars"] <= DEFAULT_MAX_CHARS // 2
         and ("recall_at_10" in row) == scored
+        and (scored or row["sources_not_in_any_chunk"] == 0)
         and ("hit_at_1" in row) == (marked > 0)
         and marked <= row["questions_scored"]
+        and ("hit_at_1" not in row or whole_share(row["hit_at_1"], int(marked)))
+        and (
+            "gpu_peak_allocated_mib" not in row
+            or row["gpu_peak_allocated_mib"] <= row["gpu_peak_reserved_mib"]
+        )
     )
 
 

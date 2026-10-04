@@ -7,14 +7,17 @@ only, never document text or file names.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Sequence
+import warnings
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import NoReturn
 
@@ -132,9 +135,14 @@ def parser() -> argparse.ArgumentParser:
     emb.add_argument("--vault-chunks", type=positive_int, default=100_000)
 
     fetch = commands.add_parser(
-        "fetch-model", help="download an embedding model before it is measured (not timed)"
+        "fetch-model",
+        help="download an embedding model, or RapidOCR's model files, before it is measured",
     )
-    fetch.add_argument("--candidate", choices=sorted(adapters.EMBEDDING_MODELS), required=True)
+    fetch.add_argument(
+        "--candidate",
+        choices=[*sorted(adapters.EMBEDDING_MODELS), adapters.RapidOcrEngine.name],
+        required=True,
+    )
 
     ocr = commands.add_parser("ocr", help="OCR accuracy and speed")
     common(ocr)
@@ -187,8 +195,8 @@ def available() -> dict[str, bool]:
 def require_embedding_inputs(corpus: Path, questions: Path) -> None:
     """Say plainly what is missing, instead of failing in the middle of a model download.
 
-    The defaults point at the public synthetic corpus and eval set, which arrive in the demo
-    corpus pull request; until that is merged, pass ``--corpus`` and ``--questions``.
+    The defaults point at the public synthetic corpus and eval set (``demo/corpus`` and
+    ``eval/public``); ``--corpus`` and ``--questions`` point at the owner's own.
     """
     missing = [
         what
@@ -203,9 +211,8 @@ def require_embedding_inputs(corpus: Path, questions: Path) -> None:
     ]
     if missing:
         msg = (
-            "cannot find " + " and ".join(missing) + ". The public synthetic corpus and eval set "
-            "(demo/corpus and eval/public) come with the demo corpus change and are not in "
-            "this checkout yet; pass your own paths to run the embedding spike"
+            "cannot find " + " and ".join(missing) + ". Without the options the spike reads the "
+            "public synthetic corpus and eval set (demo/corpus and eval/public in the repository)"
         )
         raise SpikeInputError(msg)
 
@@ -228,7 +235,9 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "check":
         for name, ok in available().items():
             extra = OPTIONAL.get(name)
-            hint = "" if ok or not extra else f"   (uv sync --extra {extra})"
+            hint = (
+                "" if ok or not extra else f"   ({extra} extra: uv sync --python 3.12 --all-extras)"
+            )
             print(f"{name}: {'yes' if ok else 'no'}{hint}")
         loading = probe_extension_loading()
         print(f"sqlite can load extensions: {'yes' if loading['can_load_extensions'] else 'NO'}")
@@ -238,6 +247,9 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "vec":
         spike_vec.check_sizes(args.sizes)
         require_free(args.out, "vec")
+        # Without the package the probe below would report that sqlite-vec does not load, which
+        # is a finding about this PC; a missing install is not one.
+        adapters.require_installed("sqlite_vec", "vec")
         with tempfile.TemporaryDirectory() as folder:
             report = run_vec_spike(
                 lambda dim: SqliteVecStore(dim, Path(folder)),
@@ -265,13 +277,13 @@ def run(args: argparse.Namespace) -> int:
         public = is_public_dataset(args.corpus, args.questions)
         stem = f"embedding-{embedder.name}-{'public' if public else 'private'}"
         require_free(args.out, stem)
-        pdf_pages = adapters.pdf_pages_for_corpus if available()["pypdfium2"] else None
+        adapters.require_embedding_libraries()
         documents = load_manifest(args.corpus / "manifest.json")
         questions = load_questions(args.questions)
         check_sources_listed(questions, documents)
         overlap = overlap_for(questions)
         inputs = EmbeddingInputs(
-            build_corpus(args.corpus, documents, pdf_pages, overlap=overlap),
+            build_corpus(args.corpus, documents, adapters.pdf_pages_for_corpus, overlap=overlap),
             documents,
             questions,
             overlap,
@@ -363,10 +375,36 @@ def expand_inputs(given: Sequence[Path]) -> list[Path]:
     return found
 
 
+@contextlib.contextmanager
+def libraries_silenced() -> Iterator[None]:
+    """Keep what libraries log and warn off the console while a command runs.
+
+    What a library says is not this package's to vouch for. pdfminer, which pdfplumber runs,
+    logs the tokens of a malformed page (the words on it among them), RapidOCR logs the paths of
+    its model files, and huggingface_hub warns with the path of its cache. Python prints a
+    library's warnings and errors on the console when nothing else handles them, and RapidOCR
+    gives its logger a console handler of its own, so the switch is global: no log record and no
+    warning is shown until the command is over. Native code (onnxruntime, torch) and the
+    download progress bars write to the console without Python's logging; what they say names
+    models and devices, not documents.
+    """
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        # record=True: a warning that a library lets through with a filter of its own is collected
+        # here and dropped, not printed.
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        logging.disable(previous)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        return run(args)
+        with libraries_silenced():
+            return run(args)
     except OwnMessage as error:
         # Fixed text written in this package; it names no file and quotes no document.
         print(f"error: {error}", file=sys.stderr)

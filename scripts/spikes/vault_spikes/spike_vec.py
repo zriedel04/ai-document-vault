@@ -21,20 +21,30 @@ from typing import Protocol
 
 from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.metrics import mean, peak_memory_mib, per_second, percentile
-from vault_spikes.report import Environment, Kind, Report, RowShape, collect_environment
+from vault_spikes.report import (
+    Environment,
+    Kind,
+    Report,
+    RowShape,
+    collect_environment,
+    whole_share,
+)
 
 TITLE = "sqlite-vec on this PC"
 QUESTION = (
     "Does the sqlite-vec extension load into this Python's sqlite3, and what are the insert rate, "
     "database size and exact-search latency at 10,000 and 100,000 vectors? Feeds ADR 0004."
 )
+PROBES = 5
+"""How many queries the correctness check asks; ``same_answer_as_python`` is a share of them."""
 METHOD = (
     "`python -m vault_spikes vec`. Random unit-free float32 vectors from a seeded generator are "
     "inserted into a `vec0` table; each size is queried with random vectors for the 10 nearest "
     "neighbours (exact, brute force). Latency is wall-clock time per query. Correctness compares "
-    "the extension's answers with a plain-Python search on the smallest size: the same ten "
-    "neighbours in the same order, because the application uses the ranking (two neighbours whose "
-    "distances are equal within float32 rounding may swap). No document text is involved."
+    f"the extension's answers to {PROBES} random queries with a plain-Python search over a "
+    "separate, smaller set of vectors (the `vectors` of the `exact-search-check` row): the same "
+    "ten neighbours in the same order, because the application uses the ranking (two neighbours "
+    "whose distances are equal within float32 rounding may swap). No document text is involved."
 )
 PACKAGES = ("sqlite-vec",)
 # What a report of this spike may contain (checked when a report is read back for a merge).
@@ -57,11 +67,17 @@ ROWS = (
         frozenset({"can_load_extensions", "vec_loads"}),
         # An extension cannot load into a Python that cannot load extensions.
         consistent=lambda row: bool(row["can_load_extensions"]) or not row["vec_loads"],
+        # The command line refuses to run without the package, so "does not load" is a finding
+        # about this PC and never a missing install.
+        packages=frozenset({"sqlite-vec"}),
     ),
     RowShape(
         re.compile(r"exact-search-check"),
         frozenset({"vectors", "same_answer_as_python"}),
-        consistent=lambda row: row["vectors"] > 0,
+        # The share is of PROBES queries, each of which matched or did not.
+        consistent=lambda row: (
+            row["vectors"] > 0 and whole_share(row["same_answer_as_python"], PROBES)
+        ),
         packages=frozenset({"sqlite-vec"}),
     ),
     RowShape(
@@ -77,7 +93,15 @@ ROWS = (
             }
         ),
         frozenset({"peak_memory_mib"}),
-        consistent=lambda row: row["dim"] > 0 and row["queries_timed"] > 0,
+        # A size that was measured inserted something into a file of some size, and its median
+        # latency is never above its 95th percentile.
+        consistent=lambda row: (
+            row["dim"] > 0
+            and row["queries_timed"] > 0
+            and row["insert_vectors_per_second"] > 0
+            and row["database_mib"] > 0
+            and row["query_ms_p50"] <= row["query_ms_p95"]
+        ),
         packages=frozenset({"sqlite-vec"}),
     ),
 )
@@ -274,7 +298,7 @@ def run_vec_spike(
     store = make_store(dim)
     try:
         store.insert(enumerate(vectors, start=1))
-        probes = list(random_vectors(5, dim, seed + 1))
+        probes = list(random_vectors(PROBES, dim, seed + 1))
         matches = [same_ranking(store.nearest(p, k), vectors, p, k) for p in probes]
     finally:
         store.close()

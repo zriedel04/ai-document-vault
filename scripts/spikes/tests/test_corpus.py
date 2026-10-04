@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import tempfile
 import unittest
@@ -193,6 +194,87 @@ class LoaderTest(unittest.TestCase):
                 c.load_manifest(self.write("bad.json", text))
         with self.assertRaises(c.SpikeInputError):
             c.load_manifest(self.root / "missing.json")
+
+
+class WindowsTextTest(unittest.TestCase):
+    """Files the owner writes on Windows come in more than one encoding (Windows PowerShell 5.1
+    writes UTF-16 with ``>``, UTF-32 with ``-Encoding UTF32`` and a byte order mark with
+    ``Set-Content -Encoding UTF8``; Notepad can save "UTF-8 with BOM"). Each is read as the text it
+    holds, and the mark never becomes text."""
+
+    TEXT = "Introduction\r\nMéthodes 2.5\n"
+    ENCODINGS: ClassVar[dict[str, bytes]] = {
+        "UTF-8": TEXT.encode("utf-8"),
+        "UTF-8 with a byte order mark": codecs.BOM_UTF8 + TEXT.encode("utf-8"),
+        "UTF-16 LE with a mark": codecs.BOM_UTF16_LE + TEXT.encode("utf-16-le"),
+        "UTF-16 BE with a mark": codecs.BOM_UTF16_BE + TEXT.encode("utf-16-be"),
+        "UTF-32 LE with a mark": codecs.BOM_UTF32_LE + TEXT.encode("utf-32-le"),
+        "UTF-32 BE with a mark": codecs.BOM_UTF32_BE + TEXT.encode("utf-32-be"),
+    }
+
+    def setUp(self) -> None:
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.root = Path(self.folder.name)
+
+    def test_each_encoding_gives_the_same_text_with_plain_line_ends(self) -> None:
+        for name, data in self.ENCODINGS.items():
+            with self.subTest(name):
+                self.assertEqual(c.decode_text(data), "Introduction\nMéthodes 2.5\n")
+                path = self.root / "file.txt"
+                path.write_bytes(data)
+                self.assertEqual(c.read_owner_text(path, "a file"), "Introduction\nMéthodes 2.5\n")
+
+    def test_bytes_that_are_not_text_are_refused_without_naming_the_file(self) -> None:
+        path = self.root / "Patient-Name.txt"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\xfd")
+        with self.assertRaises(c.SpikeInputError) as caught:
+            c.read_owner_text(path, "a reference text file")
+        self.assertEqual(
+            str(caught.exception),
+            "a reference text file is not text this script can read; save it as UTF-8",
+        )
+
+    def test_utf16_or_utf32_without_a_mark_is_refused_not_misread(self) -> None:
+        """Without a mark such a file is valid UTF-8 with a NUL between the letters, which would be
+        a reference that matches nothing and a score lowered without a warning."""
+        for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+            with self.subTest(encoding):
+                path = self.root / "reference.txt"
+                path.write_bytes("Introduction".encode(encoding))
+                with self.assertRaises(c.SpikeInputError) as caught:
+                    c.read_owner_text(path, "a reference text file")
+                self.assertIn("is not text this script can read", str(caught.exception))
+
+    def test_the_manifest_and_the_eval_file_may_be_saved_by_windows_tools(self) -> None:
+        manifest = json.dumps({"documents": [{"path": "a.txt", "kind": "text"}]})
+        questions = "questions:\n- {id: q1, question: q, category: c, answerable: false}\n"
+        for name, mark, encoding in (
+            ("UTF-8 with a byte order mark", codecs.BOM_UTF8, "utf-8"),
+            ("UTF-16 LE with a mark", codecs.BOM_UTF16_LE, "utf-16-le"),
+        ):
+            with self.subTest(name):
+                (self.root / "manifest.json").write_bytes(mark + manifest.encode(encoding))
+                (self.root / "questions.yaml").write_bytes(mark + questions.encode(encoding))
+                self.assertEqual(
+                    [d.path for d in c.load_manifest(self.root / "manifest.json")], ["a.txt"]
+                )
+                self.assertEqual(
+                    [q.id for q in c.load_questions(self.root / "questions.yaml")], ["q1"]
+                )
+
+    def test_an_undecodable_manifest_says_so_and_not_which_file(self) -> None:
+        (self.root / "manifest.json").write_bytes(b'{"documents": "\xff\xfd"}')
+        with self.assertRaises(c.SpikeInputError) as caught:
+            c.load_manifest(self.root / "manifest.json")
+        self.assertIn("the manifest is not text this script can read", str(caught.exception))
+
+    def test_a_utf16_document_is_read_as_its_text(self) -> None:
+        (self.root / "notes.txt").write_bytes(self.ENCODINGS["UTF-16 LE with a mark"])
+        document = c.Document("notes.txt", "text", None, False, None)
+        self.assertEqual(
+            c.read_pages(self.root / "notes.txt", document), ["Introduction\nMéthodes 2.5\n"]
+        )
 
 
 class ReadingTest(unittest.TestCase):
@@ -389,7 +471,7 @@ class ReadingTest(unittest.TestCase):
         path.write_text("readable text", encoding="utf-8")
         document = c.Document("a/held.txt", "txt", None, False, None)
         self.assertEqual(c.read_pages(path, document), ["readable text"])
-        for step in ("read_text", "stat"):
+        for step in ("read_bytes", "stat"):
             with (
                 self.subTest(step=step),
                 mock.patch.object(Path, step, side_effect=PermissionError("held")),
@@ -404,14 +486,14 @@ class ReadingTest(unittest.TestCase):
     def test_a_held_file_is_counted_and_the_corpus_is_still_built(self) -> None:
         for name in ("syllabus.txt", "copy.txt"):
             (self.root / "a" / name).write_text("fine " * 10, encoding="utf-8")
-        real = Path.read_text
+        real = Path.read_bytes
 
-        def held(path: Path, *args: object, **kwargs: object) -> str:
+        def held(path: Path) -> bytes:
             if path.name == "syllabus.txt":
                 raise PermissionError("held")
-            return real(path, *args, **kwargs)  # type: ignore[arg-type]
+            return real(path)
 
-        with mock.patch.object(Path, "read_text", held):
+        with mock.patch.object(Path, "read_bytes", held):
             corpus = c.build_corpus(self.root, self.documents, lambda _path: None)
         self.assertNotIn("a/syllabus.txt", corpus.readable)
         self.assertNotIn("a/copy.txt", corpus.readable)  # its original could not be read

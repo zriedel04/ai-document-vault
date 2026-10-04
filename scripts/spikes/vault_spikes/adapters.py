@@ -32,12 +32,34 @@ class MissingDependencyError(OwnMessage, RuntimeError):
     """An optional library or program is not installed."""
 
 
-def _need(module: str, extra: str) -> None:
+def require_installed(module: str, extra: str) -> None:
+    """Stop with a message if ``module`` cannot be imported.
+
+    The message names all the extras, not just this one: ``uv sync --extra X`` makes the
+    environment hold exactly what it lists, so it would remove the libraries of the other spikes.
+    """
     try:
         __import__(module)
     except ImportError:
-        msg = f"{module} is not installed; install it with: uv sync --extra {extra}"
+        msg = (
+            f"{module} is not installed (the {extra} extra); install the spike libraries with: "
+            "uv sync --python 3.12 --all-extras"
+        )
         raise MissingDependencyError(msg) from None
+
+
+EMBEDDING_LIBRARIES = ("sentence_transformers", "pypdfium2")
+
+
+def require_embedding_libraries() -> None:
+    """Stop before the corpus is read if a library of the embedding spike is missing.
+
+    pypdfium2 is one of them because the corpus reader reads PDFs with it. Without it, every PDF
+    would be skipped as unreadable and the questions on them left out of the scores, so the report
+    would compare the candidates on a smaller corpus than the one it names.
+    """
+    for module in EMBEDDING_LIBRARIES:
+        require_installed(module, "embedding")
 
 
 def require_cuda() -> None:
@@ -46,7 +68,7 @@ def require_cuda() -> None:
     The torch wheels that PyPI serves for Windows are CPU-only, so a plain ``uv sync`` gives a
     working install that would otherwise fail deep inside the model loader.
     """
-    _need("torch", "embedding")
+    require_installed("torch", "embedding")
     import torch
 
     if not torch.cuda.is_available():
@@ -92,7 +114,7 @@ class SentenceTransformerEmbedder:
         self.model: object = None
 
     def load(self) -> None:
-        _need("sentence_transformers", "embedding")
+        require_installed("sentence_transformers", "embedding")
         if self.device == "cuda":
             require_cuda()
         from sentence_transformers import SentenceTransformer
@@ -138,10 +160,15 @@ class SentenceTransformerEmbedder:
 
 def fetch_model(candidate: str) -> None:
     """Download a candidate's files into the local cache, outside any measurement."""
+    if candidate == RapidOcrEngine.name:
+        # RapidOCR downloads its model files the first time it is loaded, and the OCR spike times
+        # the load. Loading it once here keeps the download out of that time.
+        RapidOcrEngine().load()
+        return
     if candidate not in EMBEDDING_MODELS:
         msg = f"unknown candidate {candidate!r}; choose one of {sorted(EMBEDDING_MODELS)}"
         raise OwnValueError(msg)
-    _need("sentence_transformers", "embedding")
+    require_installed("sentence_transformers", "embedding")
     from sentence_transformers import SentenceTransformer
 
     try:
@@ -193,7 +220,8 @@ class RapidOcrEngine:
         self.engine: Callable[[str], object] | None = None
 
     def load(self) -> None:
-        _need("rapidocr", "ocr")
+        require_installed("rapidocr", "ocr")
+        require_installed("onnxruntime", "ocr")  # the engine RapidOCR runs its models on
         from rapidocr import ModelType, OCRVersion, RapidOCR
 
         # The package default is not PP-OCRv5 (it is PP-OCRv4 before 3.9 and PP-OCRv6 from 3.9), so
@@ -279,8 +307,11 @@ class Pypdfium2Extractor:
     name = "pypdfium2"
     detects_headings = False
 
+    def load(self) -> None:
+        require_installed("pypdfium2", "pdf")
+
     def extract(self, path: Path) -> PdfText:
-        _need("pypdfium2", "pdf")
+        require_installed("pypdfium2", "pdf")
         import pypdfium2
 
         try:
@@ -331,8 +362,12 @@ class PypdfiumPlumberExtractor:
     name = "pypdfium2+pdfplumber"
     detects_headings = True
 
+    def load(self) -> None:
+        require_installed("pypdfium2", "pdf")
+        require_installed("pdfplumber", "pdf")
+
     def extract(self, path: Path) -> PdfText:
-        _need("pdfplumber", "pdf")
+        require_installed("pdfplumber", "pdf")
         import pdfplumber
 
         text = Pypdfium2Extractor().extract(path)

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from vault_spikes.corpus import read_owner_text
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     character_error_rate,
@@ -26,12 +27,14 @@ from vault_spikes.metrics import (
     percentile,
 )
 from vault_spikes.report import (
+    ROUNDING,
     Environment,
     Kind,
     Number,
     Report,
     RowShape,
     collect_environment,
+    rounded_within,
 )
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"})
@@ -45,7 +48,10 @@ METHOD = (
     "memory is that engine's. Every image in DIR with a reference text file of the same name is "
     "recognised once. Character error rate is the edit distance between the recognised and the "
     "reference text (whitespace collapsed) divided by the reference length; time is wall-clock per "
-    "image after one untimed warm-up image. Images per minute counts the time lost in failed "
+    "image after one untimed warm-up image. RapidOCR downloads its model files the first time "
+    "it is loaded, so they are fetched beforehand with `fetch-model --candidate "
+    "rapidocr-ppocrv5`, and `load_seconds` includes a download only if that step was skipped. "
+    "Images per minute counts the time lost in failed "
     "calls as well (a timeout can take minutes), and a second error figure counts each failed "
     "image as a wrong one. Peak memory is this process's working set, so it is reported only "
     "for an engine that runs inside it (RapidOCR); Tesseract runs as a separate program per "
@@ -105,12 +111,30 @@ _OCR_READ = frozenset(
 )
 
 
+def _failure_mean_fits(row: Mapping[str, Number], read: int) -> bool:
+    """``cer_mean_failures_as_errors`` is the mean over the images read and the failed calls, a
+    failed call counting as 1, so it follows from ``cer_mean`` and the counts (1 when every call
+    failed). It is checked within the rounding of both figures."""
+    if "cer_mean_failures_as_errors" not in row:
+        return True
+    failures = row["failures"]
+    if read == 0:
+        low = high = 1.0
+    else:
+        cer = row["cer_mean"]
+        low = ((cer - ROUNDING) * read + failures) / (read + failures)
+        high = ((cer + ROUNDING) * read + failures) / (read + failures)
+    return rounded_within(row["cer_mean_failures_as_errors"], low, high)
+
+
 def _read_figures_fit_the_counts(row: Mapping[str, Number]) -> bool:
     """Accuracy figures exist exactly when some image was read: the images, less the references
     that could not be scored and the calls that failed. The failures-as-errors mean also counts
-    the failed calls, so it exists when any scored image was tried. Empty results are among the
-    images read."""
-    read = row["images"] - row["references_unusable"] - row["failures"]
+    the failed calls, so it exists when any scored image was tried, and its value follows from the
+    mean of the images read. Empty results are among the images read, and a median is never above
+    the higher percentile of the same figures. Images per minute needs some OCR work behind it,
+    and is above 0 exactly when an image was read."""
+    read = int(row["images"] - row["references_unusable"] - row["failures"])
     tried = row["images"] - row["references_unusable"]
     return (
         read >= 0
@@ -118,6 +142,18 @@ def _read_figures_fit_the_counts(row: Mapping[str, Number]) -> bool:
         and row["empty_results"] <= read
         and ("cer_mean" in row) == (read > 0)
         and ("cer_mean_failures_as_errors" in row) == (tried > 0)
+        and _failure_mean_fits(row, read)
+        and (
+            "images_per_minute" not in row
+            or (tried > 0 and (row["images_per_minute"] > 0) == (read > 0))
+        )
+        and (
+            "cer_median" not in row
+            or (
+                row["cer_median"] <= row["cer_p90"]
+                and row["seconds_per_image_p50"] <= row["seconds_per_image_p95"]
+            )
+        )
     )
 
 
@@ -168,7 +204,9 @@ def find_labelled_images(
     images_dir: Path, references_dir: Path | None = None
 ) -> list[LabelledImage]:
     """Images in ``images_dir`` that have a ``<name>.txt`` reference (in ``references_dir`` or next
-    to the image). Images without a reference are ignored; an unreadable reference is an error."""
+    to the image). Images without a reference are ignored; an unreadable reference is an error,
+    found here, before any image is read. A reference may be UTF-8 with or without a byte order
+    mark, or UTF-16 or UTF-32 with one (``corpus.decode_text``)."""
     folder = references_dir or images_dir
     found: list[LabelledImage] = []
     for image in sorted(images_dir.iterdir()):
@@ -176,7 +214,8 @@ def find_labelled_images(
             continue
         reference_file = folder / f"{image.stem}.txt"
         if reference_file.is_file():
-            found.append(LabelledImage(image, reference_file.read_text(encoding="utf-8")))
+            reference = read_owner_text(reference_file, "a reference text file")
+            found.append(LabelledImage(image, reference))
     return found
 
 

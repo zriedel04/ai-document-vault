@@ -79,7 +79,10 @@ class MissingLibraryTest(unittest.TestCase):
                     adapters.SentenceTransformerEmbedder("qwen3-embedding-0.6b", "cpu").load,
                     "embedding",
                 ),
+                (adapters.require_embedding_libraries, "embedding"),
                 (adapters.RapidOcrEngine().load, "ocr"),
+                (adapters.Pypdfium2Extractor().load, "pdf"),
+                (adapters.PypdfiumPlumberExtractor().load, "pdf"),
                 (lambda: adapters.Pypdfium2Extractor().extract(Path("x.pdf")), "pdf"),
                 (lambda: adapters.PypdfiumPlumberExtractor().extract(Path("x.pdf")), "pdf"),
             ):
@@ -88,7 +91,40 @@ class MissingLibraryTest(unittest.TestCase):
                     self.assertRaises(adapters.MissingDependencyError) as ctx,
                 ):
                     call()
-                self.assertIn(f"--extra {extra}", str(ctx.exception))
+                self.assertIn(f"(the {extra} extra)", str(ctx.exception))
+                # One extra at a time would remove the others' libraries (uv sync is exact).
+                self.assertIn("uv sync --python 3.12 --all-extras", str(ctx.exception))
+
+    def test_the_heading_extractor_needs_both_pdf_libraries(self) -> None:
+        for missing in ("pypdfium2", "pdfplumber"):
+            with (
+                self.subTest(missing=missing),
+                mock.patch.dict(sys.modules, {"pypdfium2": mock.MagicMock()}),
+                mock.patch.dict(sys.modules, {"pdfplumber": mock.MagicMock(), missing: None}),
+                self.assertRaises(adapters.MissingDependencyError) as caught,
+            ):
+                adapters.PypdfiumPlumberExtractor().load()
+            self.assertIn(missing, str(caught.exception))
+
+    def test_rapidocr_needs_the_engine_it_runs_its_models_on(self) -> None:
+        with (
+            mock.patch.dict(sys.modules, {"rapidocr": mock.MagicMock(), "onnxruntime": None}),
+            self.assertRaises(adapters.MissingDependencyError) as caught,
+        ):
+            adapters.RapidOcrEngine().load()
+        self.assertIn("onnxruntime is not installed", str(caught.exception))
+
+    def test_the_embedding_spike_needs_the_pdf_reader_as_well_as_the_model_library(self) -> None:
+        # Without pypdfium2 every PDF of the corpus would be skipped as unreadable.
+        with (
+            mock.patch.dict(
+                sys.modules, {"sentence_transformers": mock.MagicMock(), "pypdfium2": None}
+            ),
+            self.assertRaises(adapters.MissingDependencyError) as caught,
+        ):
+            adapters.require_embedding_libraries()
+        self.assertIn("pypdfium2 is not installed", str(caught.exception))
+        self.assertIn("pypdfium2", spike_embedding.PACKAGES)  # its version is recorded
 
     def test_a_missing_gpu_library_means_no_gpu(self) -> None:
         with mock.patch.dict(sys.modules, {"torch": None}):
@@ -140,7 +176,7 @@ class RapidOcrModelTest(unittest.TestCase):
 
     def test_detection_and_recognition_are_configured_as_pp_ocr_v5(self) -> None:
         module, engine = self.fake_rapidocr()
-        with mock.patch.dict(sys.modules, {"rapidocr": module}):
+        with mock.patch.dict(sys.modules, {"rapidocr": module, "onnxruntime": mock.MagicMock()}):
             adapters.RapidOcrEngine().load()
         engine.assert_called_once()
         params = engine.call_args.kwargs["params"]
@@ -287,7 +323,7 @@ class RequireCudaTest(unittest.TestCase):
             self.assertRaises(adapters.MissingDependencyError) as caught,
         ):
             adapters.require_cuda()
-        self.assertIn("--extra embedding", str(caught.exception))
+        self.assertIn("(the embedding extra)", str(caught.exception))
 
     def test_the_cpu_embedder_does_not_ask_for_cuda(self) -> None:
         # load() on the CPU path must not call require_cuda (it would fail on a CPU-only torch).
@@ -360,6 +396,15 @@ class RequireCudaTest(unittest.TestCase):
         fake_st.SentenceTransformer.assert_called_once_with(
             "google/embeddinggemma-300m", device="cpu"
         )
+
+    def test_fetching_the_ocr_models_loads_rapidocr_once(self) -> None:
+        # RapidOCR downloads its model files on its first load; the OCR spike times the load.
+        with (
+            mock.patch.object(adapters.RapidOcrEngine, "load") as load,
+            mock.patch.dict(sys.modules, {"sentence_transformers": None}),
+        ):
+            adapters.fetch_model("rapidocr-ppocrv5")
+        load.assert_called_once_with()
 
     def test_a_failed_download_is_explained(self) -> None:
         fake_st = mock.MagicMock()

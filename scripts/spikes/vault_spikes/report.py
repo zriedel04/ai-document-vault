@@ -91,6 +91,39 @@ class Kind(Enum):
 
 # Far above anything a spike measures, and a bound a hand-edited file cannot overshoot silently.
 LARGEST_VALUE: Final = 10**12
+DECIMALS: Final = 4
+"""How many decimals of a float ``Report.add`` keeps."""
+ROUNDING: Final = 0.5 * 10**-DECIMALS
+"""How far a stored float may lie from the value the script computed."""
+
+
+def rounded_within(value: float, low: float, high: float) -> bool:
+    """Could ``value``, as a report stores it, be a number from ``low`` to ``high`` rounded to
+    ``DECIMALS``? A figure computed from others in its row is checked with this, so a hand-edited
+    report cannot carry a figure that contradicts the ones it was computed from."""
+    slack = ROUNDING + 1e-9 * max(abs(low), abs(high), 1.0)
+    return low - slack <= value <= high + slack
+
+
+def whole_share(share: float, count: int) -> bool:
+    """Is ``share`` (as stored) a whole number of ``count`` parts, such as hits out of questions?"""
+    if count < 1:
+        return False
+    parts = round(share * count)
+    return rounded_within(share, parts / count, parts / count)
+
+
+def right_share(share: float, wrong: int) -> bool:
+    """Could ``share`` (as stored) be the right ones among a whole number of answers, ``wrong`` of
+    which were wrong, such as a precision beside its false positives? The number of answers is not
+    in the row, but ``wrong / (1 - share)`` must come out whole within the rounding."""
+    if wrong == 0:
+        return rounded_within(share, 1.0, 1.0)
+    room = 1.0 - share
+    if room <= ROUNDING:  # a stored 1.0 can be a precision just below it, over many answers
+        return True
+    fewest, most = wrong / (room + ROUNDING), wrong / (room - ROUNDING)
+    return math.floor(most + 1e-9) >= max(math.ceil(fewest - 1e-9), wrong)
 
 
 def in_domain(kind: Kind, value: object) -> bool:
@@ -371,6 +404,15 @@ class Row:
     environment: Environment | None = None
 
 
+def _row_label(row: Row) -> str:
+    """The candidate, and the data set when the row records one. A merged report holds the same
+    candidate measured on the public and on the private files, and its Environment sections and
+    table must say which row is which."""
+    if "public_dataset" not in row.metrics:
+        return row.candidate
+    return f"{row.candidate} ({'public' if row.metrics['public_dataset'] else 'private'} data)"
+
+
 def _row_json(row: Row) -> dict[str, object]:
     data: dict[str, object] = {"candidate": row.candidate, "metrics": row.metrics}
     if row.environment is not None:
@@ -423,7 +465,7 @@ class Report:
             if isinstance(value, float) and not math.isfinite(value):
                 msg = f"metric {name} must be finite"
                 raise OwnValueError(msg)
-            row.metrics[name] = round(value, 4) if isinstance(value, float) else value
+            row.metrics[name] = round(value, DECIMALS) if isinstance(value, float) else value
         self.rows.append(row)
 
     def to_json(self) -> dict[str, object]:
@@ -516,9 +558,9 @@ class Report:
         shared: list[str] = []
         for row in self.rows:
             if row.environment is not None and row.environment != self.environment:
-                own.append((row.candidate, row.environment))
+                own.append((_row_label(row), row.environment))
             else:
-                shared.append(row.candidate)
+                shared.append(_row_label(row))
         if own:
             lines += [f"Environment of {', '.join(shared) or 'the other candidates'}:", ""]
         models = self.spike == "embedding"  # the only spike that loads a downloaded model
@@ -532,7 +574,7 @@ class Report:
         lines.append("| --- | " + " | ".join("---" for _ in metric_names) + " |")
         for row in self.rows:
             cells = [str(row.metrics.get(name, "")) for name in metric_names]
-            lines.append(f"| {row.candidate} | " + " | ".join(cells) + " |")
+            lines.append(f"| {_row_label(row)} | " + " | ".join(cells) + " |")
         lines += ["", "## Conclusion", "", CONCLUSION_PLACEHOLDER, ""]
         return "\n".join(lines)
 

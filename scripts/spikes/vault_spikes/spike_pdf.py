@@ -19,15 +19,19 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from vault_spikes.corpus import read_owner_text
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import mean, median, peak_memory_mib, per_second, word_error_rate
 from vault_spikes.report import (
+    ROUNDING,
     Environment,
     Kind,
     Number,
     Report,
     RowShape,
     collect_environment,
+    right_share,
+    rounded_within,
 )
 
 TITLE = "PDF extraction on this PC"
@@ -107,6 +111,11 @@ _PDF_WER = frozenset({"wer_mean", "wer_median"})
 _PDF_HEADING_REFERENCE = frozenset({"files_with_heading_reference", "heading_false_positives"})
 
 
+def _harmonic_mean(recall: float, precision: float) -> float:
+    both = recall + precision
+    return 2 * precision * recall / both if both else 0.0
+
+
 def _heading_scores_fit(row: Mapping[str, Number]) -> bool:
     """What ``run_pdf_spike`` can say about headings, and nothing it cannot.
 
@@ -114,8 +123,10 @@ def _heading_scores_fit(row: Mapping[str, Number]) -> bool:
     ``files_with_heading_reference``, and so does a false-positive count. Recall needs expected
     headings and precision needs detected ones, and F1 is written when either exists, so F1 is
     there exactly when recall or precision is. F1 is the harmonic mean of the two when both exist
-    and 0 when only one does. A precision that is missing means nothing was detected, so there
-    are no false positives, and no false positives means every detection was right.
+    and 0 when only one does; it was computed before either was rounded, so it is checked against
+    the range the stored pair allows. A precision that is missing means nothing was detected, so
+    there are no false positives; a precision that is there is the right detections out of a
+    whole number of them, ``heading_false_positives`` of which were wrong.
     """
     scores = ("heading_recall", "heading_precision", "heading_f1")
     reference = row.get("files_with_heading_reference", 0)
@@ -125,21 +136,22 @@ def _heading_scores_fit(row: Mapping[str, Number]) -> bool:
     if ("heading_f1" in row) != (recall is not None or precision is not None):
         return False
     if "heading_f1" in row:
+        low = high = 0.0
         if recall is not None and precision is not None:
-            both = recall + precision
-            expected = 2 * precision * recall / both if both else 0.0
-        else:
-            expected = 0.0
-        if abs(row["heading_f1"] - expected) > 1e-3:
+            # The harmonic mean grows with each of its inputs.
+            low = _harmonic_mean(max(recall - ROUNDING, 0.0), max(precision - ROUNDING, 0.0))
+            high = _harmonic_mean(min(recall + ROUNDING, 1.0), min(precision + ROUNDING, 1.0))
+        if not rounded_within(row["heading_f1"], low, high):
             return False
     if precision is None:
         return row["heading_false_positives"] == 0
-    return row["heading_false_positives"] > 0 or precision == 1.0
+    return right_share(precision, int(row["heading_false_positives"]))
 
 
 def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
-    """Every file ends in exactly one outcome, the pages without text are among the pages, and the
-    word error rates exist exactly when references were used."""
+    """Every file ends in exactly one outcome, the pages without text are among the pages, heading
+    candidates come from some file exactly when there are any, and the word error rates exist
+    exactly when references were used."""
     outcomes = (
         row["files_ok"] + row["files_encrypted"] + row["files_corrupt"] + row["files_other_error"]
     )
@@ -150,10 +162,16 @@ def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
         and row["files_with_heading_candidates"] <= min(row["files_ok"], row["heading_candidates"])
         and row["references_used"] <= row["files_ok"]
         and row.get("files_with_heading_reference", 0) <= row["files_ok"]
-        and ("pages_per_second" not in row or row["pages"] > 0)
+        and ("pages_per_second" not in row or (row["pages"] > 0 and row["pages_per_second"] > 0))
+        and (row["heading_candidates"] > 0) == (row["files_with_heading_candidates"] > 0)
         and ("wer_mean" in row) == (row["references_used"] > 0)
         and _heading_scores_fit(row)
     )
+
+
+def _no_headings_found(row: Mapping[str, Number]) -> bool:
+    """pypdfium2 alone returns no headings, so its rows have no heading candidates."""
+    return _outcomes_add_up(row) and row["heading_candidates"] == 0
 
 
 ROWS = (
@@ -163,7 +181,7 @@ ROWS = (
         _PDF_REQUIRED,
         _PDF_OPTIONAL,
         (_PDF_WER,),
-        _outcomes_add_up,
+        _no_headings_found,
         frozenset({"pypdfium2"}),
     ),
     RowShape(
@@ -214,6 +232,10 @@ class PdfExtractor(Protocol):
     name: str
     detects_headings: bool  # False: the extractor returns no headings, so none are scored
 
+    def load(self) -> None:
+        """Check that the libraries are there. It is called once, before any file is tried, so a
+        missing library stops the run instead of being counted as a failure of every file."""
+
     def extract(self, path: Path) -> PdfText: ...
 
 
@@ -225,6 +247,31 @@ def heading_counts(text: str) -> Counter[str]:
     """The expected headings of a reference file: one per line, blank lines ignored. A heading
     that occurs on several pages is listed once per occurrence."""
     return Counter(line for line in (normalise_heading(raw) for raw in text.splitlines()) if line)
+
+
+@dataclass(frozen=True)
+class Labels:
+    """What the owner wrote down about one PDF: its text (``NAME.txt``) and the headings it has
+    (``NAME.headings.txt``), each None when there is no such file. Kept in memory only."""
+
+    text: str | None
+    headings: Counter[str] | None
+
+
+def read_labels(pdf: Path, folder: Path, *, headings: bool) -> Labels:
+    """The reference files of one PDF. :func:`run_pdf_spike` reads them all before it measures
+    anything, so a file that cannot be read stops the run before the measurement, not halfway
+    through it. A file may be UTF-8 with or without a byte order mark, or UTF-16 or UTF-32 with
+    one (``corpus.decode_text``); the headings file is read only for an extractor that finds
+    headings."""
+    text_file = folder / f"{pdf.stem}.txt"
+    heading_file = folder / f"{pdf.stem}{HEADINGS_SUFFIX}"
+    return Labels(
+        read_owner_text(text_file, "a reference text file") if text_file.is_file() else None,
+        heading_counts(read_owner_text(heading_file, "a headings file"))
+        if headings and heading_file.is_file()
+        else None,
+    )
 
 
 def run_pdf_spike(
@@ -247,6 +294,11 @@ def run_pdf_spike(
         METHOD,
         environment or collect_environment(PACKAGES),
     )
+    extractor.load()  # outside the per-file handling below: a missing library is not a result
+    labels = [
+        read_labels(pdf, references_dir or pdf.parent, headings=extractor.detects_headings)
+        for pdf in pdfs
+    ]
     outcomes = dict.fromkeys(Outcome, 0)
     pages_total = 0
     pages_without_text = 0
@@ -255,7 +307,7 @@ def run_pdf_spike(
     seconds = 0.0
     word_error_rates: list[float] = []
     heading_hits = heading_detected = heading_expected = files_with_heading_reference = 0
-    for pdf in pdfs:
+    for pdf, label in zip(pdfs, labels, strict=True):
         begin = clock()
         try:
             result = extractor.extract(pdf)
@@ -274,10 +326,8 @@ def run_pdf_spike(
         headings += len(result.headings)
         if result.headings:
             files_with_headings += 1
-        reference_dir = references_dir or pdf.parent
-        heading_file = reference_dir / f"{pdf.stem}{HEADINGS_SUFFIX}"
-        if extractor.detects_headings and heading_file.is_file():
-            expected = heading_counts(heading_file.read_text(encoding="utf-8"))
+        if label.headings is not None:
+            expected = label.headings
             detected = Counter(h for h in map(normalise_heading, result.headings) if h)
             # An empty file is a label too: this PDF has no headings, so every heading found in
             # it is a false one and must lower the precision.
@@ -287,12 +337,9 @@ def run_pdf_spike(
             heading_hits += (expected & detected).total()
             heading_detected += detected.total()
             heading_expected += expected.total()
-        reference = reference_dir / f"{pdf.stem}.txt"
-        if reference.is_file():
+        if label.text is not None:
             with contextlib.suppress(ValueError):  # an empty reference is not scored
-                word_error_rates.append(
-                    word_error_rate(reference.read_text(encoding="utf-8"), "\n".join(result.pages))
-                )
+                word_error_rates.append(word_error_rate(label.text, "\n".join(result.pages)))
 
     metrics: dict[str, int | float] = {
         "files": len(pdfs),
@@ -325,8 +372,8 @@ def run_pdf_spike(
             metrics["heading_precision"] = precision
         if heading_expected or heading_detected:
             metrics["heading_f1"] = (
-                2 * precision * recall / (precision + recall)
-                if recall is not None and precision is not None and precision + recall
+                _harmonic_mean(recall, precision)
+                if recall is not None and precision is not None
                 else 0.0
             )
     if (peak := peak_memory_mib()) is not None:

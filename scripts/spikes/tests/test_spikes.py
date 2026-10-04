@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import array
+import codecs
 import json
 import tempfile
 import unittest
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -687,6 +688,20 @@ class OcrTest(unittest.TestCase):
             apart = ocr.find_labelled_images(root, references)
             self.assertEqual([s.image.name for s in apart], ["c.png"])
 
+    def test_a_reference_saved_by_a_windows_tool_scores_as_its_text(self) -> None:
+        # A byte order mark read as a character would add an error to every image.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "a.png").write_bytes(b"x")
+            (root / "a.txt").write_bytes(codecs.BOM_UTF8 + b"alpha beta")
+            (root / "b.png").write_bytes(b"x")
+            (root / "b.txt").write_bytes(codecs.BOM_UTF16_LE + "gamma".encode("utf-16-le"))
+            found = ocr.find_labelled_images(root)
+        self.assertEqual([s.reference for s in found], ["alpha beta", "gamma"])
+        engine = FakeOcr({"a.png": "alpha beta", "b.png": "gamma"})
+        report = ocr.run_ocr_spike(engine, found, environment=ENV, clock=Clock())
+        self.assertEqual(report.rows[0].metrics["cer_mean"], 0.0)
+
 
 # --- pdf ------------------------------------------------------------------------------------
 
@@ -697,11 +712,17 @@ class FakePdf:
         results: dict[str, pdf.PdfText | pdf.Outcome | Exception],
         *,
         detects_headings: bool = True,
+        on_load: Callable[[], None] | None = None,
     ) -> None:
         self.results = results
         self.detects_headings = detects_headings
         # The name of the real extractor this one stands in for, so its rows fit its shape.
         self.name = "pypdfium2+pdfplumber" if detects_headings else "pypdfium2"
+        self.on_load = on_load
+
+    def load(self) -> None:
+        if self.on_load is not None:
+            self.on_load()
 
     def extract(self, path: Path) -> pdf.PdfText:
         result = self.results[path.name]
@@ -736,6 +757,67 @@ class PdfTest(unittest.TestCase):
         self.assertEqual(metrics["files_with_heading_candidates"], 1)
         self.assertEqual(metrics["pages_per_second"], 3 / 4)  # four files, one second each
         self.assertNotIn(PRIVATE_TEXT, everything(report))
+
+    def test_a_missing_library_stops_the_run_and_is_not_a_failure_of_every_file(self) -> None:
+        def missing() -> None:
+            raise adapters.MissingDependencyError("pypdfium2 is not installed")
+
+        extractor = FakePdf({"a.pdf": pdf.PdfText(["text"], [])}, on_load=missing)
+        with (
+            mock.patch.object(extractor, "extract") as extract,
+            self.assertRaises(adapters.MissingDependencyError),
+        ):
+            pdf.run_pdf_spike(extractor, [Path("a.pdf")], environment=ENV, clock=Clock())
+        extract.assert_not_called()
+
+    def test_loading_the_library_is_not_timed_as_extraction(self) -> None:
+        # The first import of pdfplumber takes seconds; inside the first file's time it would
+        # dominate pages per second on a small set of PDFs.
+        clock = Clock(step=1.0)
+
+        def slow_import() -> None:
+            clock.now += 100.0
+
+        extractor = FakePdf({"a.pdf": pdf.PdfText(["one", "two"], [])}, on_load=slow_import)
+        report = pdf.run_pdf_spike(extractor, [Path("a.pdf")], environment=ENV, clock=clock)
+        self.assertEqual(report.rows[0].metrics["pages_per_second"], 2.0)
+
+    def test_reference_files_saved_by_windows_tools_score_as_their_text(self) -> None:
+        # With the mark read as a character, the first heading would never match and the first
+        # word would always be wrong.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "doc.pdf").write_bytes(b"x")
+            (root / "doc.headings.txt").write_bytes(
+                codecs.BOM_UTF8 + b"Introduction\r\nMethods\r\n"
+            )
+            text = "Introduction to methods"
+            (root / "doc.txt").write_bytes(codecs.BOM_UTF16_LE + text.encode("utf-16-le"))
+            extractor = FakePdf({"doc.pdf": pdf.PdfText([text], ["Introduction", "Methods"])})
+            report = pdf.run_pdf_spike(
+                extractor, [root / "doc.pdf"], environment=ENV, clock=Clock()
+            )
+        metrics = report.rows[0].metrics
+        self.assertEqual(metrics["heading_recall"], 1.0)
+        self.assertEqual(metrics["heading_precision"], 1.0)
+        self.assertEqual(metrics["wer_mean"], 0.0)
+
+    def test_an_unreadable_reference_stops_the_run_before_any_pdf_is_measured(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("a.pdf", "b.pdf"):
+                (root / name).write_bytes(b"x")
+            (root / "b.headings.txt").write_bytes(b"\xff\xfd not text")
+            extractor = FakePdf({"a.pdf": pdf.PdfText(["a"], []), "b.pdf": pdf.PdfText(["b"], [])})
+            with (
+                mock.patch.object(extractor, "extract") as extract,
+                self.assertRaises(c.SpikeInputError) as caught,
+            ):
+                pdf.run_pdf_spike(
+                    extractor, [root / "a.pdf", root / "b.pdf"], environment=ENV, clock=Clock()
+                )
+        extract.assert_not_called()
+        self.assertIn("a headings file is not text this script can read", str(caught.exception))
 
     def test_word_error_rate_against_a_reference_file(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
