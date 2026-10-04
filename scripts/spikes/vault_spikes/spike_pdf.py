@@ -158,13 +158,21 @@ def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
 
 ROWS = (
     # Only the extractor that detects headings can be scored on them.
-    RowShape(re.compile(r"pypdfium2"), _PDF_REQUIRED, _PDF_OPTIONAL, (_PDF_WER,), _outcomes_add_up),
+    RowShape(
+        re.compile(r"pypdfium2"),
+        _PDF_REQUIRED,
+        _PDF_OPTIONAL,
+        (_PDF_WER,),
+        _outcomes_add_up,
+        frozenset({"pypdfium2"}),
+    ),
     RowShape(
         re.compile(r"pypdfium2\+pdfplumber"),
         _PDF_REQUIRED,
         _PDF_OPTIONAL | _PDF_HEADING_ACCURACY,
         (_PDF_WER, _PDF_HEADING_REFERENCE),
         _outcomes_add_up,
+        frozenset({"pypdfium2", "pdfplumber"}),
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

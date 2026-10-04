@@ -66,7 +66,9 @@ _RELEASE = r"(?:\d{1,4}!)?\d{1,10}(?:\.\d{1,10}){0,4}"
 _SUFFIX = r"(?:(?:a|b|rc)\d{1,4})?(?:\.post\d{1,4})?(?:\.dev\d{1,4})?"
 _LOCAL = r"(?:\+(?:\d{1,10}|cpu|cu\d{2,4}|rocm\d{1,3}(?:\.\d{1,3})?|mps|metal|dml))?"
 PYTHON_VERSION = re.compile(r"\d{1,2}\.\d{1,3}(?:\.\d{1,3})?(?:(?:a|b|rc)\d{1,3})?\+?")
-PACKAGE_VERSION = re.compile(rf"{_RELEASE}{_SUFFIX}{_LOCAL}|not installed|unknown")
+MODEL_REVISION = re.compile(r"[0-9a-f]{40}")
+NOT_INSTALLED: Final = "not installed"
+PACKAGE_VERSION = re.compile(rf"{_RELEASE}{_SUFFIX}{_LOCAL}|{NOT_INSTALLED}|unknown")
 SECTIONS: Final = ("Question", "Environment", "Method", "Results", "Conclusion")
 CONCLUSION_PLACEHOLDER: Final = (
     "To be written after the owner has reviewed these results. Do not accept the ADR from this "
@@ -122,8 +124,9 @@ class RowShape(NamedTuple):
     ``consistent`` judges what a row's own numbers say about each other, once every value is known
     to be of its kind: a score exists only when questions were scored, a count of outcomes adds
     up to the count of what was tried. A generated row always satisfies it. ``packages`` are the
-    versions only this candidate's rows have (the Tesseract program's, which is not a Python
-    package), required in the environment that applies to the row: its own, else the report's."""
+    versions this candidate's rows must have, each of a package that was installed (the run needed
+    it, so ``not installed`` could not have come from it), in the environment that applies to the
+    row: its own, else the report's. Tesseract's is the program's, which is not a Python package."""
 
     candidate: re.Pattern[str]
     required: frozenset[str]
@@ -154,6 +157,8 @@ class SpikeSchema(NamedTuple):
     metrics: Mapping[str, Kind]
     packages: frozenset[str]
     required_packages: frozenset[str] = frozenset()
+    # Whether the spike measures a downloaded model, so its environment may name the revision.
+    models: bool = False
 
     def shape_of(self, candidate: str) -> RowShape | None:
         return next((shape for shape in self.rows if shape.candidate.fullmatch(candidate)), None)
@@ -202,6 +207,10 @@ class Environment:
     ram_gib: float | None
     gpu: str | None
     packages: dict[str, str]
+    # The Git commit of the model files that were loaded (40 hexadecimal digits), or None when it
+    # could not be found. A model repository's default branch moves, so the candidate's name alone
+    # does not say which weights, configuration and prompts a row was measured with.
+    model_revision: str | None = None
 
     def __post_init__(self) -> None:
         for label, text in (("system", self.system), ("cpu", self.cpu), ("gpu", self.gpu)):
@@ -223,6 +232,11 @@ class Environment:
             if not PACKAGE_NAME.fullmatch(name) or not PACKAGE_VERSION.fullmatch(version):
                 msg = "environment packages must be a name and a version number"
                 raise OwnValueError(msg)
+        if self.model_revision is not None and not (
+            isinstance(self.model_revision, str) and MODEL_REVISION.fullmatch(self.model_revision)
+        ):
+            msg = "environment model revision must be 40 lower-case hexadecimal digits or none"
+            raise OwnValueError(msg)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -233,6 +247,7 @@ class Environment:
             "ram_gib": self.ram_gib,
             "gpu": self.gpu,
             "packages": dict(sorted(self.packages.items())),
+            "model_revision": self.model_revision,
         }
 
     @classmethod
@@ -247,6 +262,7 @@ class Environment:
             ram_gib=cast("float | None", data["ram_gib"]),
             gpu=cast("str | None", data["gpu"]),
             packages=cast("dict[str, str]", data["packages"]),
+            model_revision=cast("str | None", data.get("model_revision")),
         )
 
 
@@ -259,12 +275,23 @@ def _known_environment(data: object, schema: SpikeSchema) -> Environment:
     if not schema.required_packages <= set(env.packages):
         msg = "the report's environment lacks a package version that every report of this spike has"
         raise OwnValueError(msg)
+    if env.model_revision is not None and not schema.models:
+        msg = "the report's environment names a model revision, which this spike has none of"
+        raise OwnValueError(msg)
     return env
 
 
 def with_package(env: Environment, name: str, version: str) -> Environment:
     """The environment with one more package version, checked like all the others."""
     return replace(env, packages={**env.packages, name: version})
+
+
+def with_model_revision(env: Environment, revision: str | None) -> Environment:
+    """The environment with the model revision found after the run. Like the GPU name, a value
+    that is not 40 hexadecimal digits is stored as none rather than refused: this runs after the
+    measurement, and a refusal would throw it away."""
+    valid = revision is not None and MODEL_REVISION.fullmatch(revision) is not None
+    return replace(env, model_revision=revision if valid else None)
 
 
 def with_gpu(env: Environment, gpu: str | None) -> Environment:
@@ -319,7 +346,7 @@ def collect_environment(packages: tuple[str, ...] = (), gpu: str | None = None) 
         try:
             versions[name] = package_version(metadata.version(name))
         except metadata.PackageNotFoundError:
-            versions[name] = "not installed"
+            versions[name] = NOT_INSTALLED
     return Environment(
         system=system_description(),
         python=platform.python_version(),
@@ -351,7 +378,7 @@ def _row_json(row: Row) -> dict[str, object]:
     return data
 
 
-def _environment_lines(env: Environment) -> list[str]:
+def _environment_lines(env: Environment, *, models: bool = False) -> list[str]:
     lines = [
         f"- System: {env.system}",
         f"- Python: {env.python}",
@@ -359,6 +386,8 @@ def _environment_lines(env: Environment) -> list[str]:
         f"- RAM: {env.ram_gib} GiB",
         f"- GPU: {env.gpu or 'none reported'}",
     ]
+    if models:
+        lines.append(f"- Model revision: {env.model_revision or 'unknown'}")
     return lines + [f"- {name}: {version}" for name, version in sorted(env.packages.items())]
 
 
@@ -462,7 +491,10 @@ class Report:
             if (own := row.get("environment")) is not None:
                 report.rows[-1].environment = _known_environment(own, schema)
             applies = report.rows[-1].environment or report.environment
-            if not shape.packages <= set(applies.packages):
+            if any(
+                applies.packages.get(name, NOT_INSTALLED) == NOT_INSTALLED
+                for name in shape.packages
+            ):
                 msg = "the report has a row whose environment lacks a version its candidate needs"
                 raise OwnValueError(msg)
         return report
@@ -489,10 +521,11 @@ class Report:
                 shared.append(row.candidate)
         if own:
             lines += [f"Environment of {', '.join(shared) or 'the other candidates'}:", ""]
-        lines += _environment_lines(self.environment)
+        models = self.spike == "embedding"  # the only spike that loads a downloaded model
+        lines += _environment_lines(self.environment, models=models)
         for candidate, env in own:
             lines += ["", f"Environment of {candidate}:", ""]
-            lines += _environment_lines(env)
+            lines += _environment_lines(env, models=models)
         lines += ["", "## Method", "", self.method, "", "## Results", ""]
         metric_names = sorted({name for row in self.rows for name in row.metrics})
         lines.append("| Candidate | " + " | ".join(metric_names) + " |")

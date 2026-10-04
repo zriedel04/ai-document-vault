@@ -393,3 +393,37 @@ class RequireCudaTest(unittest.TestCase):
         ):
             embedder.load()
         fake_st.SentenceTransformer.assert_not_called()
+
+
+class ModelRevisionLookupTest(unittest.TestCase):
+    REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+    def hub(self, answer: object) -> dict[str, object]:
+        module = types.ModuleType("huggingface_hub")
+        module.snapshot_download = mock.Mock(  # type: ignore[attr-defined]
+            side_effect=answer if isinstance(answer, Exception) else None,
+            return_value=answer,
+        )
+        return {"huggingface_hub": module}
+
+    def test_the_revision_is_the_name_of_the_cached_snapshot_folder(self) -> None:
+        path = f"/cache/models--Qwen--Qwen3-Embedding-0.6B/snapshots/{self.REVISION}"
+        modules = self.hub(path)
+        with mock.patch.dict(sys.modules, modules):
+            self.assertEqual(adapters.model_revision("qwen3-embedding-0.6b"), self.REVISION)
+        # Looked up in the cache only, for the model the candidate names, never downloaded.
+        modules["huggingface_hub"].snapshot_download.assert_called_once_with(  # type: ignore[attr-defined]
+            "Qwen/Qwen3-Embedding-0.6B", local_files_only=True
+        )
+
+    def test_anything_else_is_unknown(self) -> None:
+        cases = (
+            self.hub("/cache/snapshots/main"),
+            self.hub(f"/cache/snapshots/{self.REVISION}\n"),
+            self.hub(OSError("/private/folder is not readable")),
+            {"huggingface_hub": None},  # the library is missing
+        )
+        for modules in cases:
+            with mock.patch.dict(sys.modules, modules):
+                self.assertIsNone(adapters.model_revision("embeddinggemma-300m"))
+        self.assertIsNone(adapters.model_revision("not-a-candidate"))

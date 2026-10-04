@@ -62,6 +62,7 @@ ROWS = (
         re.compile(r"exact-search-check"),
         frozenset({"vectors", "same_answer_as_python"}),
         consistent=lambda row: row["vectors"] > 0,
+        packages=frozenset({"sqlite-vec"}),
     ),
     RowShape(
         re.compile(r"vectors-\d{1,9}"),
@@ -77,6 +78,7 @@ ROWS = (
         ),
         frozenset({"peak_memory_mib"}),
         consistent=lambda row: row["dim"] > 0 and row["queries_timed"] > 0,
+        packages=frozenset({"sqlite-vec"}),
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and

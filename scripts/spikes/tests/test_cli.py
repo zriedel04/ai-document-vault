@@ -47,6 +47,7 @@ def complete_row(spike: str, candidate: str) -> dict[str, float]:
 
 
 PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
+REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
 class FakeEmbedder:
@@ -147,6 +148,7 @@ class CliTest(unittest.TestCase):
         factory: Callable[..., object] | None = None,
         cited: str = "a.txt",
         question_id: str = "q1",
+        revision: str | None = REVISION,
     ) -> tuple[int, str, str]:
         """One embedding run on a one-document corpus; the questions are the owner's own."""
         (root / "corpus").mkdir(exist_ok=True)
@@ -171,6 +173,7 @@ class CliTest(unittest.TestCase):
                 adapters, "SentenceTransformerEmbedder", factory or (lambda *_a: FakeEmbedder())
             ),
             mock.patch.object(adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"),
+            mock.patch.object(adapters, "model_revision", return_value=revision),
         ):
             return run(
                 "embedding",
@@ -337,6 +340,31 @@ class CliTest(unittest.TestCase):
             code, _, err = run("merge", pattern, "--out", str(root / "merged4"))
             self.assertEqual(code, 0, err)
 
+    def test_an_embedding_report_names_the_model_revision_it_was_measured_with(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # The test machine lacks the embedding packages, which a merge would refuse.
+            with mock.patch("vault_spikes.report.metadata.version", return_value="1.0"):
+                self.assertEqual(self.embedding_run(root)[0], 0)
+            name = "embedding-qwen3-embedding-0.6b-cpu-private"
+            data = json.loads((root / "out" / f"{name}.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["environment"]["model_revision"], REVISION)
+            self.assertIn(
+                f"- Model revision: {REVISION}", (root / "out" / f"{name}.md").read_text("utf-8")
+            )
+            code, _, err = run(
+                "merge", str(root / "out" / f"{name}.json"), "--out", str(root / "merged")
+            )
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
+            self.assertEqual(merged["environment"]["model_revision"], REVISION)
+            # A revision that cannot be found is stored as unknown: the measurement is kept.
+            self.assertEqual(
+                self.embedding_run(root, "--out", str(root / "o2"), revision=None)[0], 0
+            )
+            other = json.loads((root / "o2" / f"{name}.json").read_text(encoding="utf-8"))
+            self.assertIsNone(other["environment"]["model_revision"])
+
     def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
         # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and
         # merge, which reads reports from disk, could not combine the two engines.
@@ -347,7 +375,10 @@ class CliTest(unittest.TestCase):
             images.mkdir()
             (images / "a.png").write_text("alpha", encoding="utf-8")
             (images / "a.txt").write_text("alpha", encoding="utf-8")
-            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+            with (
+                mock.patch.object(adapters, "RapidOcrEngine", FakeRapid),
+                mock.patch("vault_spikes.report.metadata.version", return_value="1.0"),
+            ):
                 code, _, err = run(
                     "ocr", "--engine", "rapidocr", "--images", str(images), "--out", str(root)
                 )
@@ -500,6 +531,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         fetch.assert_called_once_with("qwen3-embedding-0.6b")
         self.assertEqual(out.strip(), "qwen3-embedding-0.6b: downloaded")
+        # The revision that was fetched is shown, so the owner can compare it with the reports.
+        with (
+            mock.patch.object(adapters, "fetch_model"),
+            mock.patch.object(adapters, "model_revision", return_value=REVISION),
+        ):
+            code, out, err = run("fetch-model", "--candidate", "qwen3-embedding-0.6b")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.strip(), f"qwen3-embedding-0.6b: downloaded (revision {REVISION})")
 
     def test_errors_are_one_line_on_stderr_with_exit_code_two(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -681,7 +720,9 @@ class DatasetNameTest(unittest.TestCase):
         self.assertFalse(cli.is_public_folder(cli.REPO_ROOT / "demo" / "corpus-copy"))
         self.assertFalse(cli.is_public_folder(corpus.parent))
 
-    def run_both(self, command: list[str], patches: list[mock._patch[object]]) -> Path:
+    def run_both(
+        self, command: list[str], patches: list[contextlib.AbstractContextManager[object]]
+    ) -> Path:
         """Run once on a folder inside a stand-in repository and once outside it, into one
         output folder, and return that folder."""
         folder = tempfile.TemporaryDirectory()
@@ -705,7 +746,12 @@ class DatasetNameTest(unittest.TestCase):
     def test_ocr_runs_on_both_kinds_of_data_are_kept_apart(self) -> None:
         out = self.run_both(
             ["ocr", "--engine", "rapidocr", "--images"],
-            [mock.patch.object(adapters, "RapidOcrEngine", FakeRapid)],
+            [
+                mock.patch.object(adapters, "RapidOcrEngine", FakeRapid),
+                # The test machine has no OCR packages, and a row that needs them is refused on
+                # merge when its environment says they are not installed.
+                mock.patch("vault_spikes.report.metadata.version", return_value="1.0"),
+            ],
         )
         flags = {}
         for kind in ("public", "private"):
@@ -911,6 +957,50 @@ class MergeRowShapeTest(unittest.TestCase):
                 code, err = self.merge(spike, candidate, row)
                 self.assertEqual(code, 2)
                 self.assertIn("part of a group", err)
+
+    def test_a_package_the_candidate_needs_cannot_be_not_installed(self) -> None:
+        """The run could not have produced the row without it (the sentinel is for the packages
+        the candidate does not use), and the rule holds for every candidate's packages."""
+        needs = [
+            ("embedding", "qwen3-embedding-0.6b-cpu", "torch"),
+            ("embedding", "embeddinggemma-300m-cuda", "sentence-transformers"),
+            ("ocr", "rapidocr-ppocrv5", "onnxruntime"),
+            ("ocr", "tesseract", "tesseract"),
+            ("pdf", "pypdfium2", "pypdfium2"),
+            ("pdf", "pypdfium2+pdfplumber", "pdfplumber"),
+            ("vec", "exact-search-check", "sqlite-vec"),
+            ("vec", "vectors-10000", "sqlite-vec"),
+        ]
+        for spike, candidate, package in needs:
+            for version, expected in (("not installed", 2), ("unknown", 0), ("1.0", 0)):
+                with self.subTest(candidate=candidate, package=package, version=version):
+                    report = Report(
+                        spike,
+                        *KNOWN[spike].text,
+                        environment_of(spike, candidate, **{package: version}),
+                    )
+                    report.add(candidate, **complete_row(spike, candidate))
+                    with tempfile.TemporaryDirectory() as folder:
+                        path = str(report.write(Path(folder), stem=f"{spike}-x")[0])
+                        code, _, err = run("merge", path, "--out", str(Path(folder) / "merged"))
+                    self.assertEqual(code, expected, err)
+        # A package the candidate does not use may be missing: the run on the other engine.
+        for spike, candidate, other in (
+            ("ocr", "tesseract", "rapidocr"),
+            ("pdf", "pypdfium2", "pdfplumber"),
+            ("vec", "extension-loading", "sqlite-vec"),
+        ):
+            with self.subTest(candidate=candidate, absent=other):
+                report = Report(
+                    spike,
+                    *KNOWN[spike].text,
+                    environment_of(spike, candidate, **{other: "not installed"}),
+                )
+                report.add(candidate, **complete_row(spike, candidate))
+                with tempfile.TemporaryDirectory() as folder:
+                    path = str(report.write(Path(folder), stem=f"{spike}-x")[0])
+                    code, _, err = run("merge", path, "--out", str(Path(folder) / "merged"))
+                self.assertEqual(code, 0, err)
 
     def test_heading_scores_need_a_reference_and_agree_with_each_other(self) -> None:
         """A hand-edited report cannot claim heading accuracy with no labelled PDFs behind it, nor

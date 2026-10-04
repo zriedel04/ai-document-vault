@@ -35,6 +35,7 @@ from vault_spikes.report import (
     merge,
     require_free,
     with_gpu,
+    with_model_revision,
     with_package,
 )
 from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
@@ -62,6 +63,7 @@ KNOWN = {
         module.METRICS,
         frozenset(getattr(module, "REPORT_PACKAGES", module.PACKAGES)),
         frozenset(module.PACKAGES),
+        getattr(module, "HAS_MODEL", False),
     )
     for name, module in (
         ("embedding", spike_embedding),
@@ -249,7 +251,8 @@ def run(args: argparse.Namespace) -> int:
 
     if args.command == "fetch-model":
         adapters.fetch_model(args.candidate)
-        print(f"{args.candidate}: downloaded")
+        revision = adapters.model_revision(args.candidate)
+        print(f"{args.candidate}: downloaded" + (f" (revision {revision})" if revision else ""))
         return 0
 
     if args.command == "embedding":
@@ -281,6 +284,9 @@ def run(args: argparse.Namespace) -> int:
             public_dataset=public,
         )
         report.environment = with_gpu(report.environment, adapters.gpu_name())
+        report.environment = with_model_revision(
+            report.environment, adapters.model_revision(args.candidate)
+        )
         show(report, report.write(args.out, stem=stem))
         return 0
 

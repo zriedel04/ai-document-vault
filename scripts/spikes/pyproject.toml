@@ -29,5 +29,13 @@ files = ["vault_spikes", "tests"]
 
 [[tool.mypy.overrides]]
 # Optional libraries that are not installed in CI and ship no type information.
-module = ["sentence_transformers", "sqlite_vec", "rapidocr", "pypdfium2", "pdfplumber", "torch"]
+module = [
+    "sentence_transformers",
+    "huggingface_hub",
+    "sqlite_vec",
+    "rapidocr",
+    "pypdfium2",
+    "pdfplumber",
+    "torch",
+]
 ignore_missing_imports = true

@@ -129,6 +129,7 @@ ROWS = (
         _OCR_OPTIONAL | {"peak_memory_mib"},
         (_OCR_READ,),
         _read_figures_fit_the_counts,
+        frozenset({"rapidocr", "onnxruntime"}),
     ),
     # Tesseract is a separate program for each image: no figure here stands for it.
     RowShape(

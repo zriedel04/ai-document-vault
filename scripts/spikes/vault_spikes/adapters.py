@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from vault_spikes.errors import OwnMessage, OwnRuntimeError, OwnValueError
-from vault_spikes.report import package_version
+from vault_spikes.report import MODEL_REVISION, package_version
 from vault_spikes.spike_pdf import (
     HEADING_MAX_WORDS,
     HEADING_RATIO,
@@ -152,6 +152,25 @@ def fetch_model(candidate: str) -> None:
             "model that asks you to accept its licence also needs `uv run hf auth login`"
         )
         raise MissingDependencyError(msg) from error
+
+
+def model_revision(candidate: str) -> str | None:
+    """The Git commit of the cached files of a candidate model, which is what the next load reads
+    (the cache's reference to the default branch), or None when it cannot be found.
+
+    A model repository's default branch moves, and ``fetch-model`` follows it every time it is
+    run, so the report records the commit that was really loaded and two rows made with different
+    weights or prompts can be told apart. The cache names each snapshot folder by its commit.
+    """
+    if candidate not in EMBEDDING_MODELS:
+        return None
+    try:
+        from huggingface_hub import snapshot_download
+
+        folder = Path(snapshot_download(EMBEDDING_MODELS[candidate], local_files_only=True))
+    except Exception:  # any failure to look is "unknown": the run is already done
+        return None
+    return folder.name if MODEL_REVISION.fullmatch(folder.name) else None
 
 
 def gpu_name() -> str | None:

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 from unittest import mock
 
 from vault_spikes import report as r
@@ -676,3 +676,58 @@ class EnvironmentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+
+class ModelRevisionTest(unittest.TestCase):
+    """The commit of the model files is part of the evidence: a model's default branch moves."""
+
+    schema: ClassVar = {"embedding": KNOWN["embedding"]._replace(models=True)}
+
+    def with_revision(self, revision: object) -> dict[str, object]:
+        data = make().to_json()
+        cast("dict[str, object]", data["environment"])["model_revision"] = revision
+        return data
+
+    def test_a_revision_is_40_lower_case_hexadecimal_digits(self) -> None:
+        env = r.with_model_revision(environment(), REVISION)
+        self.assertEqual(env.model_revision, REVISION)
+        self.assertEqual(r.Environment.from_json(env.to_json()), env)
+        for bad in ("main", REVISION.upper(), REVISION[:-1], REVISION + "0", REVISION + "\n", ""):
+            with self.subTest(bad=bad), self.assertRaises(OwnValueError):
+                r.Environment.from_json(self.with_revision(bad)["environment"])  # type: ignore[arg-type]
+        for not_text in (12, True, ["a"]):
+            with self.subTest(not_text=not_text), self.assertRaises(OwnValueError):
+                r.Environment.from_json(self.with_revision(not_text)["environment"])  # type: ignore[arg-type]
+
+    def test_a_revision_found_after_the_run_is_stored_as_none_if_it_is_not_one(self) -> None:
+        for bad in (None, "main", "x" * 40, REVISION + "\n"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(r.with_model_revision(environment(), bad).model_revision)
+
+    def test_an_old_report_without_the_field_reads_as_none(self) -> None:
+        data = self.with_revision(None)
+        del cast("dict[str, object]", data["environment"])["model_revision"]
+        self.assertIsNone(r.Report.from_json(data, self.schema).environment.model_revision)
+
+    def test_only_a_spike_that_loads_a_model_may_name_a_revision(self) -> None:
+        r.Report.from_json(self.with_revision(REVISION), self.schema)
+        with self.assertRaisesRegex(OwnValueError, "model revision"):
+            r.Report.from_json(self.with_revision(REVISION), KNOWN)
+
+    def test_the_markdown_names_the_revision_or_says_it_is_unknown(self) -> None:
+        known = make()
+        known.environment = r.with_model_revision(known.environment, REVISION)
+        self.assertIn(f"- Model revision: {REVISION}", known.to_markdown())
+        self.assertIn("- Model revision: unknown", make().to_markdown())
+
+    def test_a_row_made_with_other_files_keeps_its_own_environment_in_a_merge(self) -> None:
+        first, second = make(), make()
+        first.environment = r.with_model_revision(first.environment, REVISION)
+        first.add("a", chunks=1)
+        second.add("b", chunks=1)
+        text = r.merge([first, second]).to_markdown()
+        self.assertIn(REVISION, text)
+        self.assertIn("Model revision: unknown", text)

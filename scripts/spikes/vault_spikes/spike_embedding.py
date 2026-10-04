@@ -72,6 +72,7 @@ METHOD = (
     "files, kept outside the repository, and only numbers about them are reported."
 )
 PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy")
+HAS_MODEL = True  # the environment records the revision of the model files that were loaded
 # What a report of this spike may contain (checked when a report is read back for a merge).
 METRICS: dict[str, Kind] = {
     "dimensions": Kind.COUNT,
@@ -148,6 +149,7 @@ ROWS = (
         _EMBEDDING_OPTIONAL,
         (_EMBEDDING_SCORES,),
         _scores_fit_the_counts,
+        frozenset(PACKAGES),
     ),
     RowShape(
         re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cuda"),
@@ -155,6 +157,7 @@ ROWS = (
         _EMBEDDING_OPTIONAL | _EMBEDDING_GPU,
         (_EMBEDDING_SCORES, _EMBEDDING_GPU),
         _scores_fit_the_counts,
+        frozenset(PACKAGES),
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and
