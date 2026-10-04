@@ -40,6 +40,26 @@ class ErrorRateTest(unittest.TestCase):
             with self.subTest(reference=reference), self.assertRaises(ValueError):
                 metrics.word_error_rate(reference, "x")
 
+    def test_a_reference_has_text_exactly_when_it_can_be_scored(self) -> None:
+        """The spikes count a reference as unusable with ``has_text`` and score it with the rates,
+        so the two must agree on every reference."""
+        for reference, scorable in (
+            ("", False),
+            ("   \n", False),
+            ("\t\r\n", False),
+            ("\u3000\u00a0", False),  # an ideographic and a no-break space
+            ("a", True),
+            ("  x \n", True),
+        ):
+            with self.subTest(reference=reference):
+                self.assertEqual(metrics.has_text(reference), scorable)
+                for rate in (metrics.character_error_rate, metrics.word_error_rate):
+                    if scorable:
+                        rate(reference, "x")
+                    else:
+                        with self.assertRaises(ValueError):
+                            rate(reference, "x")
+
     def test_word_error_rate(self) -> None:
         self.assertEqual(metrics.word_error_rate("the cat sat", "the cat sat"), 0.0)
         self.assertAlmostEqual(metrics.word_error_rate("the cat sat", "the dog sat"), 1 / 3)

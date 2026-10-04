@@ -9,7 +9,6 @@ unit tests use a fake and CI needs neither library.
 
 from __future__ import annotations
 
-import contextlib
 import re
 import time
 from collections import Counter
@@ -21,7 +20,14 @@ from typing import Protocol
 
 from vault_spikes.corpus import read_owner_text
 from vault_spikes.errors import OwnValueError
-from vault_spikes.metrics import mean, median, peak_memory_mib, per_second, word_error_rate
+from vault_spikes.metrics import (
+    has_text,
+    mean,
+    median,
+    peak_memory_mib,
+    per_second,
+    word_error_rate,
+)
 from vault_spikes.report import (
     ROUNDING,
     Environment,
@@ -45,7 +51,8 @@ METHOD = (
     "page by page. Pages per second is total pages over total extraction time. A page with no "
     "text counts as scanned. Heading candidates are lines whose words are at least 1.2 times the "
     "page's median font size and that have at most 12 words. Word error rate compares the "
-    "extracted text with a reference text file of the same name (`NAME.txt`) where one exists. "
+    "extracted text with a reference text file of the same name (`NAME.txt`) where one exists; "
+    "a reference with no words has no error rate and is counted in `references_unusable`. "
     "Heading accuracy compares the detected headings with a file of the expected ones "
     "(`NAME.headings.txt`, one heading per line, case and spacing ignored; a heading is counted "
     "once per occurrence, so a false running header found on 20 pages is 20 errors): precision is "
@@ -71,6 +78,7 @@ METRICS: dict[str, Kind] = {
     "heading_candidates": Kind.COUNT,
     "files_with_heading_candidates": Kind.COUNT,
     "references_used": Kind.COUNT,
+    "references_unusable": Kind.COUNT,
     "pages_per_second": Kind.AMOUNT,
     "wer_mean": Kind.AMOUNT,
     "wer_median": Kind.AMOUNT,
@@ -94,6 +102,7 @@ _PDF_REQUIRED = frozenset(
         "heading_candidates",
         "files_with_heading_candidates",
         "references_used",
+        "references_unusable",
     }
 )
 _PDF_OPTIONAL = frozenset({"pages_per_second", "wer_mean", "wer_median", "peak_memory_mib"})
@@ -151,7 +160,7 @@ def _heading_scores_fit(row: Mapping[str, Number]) -> bool:
 def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
     """Every file ends in exactly one outcome, the pages without text are among the pages, heading
     candidates come from some file exactly when there are any, and the word error rates exist
-    exactly when references were used."""
+    exactly when references were used. A file's reference is used or unusable, never both."""
     outcomes = (
         row["files_ok"] + row["files_encrypted"] + row["files_corrupt"] + row["files_other_error"]
     )
@@ -161,6 +170,7 @@ def _outcomes_add_up(row: Mapping[str, Number]) -> bool:
         and (row["pages"] == 0 or row["files_ok"] > 0)
         and row["files_with_heading_candidates"] <= min(row["files_ok"], row["heading_candidates"])
         and row["references_used"] <= row["files_ok"]
+        and row["references_used"] + row["references_unusable"] <= row["files"]
         and row.get("files_with_heading_reference", 0) <= row["files_ok"]
         and ("pages_per_second" not in row or (row["pages"] > 0 and row["pages_per_second"] > 0))
         and (row["heading_candidates"] > 0) == (row["files_with_heading_candidates"] > 0)
@@ -299,6 +309,11 @@ def run_pdf_spike(
         read_labels(pdf, references_dir or pdf.parent, headings=extractor.detects_headings)
         for pdf in pdfs
     ]
+    # A reference text with no words has no error rate. It is counted, whatever its PDF's outcome,
+    # so a blank or mistyped file cannot take a sample out of the word error rates unseen.
+    references_unusable = sum(
+        1 for label in labels if label.text is not None and not has_text(label.text)
+    )
     outcomes = dict.fromkeys(Outcome, 0)
     pages_total = 0
     pages_without_text = 0
@@ -337,9 +352,8 @@ def run_pdf_spike(
             heading_hits += (expected & detected).total()
             heading_detected += detected.total()
             heading_expected += expected.total()
-        if label.text is not None:
-            with contextlib.suppress(ValueError):  # an empty reference is not scored
-                word_error_rates.append(word_error_rate(label.text, "\n".join(result.pages)))
+        if label.text is not None and has_text(label.text):
+            word_error_rates.append(word_error_rate(label.text, "\n".join(result.pages)))
 
     metrics: dict[str, int | float] = {
         "files": len(pdfs),
@@ -353,6 +367,7 @@ def run_pdf_spike(
         "heading_candidates": headings,
         "files_with_heading_candidates": files_with_headings,
         "references_used": len(word_error_rates),
+        "references_unusable": references_unusable,
     }
     if pages_total and seconds > 0:
         metrics["pages_per_second"] = per_second(pages_total, seconds)

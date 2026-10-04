@@ -20,6 +20,7 @@ from vault_spikes.corpus import read_owner_text
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     character_error_rate,
+    has_text,
     mean,
     median,
     peak_memory_mib,
@@ -252,9 +253,7 @@ def run_ocr_spike(
     empty = 0
     skipped_references = 0
     for sample in samples:
-        try:
-            character_error_rate(sample.reference, "")  # an empty reference cannot be scored
-        except ValueError:
+        if not has_text(sample.reference):  # an empty reference cannot be scored
             skipped_references += 1
             continue
         begin = clock()

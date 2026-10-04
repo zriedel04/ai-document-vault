@@ -66,6 +66,9 @@ def tearDownModule() -> None:
         assert shape.consistent is None or shape.consistent(row), (
             f"{spike}/{candidate} writes figures that do not fit together: {row}"
         )
+        assert shape.candidate_fits is None or shape.candidate_fits(candidate, row), (
+            f"{spike}/{candidate} names a figure its row does not have: {row}"
+        )
     for spike, schema in KNOWN.items():
         used = {schema.shape_of(candidate) for name, candidate, _ in ROW_KEYS if name == spike}
         assert set(schema.rows) <= used, f"{spike}: a row shape no test exercised"
@@ -96,6 +99,20 @@ def everything(report: Report) -> str:
 # --- vec ------------------------------------------------------------------------------------
 
 
+class PlainTable(vec.SqliteVecStore):
+    """A real database file without the extension, which is not installed here: the vectors go
+    into a plain table, so what is tested is the store's file handling, not sqlite-vec."""
+
+    def _load_extension(self) -> None:
+        pass
+
+    def _create_table(self, dim: int) -> None:
+        self.db.execute("CREATE TABLE v(rowid INTEGER PRIMARY KEY, embedding BLOB)")
+
+    def nearest(self, query: bytes, k: int) -> list[int]:
+        return [int(row[0]) for row in self.db.execute("SELECT rowid FROM v LIMIT ?", (k,))]
+
+
 class VecTest(unittest.TestCase):
     def test_the_spike_reports_each_size_and_a_correct_store(self) -> None:
         report = vec.run_vec_spike(
@@ -112,6 +129,7 @@ class VecTest(unittest.TestCase):
         self.assertEqual(set(rows), {"exact-search-check", "vectors-50", "vectors-120"})
         self.assertEqual(rows["exact-search-check"]["same_answer_as_python"], 1.0)
         for name in ("vectors-50", "vectors-120"):
+            self.assertEqual(rows[name]["vectors"], int(name.removeprefix("vectors-")))
             self.assertEqual(rows[name]["dim"], 8)
             self.assertEqual(rows[name]["queries_timed"], 4)  # the p95 rests on this many
             self.assertGreater(rows[name]["insert_vectors_per_second"], 0)
@@ -146,16 +164,6 @@ class VecTest(unittest.TestCase):
         # The run builds a store for the correctness check and one per size, all in one folder.
         # sqlite-vec is not available here, so the extension and the table are replaced with a
         # plain table; what is tested is that each store has a database file of its own.
-        class PlainTable(vec.SqliteVecStore):
-            def _load_extension(self) -> None:
-                pass
-
-            def _create_table(self, dim: int) -> None:
-                self.db.execute("CREATE TABLE v(rowid INTEGER PRIMARY KEY, embedding BLOB)")
-
-            def nearest(self, query: bytes, k: int) -> list[int]:
-                return [int(row[0]) for row in self.db.execute("SELECT rowid FROM v LIMIT ?", (k,))]
-
         with tempfile.TemporaryDirectory() as folder:
             report = vec.run_vec_spike(
                 lambda dim: PlainTable(dim, Path(folder)),
@@ -183,6 +191,39 @@ class VecTest(unittest.TestCase):
         vec.check_sizes(())
         vec.check_sizes((7,))
         vec.check_sizes((10, 20, 30))
+
+    def test_a_size_no_row_name_can_state_is_refused_before_a_store_is_made(self) -> None:
+        """A row is named ``vectors-N`` with N from 1 to nine digits; any other size would be
+        measured and then refused by ``merge``."""
+
+        def refuse(_dim: int) -> vec.PythonStore:
+            raise AssertionError("no store should be made")
+
+        for sizes in ((0,), (-5, 10), (10, vec.LARGEST_SIZE + 1)):
+            with self.subTest(sizes=sizes), self.assertRaises(OwnValueError) as caught:
+                vec.run_vec_spike(refuse, sizes=sizes, dim=4, check_size=10, environment=ENV)
+            self.assertIn("from 1 to 999,999,999", str(caught.exception))
+        vec.check_sizes((1, vec.LARGEST_SIZE))
+        self.assertIsNotNone(vec.CANDIDATES.fullmatch(f"vectors-{vec.LARGEST_SIZE}"))
+        self.assertIsNone(vec.CANDIDATES.fullmatch(f"vectors-{vec.LARGEST_SIZE + 1}"))
+
+    def test_a_real_database_holds_at_least_the_bytes_of_its_vectors(self) -> None:
+        """``merge`` refuses a size row whose database is smaller than ``vectors * dim * 4``
+        bytes; a database file that stores the vectors is never that small."""
+
+        with tempfile.TemporaryDirectory() as folder:
+            report = vec.run_vec_spike(
+                lambda dim: PlainTable(dim, Path(folder)),
+                sizes=(3000,),
+                dim=16,
+                queries=1,
+                k=3,
+                check_size=10,
+                environment=ENV,
+                clock=Clock(),
+            )
+        row = report.rows[-1].metrics
+        self.assertGreaterEqual(row["database_mib"], 3000 * 16 * vec.FLOAT32_BYTES / 1024**2)
 
     def test_each_row_peak_is_its_own_when_sizes_ascend(self) -> None:
         peaks = iter([111.0, 222.0])
@@ -837,7 +878,43 @@ class PdfTest(unittest.TestCase):
             )
         metrics = report.rows[0].metrics
         self.assertEqual(metrics["references_used"], 1)
+        self.assertEqual(metrics["references_unusable"], 1)
         self.assertEqual(metrics["wer_mean"], 0.25)
+
+    def test_a_reference_with_no_words_is_counted_and_its_pdf_still_measured(self) -> None:
+        """An empty or blank reference has no error rate. It is counted in
+        ``references_unusable`` whatever its PDF's outcome, so a mistyped file cannot take a
+        sample out of the word error rates unseen, and its PDF is still extracted and timed."""
+        names = ("ok", "empty", "blank", "broken")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in names:
+                (root / f"{name}.pdf").write_bytes(b"x")
+            (root / "ok.txt").write_text("the quick brown fox", encoding="utf-8")
+            (root / "empty.txt").write_bytes(b"")
+            (root / "blank.txt").write_bytes(codecs.BOM_UTF8 + b" \r\n\t\r\n")
+            (root / "broken.txt").write_text("\n", encoding="utf-8")
+            extractor = FakePdf(
+                {
+                    "ok.pdf": pdf.PdfText(["the quick brown fox"], []),
+                    "empty.pdf": pdf.PdfText(["one", "two"], []),
+                    "blank.pdf": pdf.PdfText(["three"], []),
+                    "broken.pdf": pdf.Outcome.CORRUPT,
+                },
+                detects_headings=False,
+            )
+            report = pdf.run_pdf_spike(
+                extractor,
+                [root / f"{name}.pdf" for name in names],
+                environment=ENV,
+                clock=Clock(),
+            )
+        metrics = report.rows[0].metrics
+        self.assertEqual(metrics["references_used"], 1)
+        self.assertEqual(metrics["references_unusable"], 3)
+        self.assertEqual(metrics["wer_mean"], 0.0)
+        self.assertEqual((metrics["files_ok"], metrics["files_corrupt"]), (3, 1))
+        self.assertEqual(metrics["pages"], 4)  # the PDFs with a blank reference were read
 
     def heading_run(
         self, detected: list[str], expected: str | None, *, detects_headings: bool = True

@@ -32,24 +32,31 @@ def edit_distance[T: Hashable](a: Sequence[T], b: Sequence[T]) -> int:
     return previous[-1]
 
 
+def has_text(reference: str) -> bool:
+    """Can ``reference`` be scored? An error rate divides by the length of the reference, so one
+    that holds nothing but whitespace has no rate. The spikes count such a reference as unusable
+    instead of dropping it unseen."""
+    return bool(normalise_text(reference))
+
+
 def character_error_rate(reference: str, hypothesis: str) -> float:
     """Edit distance over characters divided by the reference length (after whitespace cleanup).
 
     An empty reference has no defined rate: it raises ValueError rather than reporting 0 or 1.
     """
-    ref = normalise_text(reference)
-    if not ref:
+    if not has_text(reference):
         msg = "the reference text is empty"
         raise OwnValueError(msg)
+    ref = normalise_text(reference)
     return edit_distance(ref, normalise_text(hypothesis)) / len(ref)
 
 
 def word_error_rate(reference: str, hypothesis: str) -> float:
     """Edit distance over words divided by the number of reference words."""
-    ref = normalise_text(reference).split(" ")
-    if ref == [""]:
+    if not has_text(reference):
         msg = "the reference text is empty"
         raise OwnValueError(msg)
+    ref = normalise_text(reference).split(" ")
     hyp = normalise_text(hypothesis).split(" ") if normalise_text(hypothesis) else []
     return edit_distance(ref, hyp) / len(ref)
 

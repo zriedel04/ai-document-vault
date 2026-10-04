@@ -97,11 +97,13 @@ ROUNDING: Final = 0.5 * 10**-DECIMALS
 """How far a stored float may lie from the value the script computed."""
 
 
-def rounded_within(value: float, low: float, high: float) -> bool:
+def rounded_within(value: float, low: float, high: float = math.inf) -> bool:
     """Could ``value``, as a report stores it, be a number from ``low`` to ``high`` rounded to
     ``DECIMALS``? A figure computed from others in its row is checked with this, so a hand-edited
-    report cannot carry a figure that contradicts the ones it was computed from."""
-    slack = ROUNDING + 1e-9 * max(abs(low), abs(high), 1.0)
+    report cannot carry a figure that contradicts the ones it was computed from. Without ``high``
+    the figure only has to reach ``low``; an infinite bound adds nothing to the slack."""
+    scale = max((abs(bound) for bound in (low, high) if math.isfinite(bound)), default=1.0)
+    slack = ROUNDING + 1e-9 * max(scale, 1.0)
     return low - slack <= value <= high + slack
 
 
@@ -156,7 +158,9 @@ class RowShape(NamedTuple):
     scores of one set of questions, the two video-memory figures), so half a group is refused.
     ``consistent`` judges what a row's own numbers say about each other, once every value is known
     to be of its kind: a score exists only when questions were scored, a count of outcomes adds
-    up to the count of what was tried. A generated row always satisfies it. ``packages`` are the
+    up to the count of what was tried. A generated row always satisfies it. ``candidate_fits``
+    judges a candidate name that states a figure (``vectors-10000``) against the row, so a row
+    cannot be relabelled with a size it did not measure. ``packages`` are the
     versions this candidate's rows must have, each of a package that was installed (the run needed
     it, so ``not installed`` could not have come from it), in the environment that applies to the
     row: its own, else the report's. Tesseract's is the program's, which is not a Python package."""
@@ -167,6 +171,7 @@ class RowShape(NamedTuple):
     together: tuple[frozenset[str], ...] = ()
     consistent: Callable[[Mapping[str, Number]], bool] | None = None
     packages: frozenset[str] = frozenset()
+    candidate_fits: Callable[[str, Mapping[str, Number]], bool] | None = None
 
     @property
     def allowed(self) -> frozenset[str]:
@@ -529,6 +534,11 @@ class Report:
                     raise OwnValueError(msg)
             if shape.consistent is not None and not shape.consistent(report.rows[-1].metrics):
                 msg = "the report has a row whose figures do not fit together"
+                raise OwnValueError(msg)
+            if shape.candidate_fits is not None and not shape.candidate_fits(
+                candidate, report.rows[-1].metrics
+            ):
+                msg = "the report has a row whose candidate name does not match its figures"
                 raise OwnValueError(msg)
             if (own := row.get("environment")) is not None:
                 report.rows[-1].environment = _known_environment(own, schema)

@@ -14,7 +14,7 @@ import re
 import sqlite3
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from itertools import islice, pairwise
 from pathlib import Path
 from typing import Protocol
@@ -24,9 +24,11 @@ from vault_spikes.metrics import mean, peak_memory_mib, per_second, percentile
 from vault_spikes.report import (
     Environment,
     Kind,
+    Number,
     Report,
     RowShape,
     collect_environment,
+    rounded_within,
     whole_share,
 )
 
@@ -47,6 +49,9 @@ METHOD = (
     "whose distances are equal within float32 rounding may swap). No document text is involved."
 )
 PACKAGES = ("sqlite-vec",)
+LARGEST_SIZE = 999_999_999
+"""The largest size a row name can state (``vectors-`` and nine digits)."""
+FLOAT32_BYTES = 4
 # What a report of this spike may contain (checked when a report is read back for a merge).
 METRICS: dict[str, Kind] = {
     "can_load_extensions": Kind.FLAG,
@@ -61,6 +66,26 @@ METRICS: dict[str, Kind] = {
     "query_ms_p95": Kind.AMOUNT,
     "peak_memory_mib": Kind.AMOUNT,
 }
+
+
+def _size_row_fits(row: Mapping[str, Number]) -> bool:
+    """A measured size inserted vectors into a file of some size, and its median latency is never
+    above its 95th percentile. ``vec0`` stores each vector as ``dim`` float32 values, so the file
+    holds at least ``vectors * dim * 4`` bytes: a row whose database is smaller than the vectors it
+    names was measured at another size. There is no upper bound: ``vec0`` reserves room for 1,024
+    vectors at a time, so a file far larger than its vectors is a real measurement."""
+    raw_mib = row["vectors"] * row["dim"] * FLOAT32_BYTES / 1024**2
+    return (
+        row["vectors"] > 0
+        and row["dim"] > 0
+        and row["queries_timed"] > 0
+        and row["insert_vectors_per_second"] > 0
+        and row["database_mib"] > 0
+        and rounded_within(row["database_mib"], raw_mib)
+        and row["query_ms_p50"] <= row["query_ms_p95"]
+    )
+
+
 ROWS = (
     RowShape(
         re.compile(r"extension-loading"),
@@ -81,9 +106,11 @@ ROWS = (
         packages=frozenset({"sqlite-vec"}),
     ),
     RowShape(
-        re.compile(r"vectors-\d{1,9}"),
+        # The size as the script writes it: no leading zero, never 0.
+        re.compile(r"vectors-[1-9]\d{0,8}"),
         frozenset(
             {
+                "vectors",
                 "dim",
                 "queries_timed",
                 "insert_vectors_per_second",
@@ -93,16 +120,10 @@ ROWS = (
             }
         ),
         frozenset({"peak_memory_mib"}),
-        # A size that was measured inserted something into a file of some size, and its median
-        # latency is never above its 95th percentile.
-        consistent=lambda row: (
-            row["dim"] > 0
-            and row["queries_timed"] > 0
-            and row["insert_vectors_per_second"] > 0
-            and row["database_mib"] > 0
-            and row["query_ms_p50"] <= row["query_ms_p95"]
-        ),
+        consistent=_size_row_fits,
         packages=frozenset({"sqlite-vec"}),
+        # The name states the size, so it must be the size the row measured.
+        candidate_fits=lambda candidate, row: candidate == f"vectors-{row['vectors']}",
     ),
 )
 """The metrics of each kind of row. A report read from a file must give every ``required`` one and
@@ -250,13 +271,18 @@ def probe_extension_loading() -> dict[str, bool]:
 
 
 def check_sizes(sizes: Sequence[int]) -> None:
-    """Refuse sizes that are not listed from the smallest to the largest, each once.
+    """Refuse sizes that are not listed from the smallest to the largest, each once, or that a row
+    name cannot state.
 
     ``peak_memory_mib`` is the process's high-water mark and only grows, so a larger size run
     first would put its peak in every later row (``vectors-10000`` would report the memory of a
     100,000-vector store). In ascending order each row's peak is its own: nothing before it was
-    larger. A size listed twice would also give two rows the same name.
+    larger. A size listed twice would also give two rows the same name. A size outside 1 to
+    ``LARGEST_SIZE`` would be measured and then refused by ``merge``.
     """
+    if any(not 1 <= size <= LARGEST_SIZE for size in sizes):
+        msg = f"sizes must be whole numbers from 1 to {LARGEST_SIZE:,}"
+        raise OwnValueError(msg)
     if any(smaller >= larger for smaller, larger in pairwise(sizes)):
         msg = "sizes must be listed from the smallest to the largest, each once"
         raise OwnValueError(msg)
@@ -332,6 +358,7 @@ def run_vec_spike(
                     msg = "the store returned the wrong number of neighbours"
                     raise OwnRuntimeError(msg)
             metrics: dict[str, int | float] = {
+                "vectors": size,
                 "dim": dim,
                 "queries_timed": queries,
                 "insert_vectors_per_second": per_second(size, insert_seconds),

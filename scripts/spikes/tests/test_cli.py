@@ -56,6 +56,8 @@ def complete_row(spike: str, candidate: str) -> dict[str, float]:
         }
     if "same_answer_as_python" in row:  # every probe query got the same answer
         row["same_answer_as_python"] = 1.0
+    if candidate.startswith("vectors-"):  # the size the name states
+        row["vectors"] = int(candidate.removeprefix("vectors-"))
     return row
 
 
@@ -466,7 +468,12 @@ class CliTest(unittest.TestCase):
             run("vec", "--sizes", "100", "0")
 
     def test_vec_sizes_must_ascend_and_nothing_is_run_or_written_otherwise(self) -> None:
-        for sizes in (["100000", "10000"], ["500", "500"]):
+        for sizes, expected in (
+            (["100000", "10000"], "smallest to the largest"),
+            (["500", "500"], "smallest to the largest"),
+            # A row is named vectors-N, and N has at most nine digits.
+            (["10", "1000000000"], "from 1 to 999,999,999"),
+        ):
             with (
                 self.subTest(sizes=sizes),
                 tempfile.TemporaryDirectory() as folder,
@@ -474,7 +481,7 @@ class CliTest(unittest.TestCase):
             ):
                 code, _out, err = run("vec", "--out", folder, "--sizes", *sizes)
                 self.assertNotEqual(code, 0)
-                self.assertIn("smallest to the largest", err)
+                self.assertIn(expected, err)
                 probe.assert_not_called()
                 self.assertEqual(list(Path(folder).iterdir()), [])
 
@@ -1269,6 +1276,13 @@ class MergeRowShapeTest(unittest.TestCase):
             ("pdf", "pypdfium2", {"files": 3, "files_ok": 3, "references_used": 1}),
             ("pdf", "pypdfium2", {"pages": 1, "pages_without_text": 2}),
             ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "references_used": 99, **wer}),
+            # A file's reference is used or unusable, never both, and a file has one reference.
+            ("pdf", "pypdfium2", {"files": 1, "files_corrupt": 1, "references_unusable": 2}),
+            (
+                "pdf",
+                "pypdfium2",
+                {"files": 2, "files_ok": 2, "references_used": 1, "references_unusable": 2, **wer},
+            ),
             ("pdf", "pypdfium2", {"pages": 3}),  # pages come from files that were read
             ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "files_with_heading_candidates": 2}),
             (
@@ -1339,7 +1353,13 @@ class MergeRowShapeTest(unittest.TestCase):
             # A measured size inserted something into a file of some size.
             ("vec", "vectors-10000", {"insert_vectors_per_second": 0.0}),
             ("vec", "vectors-10000", {"database_mib": 0.0}),
+            # One vector of one value is 4 bytes, under the rounding, but a file is never empty.
+            ("vec", "vectors-1", {"database_mib": 0.0}),
             ("vec", "vectors-10000", {"query_ms_p50": 2.0, "query_ms_p95": 1.0}),
+            ("vec", "vectors-10000", {"vectors": 0}),
+            # 10,000 vectors of 1,024 float32 values are 39.0625 MiB, so the database is no smaller.
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 39.0624}),
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 3.9}),
         ]
         for spike, candidate, change in cases:
             with self.subTest(candidate=candidate, change=change):
@@ -1428,6 +1448,23 @@ class MergeRowShapeTest(unittest.TestCase):
             ),
             ("vec", "exact-search-check", {"same_answer_as_python": 0.8}),
             ("vec", "vectors-10000", {"query_ms_p50": 2.0, "query_ms_p95": 2.0}),
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 39.0625}),
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 41.5}),
+            # A PDF that could not be read can still have had a blank reference.
+            ("pdf", "pypdfium2", {"files": 1, "files_corrupt": 1, "references_unusable": 1}),
+            (
+                "pdf",
+                "pypdfium2",
+                {
+                    "files": 2,
+                    "files_ok": 1,
+                    "files_corrupt": 1,
+                    "references_used": 1,
+                    "references_unusable": 1,
+                    "wer_mean": 0.1,
+                    "wer_median": 0.1,
+                },
+            ),
             (
                 "pdf",
                 "pypdfium2",
@@ -1444,6 +1481,29 @@ class MergeRowShapeTest(unittest.TestCase):
             with self.subTest(candidate=candidate, change=change):
                 row = {**complete_row(spike, candidate), **change}
                 self.assertEqual(self.merge(spike, candidate, row), (0, ""))
+
+    def test_a_size_row_is_named_after_the_vectors_it_measured(self) -> None:
+        """The name states the size, so a hand edit cannot move a measurement to another size:
+        not by the name alone, nor by a spelling of the number the script does not write."""
+        measured = complete_row("vec", "vectors-10000")
+        for candidate, row, expected in (
+            ("vectors-100000", measured, "candidate name does not match its figures"),
+            ("vectors-10000", {**measured, "vectors": 100_000}, "does not match its figures"),
+            ("vectors-010000", measured, "candidate name this spike cannot produce"),
+            ("vectors-0", {**measured, "vectors": 0}, "candidate name this spike cannot produce"),
+            ("vectors-1000000000", measured, "candidate name this spike cannot produce"),
+        ):
+            with self.subTest(candidate=candidate, vectors=row["vectors"]):
+                code, err = self.merge("vec", candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn(expected, err)
+        largest = f"vectors-{spike_vec.LARGEST_SIZE}"
+        for candidate, row in (
+            ("vectors-1", complete_row("vec", "vectors-1")),
+            (largest, {**complete_row("vec", largest), "database_mib": 4000.0}),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self.merge("vec", candidate, row), (0, ""))
 
     def test_a_whole_group_is_accepted(self) -> None:
         row = {
