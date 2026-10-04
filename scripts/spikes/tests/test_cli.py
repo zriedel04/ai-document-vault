@@ -200,7 +200,7 @@ class CliTest(unittest.TestCase):
                 question_id="Client-Smith-diagnosis",
                 factory=lambda *_a: NeverLoaded(),
             )
-            written = (root / "out").exists()
+            written = (root / "out").exists() and any((root / "out").iterdir())
         self.assertEqual((code, out), (2, ""))
         self.assertIn("question number 1 of the eval file cites a document the manifest lacks", err)
         # The id is free text of the owner's file, so it is never printed, nor is the path.
@@ -277,6 +277,65 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(folder, err)
         # Stopped before the models were loaded, not after the hour they take.
         self.assertFalse(FakeEmbedder.loaded)
+
+    def test_an_output_folder_that_cannot_be_written_stops_the_run_before_it_starts(self) -> None:
+        """A protected or misspelled --out found after the measurement would throw it away."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            FakeEmbedder.loaded = False
+            with mock.patch(
+                "vault_spikes.report.tempfile.TemporaryFile",
+                side_effect=PermissionError(PRIVATE_TEXT),
+            ):
+                code, out, err = self.embedding_run(root)
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("cannot be created or written to", err)
+            for private in (folder, PRIVATE_TEXT, "PermissionError"):
+                self.assertNotIn(private, err)
+            self.assertFalse(FakeEmbedder.loaded)
+            blocker = root / "a-file"
+            blocker.write_text("not a folder", encoding="utf-8")
+            code, out, err = self.embedding_run(root, "--out", str(blocker / "inside"))
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("cannot be created or written to", err)
+            self.assertFalse(FakeEmbedder.loaded)
+            # A folder that can be made is made and left empty, ready for the report.
+            self.assertEqual(self.embedding_run(root)[0], 0)
+            self.assertEqual(len(list((root / "out").iterdir())), 2)
+
+    def test_merge_expands_wildcards_itself_because_powershell_does_not(self) -> None:
+        env = environment_of("embedding")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("qwen3-embedding-0.6b", "embeddinggemma-300m"):
+                report = Report("embedding", *KNOWN["embedding"].text, env)
+                report.add(f"{name}-cpu", **complete_row("embedding", f"{name}-cpu"))
+                report.write(root, stem=f"embedding-{name}")
+            pattern = str(root / "embedding-*.json")
+            code, _, err = run("merge", pattern, pattern, "--out", str(root / "merged"))
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
+            # Sorted, each file once even though the pattern was given twice.
+            self.assertEqual(
+                [r["candidate"] for r in merged["rows"]],
+                ["embeddinggemma-300m-cpu", "qwen3-embedding-0.6b-cpu"],
+            )
+            # A pattern that matches nothing is refused without being printed.
+            hidden = str(root / "SECRET-*.json")
+            code, out, err = run("merge", hidden, "--out", str(root / "merged2"))
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("matches no report file", err)
+            for private in (folder, "SECRET"):
+                self.assertNotIn(private, err)
+            # A file that exists is taken as it is, even when its name looks like a pattern, and
+            # a directory the pattern matches is not a report.
+            odd = root / "embedding[1].json"
+            odd.write_bytes((root / "embedding-embeddinggemma-300m.json").read_bytes())
+            (root / "embedding-folder.json").mkdir()
+            code, _, err = run("merge", str(odd), "--out", str(root / "merged3"))
+            self.assertEqual(code, 0, err)
+            code, _, err = run("merge", pattern, "--out", str(root / "merged4"))
+            self.assertEqual(code, 0, err)
 
     def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
         # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and
@@ -471,11 +530,12 @@ class CliTest(unittest.TestCase):
             blocker = Path(folder) / "SECRET-FOLDER"
             blocker.write_text("a file where the report folder should be", encoding="utf-8")
             code, out, err = run("vec", "--out", str(blocker / "inside"), "--sizes", "10")
-        # The exact error depends on the system: a file in the way is a "not a directory" error on
-        # Linux and may be another OSError on Windows.
-        self.assert_no_detail(
-            code, out, err, "NotADirectoryError", "FileNotFoundError", "FileExistsError"
-        )
+        # Found before the run, as fixed text, whatever OSError the system gave for the file in
+        # the way (a "not a directory" error on Linux, another one on Windows).
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("cannot be created or written to", err)
+        for leaked in ("SECRET-FOLDER", "Traceback", "Error"):
+            self.assertNotIn(leaked, err)
 
     def test_a_librarys_error_message_is_never_printed(self) -> None:
         class Leaky(FakeRapid):

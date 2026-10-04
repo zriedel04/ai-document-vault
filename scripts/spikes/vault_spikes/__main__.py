@@ -7,8 +7,10 @@ only, never document text or file names.
 from __future__ import annotations
 
 import argparse
+import glob
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -318,18 +320,41 @@ def run(args: argparse.Namespace) -> int:
         show(report, report.write(args.out, stem=stem))
         return 0
 
+    report_files = expand_inputs(args.inputs)
     reports = [
         Report.from_json(json.loads(path.read_text(encoding="utf-8")), KNOWN)
-        for path in args.inputs
+        for path in report_files
     ]
     combined = merge(reports)
     # A merged report is derived, so a new merge may replace the last one, but never an input.
     target = (args.out / f"{combined.spike}.json").resolve()
-    if any(path.resolve() == target for path in args.inputs):
+    if any(path.resolve() == target for path in report_files):
         msg = "the merged report would overwrite one of the reports it was made from"
         raise OwnValueError(msg)
     show(combined, combined.write(args.out, overwrite=True))
     return 0
+
+
+def expand_inputs(given: Sequence[Path]) -> list[Path]:
+    """The report files named on the command line, with wildcards expanded here.
+
+    Windows PowerShell and cmd hand ``*`` to the program as it is, and Python does not expand it,
+    so ``merge spike-results\\embedding-*.json`` would look for a file with a star in its name.
+    A path that exists is taken as it is (a name may contain ``[``); another that has a wildcard is
+    expanded to the files it matches, in sorted order and without repeats. A pattern that matches
+    nothing is refused without printing it, because it is a path the owner typed.
+    """
+    found: list[Path] = []
+    for path in given:
+        if os.path.lexists(path) or not any(mark in str(path) for mark in "*?["):
+            matches = [path]
+        else:
+            matches = [Path(n) for n in sorted(glob.glob(str(path))) if os.path.isfile(n)]
+            if not matches:
+                msg = "a pattern on the command line matches no report file"
+                raise OwnValueError(msg)
+        found.extend(match for match in matches if match not in found)
+    return found
 
 
 def main(argv: Sequence[str] | None = None) -> int:

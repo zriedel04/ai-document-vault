@@ -18,6 +18,7 @@ import math
 import os
 import platform
 import re
+import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -529,8 +530,9 @@ _STEM_MESSAGE = "the file name stem must be lower-case letters, digits, dots and
 
 
 def require_free(directory: Path, stem: str) -> None:
-    """Refuse a bad stem, or a report of that name that is already in ``directory`` (a link
-    counts, even a dangling one, as ``Path.exists`` follows links and would miss it)."""
+    """Refuse a bad stem, a report of that name that is already in ``directory`` (a link counts,
+    even a dangling one, as ``Path.exists`` follows links and would miss it), or a ``directory``
+    that cannot be made and written to. It makes the folder if it is missing."""
     if not _STEM.fullmatch(stem):
         raise OwnValueError(_STEM_MESSAGE)
     if any(os.path.lexists(directory / f"{stem}{suffix}") for suffix in (".json", ".md")):
@@ -539,6 +541,15 @@ def require_free(directory: Path, stem: str) -> None:
             "move it, or use another --out folder"
         )
         raise OwnValueError(msg)
+    # The folder is made and tried now, not when the report is written: a protected or misspelled
+    # --out found after an hour of measuring would throw the measurement away.
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=directory):
+            pass
+    except OSError:
+        msg = "the output folder cannot be created or written to; use another --out folder"
+        raise OwnValueError(msg) from None
 
 
 def merge(reports: list[Report]) -> Report:
