@@ -38,6 +38,7 @@ Docs, ADRs, tests, `AGENTS.md` and `CLAUDE.md` are updated in the same PR as the
 | Safety check tests | `python -m unittest discover -s scripts/tests -v` |
 | Safety check, files and history | `python scripts/check_repo_safety.py --history` |
 | ADR structure check | `python scripts/check_adrs.py` |
+| Launcher tests (Windows) | `powershell -NoProfile -File scripts\tests\launcher.tests.ps1` |
 | All hooks | `pre-commit run --all-files` |
 | Backend tests, lint and types (in `backend/`) | `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` |
 | Frontend checks (in `frontend/`) | `npm test`, `npm run lint`, `npm run format:check`, `npm run build` |

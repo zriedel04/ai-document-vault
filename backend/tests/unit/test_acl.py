@@ -8,6 +8,7 @@ every system.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -728,3 +729,15 @@ class TestRealWindowsAccessLists:  # pragma: no cover - runs on the Windows CI j
         self.grant(paths.db, "S-1-5-19", flags="")  # one named account, not a broad group
         with pytest.raises(layout.VaultPathError, match=r"vault\.db"):
             layout.ensure_vault(root)
+
+
+def test_the_launcher_waits_longer_than_the_access_list_walk_may_take() -> None:
+    """``vault.ps1 run`` stops a server that has not answered by its deadline. The first start of
+    an existing vault walks every file's access list for up to ``TREE_TIMEOUT_SECONDS``, plus the
+    other checks (each up to ``POWERSHELL_TIMEOUT_SECONDS``) and the migration, so a shorter
+    deadline would stop a healthy server on a large vault every time."""
+    launcher = Path(__file__).resolve().parents[3] / "vault.ps1"
+    found = re.search(r"^\$script:StartupMinutes = (\d+)\r?$", launcher.read_text("utf-8"), re.M)
+    assert found is not None
+    wait = int(found.group(1)) * 60
+    assert wait >= acl.TREE_TIMEOUT_SECONDS + 4 * acl.POWERSHELL_TIMEOUT_SECONDS

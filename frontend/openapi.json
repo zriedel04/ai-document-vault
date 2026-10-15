@@ -3,6 +3,17 @@
     "schemas": {
       "Health": {
         "properties": {
+          "launch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launch"
+          },
           "status": {
             "const": "ok",
             "title": "Status",
