@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, select, update
+from sqlalchemy import Engine, inspect, select, update
 
 from vault.db import ids
 from vault.db.engine import create_vault_engine
@@ -287,22 +287,42 @@ def test_a_refused_blob_that_was_already_stored_is_left_alone(
     assert store.exists(stored.sha256)
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"method": "email"},
+# Each CHECK on import_sources that a request field reaches, with a request that breaks it. The
+# request is refused before the file is copied, so a refused request leaves no blob behind.
+BREAKS_A_SOURCE_CHECK: dict[str, list[dict[str, Any]]] = {
+    "ck_import_sources_method_known": [{"method": "email"}, {"method": ""}],
+    "ck_import_sources_batch_is_a_ulid": [
         {"batch_id": "batch-1"},
         {"batch_id": ids.new_ulid().lower()},
-        {"original_filename": ""},
+    ],
+    "ck_import_sources_filename_not_empty": [{"original_filename": ""}],
+    "ck_import_sources_path_not_empty": [{"original_path": ""}],
+    "ck_import_sources_folders_are_a_list": [
         {"folder_segments": "School/CSE485"},
         {"folder_segments": ["School", 485]},
     ],
+}
+
+
+def test_every_check_a_request_reaches_is_checked_before_the_copy(engine: Engine) -> None:
+    """The id is the importer's own; every other CHECK on import_sources has a case above."""
+    names = {
+        str(check["name"]) for check in inspect(engine).get_check_constraints("import_sources")
+    }
+    assert names - {"ck_import_sources_id_is_a_ulid"} == set(BREAKS_A_SOURCE_CHECK)
+
+
+@pytest.mark.parametrize(
+    "change", [change for changes in BREAKS_A_SOURCE_CHECK.values() for change in changes]
 )
-def test_a_malformed_request_is_an_error(
-    importer: Importer, incoming: Path, change: dict[str, Any]
+def test_a_malformed_request_is_an_error_and_stores_nothing(
+    engine: Engine, importer: Importer, store: BlobStore, incoming: Path, change: dict[str, Any]
 ) -> None:
-    with pytest.raises(ValueError, match=r"method|batch_id|original_filename|folder_segments"):
+    pattern = r"method|batch_id|original_filename|original_path|folder_segments"
+    with pytest.raises(ValueError, match=pattern):
         importer.import_file(request(write(incoming, "a.txt", TEXT), **change))
+    assert store.scan().blobs == ()
+    assert rows(engine, blobs) == []
 
 
 # --- the job is part of the import's transaction -------------------------------------------------

@@ -82,6 +82,8 @@ class ImportResult:
 
 
 def _check(request: ImportRequest) -> None:
+    """Refuse a request the ``import_sources`` table would refuse, before the file is copied: a
+    request that failed only at the end would leave a blob that no row uses."""
     if request.method not in IMPORT_METHODS:
         msg = "method must be one of the import methods"
         raise ValueError(msg)
@@ -90,6 +92,9 @@ def _check(request: ImportRequest) -> None:
         raise ValueError(msg)
     if not request.original_filename:
         msg = "original_filename is required"
+        raise ValueError(msg)
+    if request.original_path is not None and not request.original_path:
+        msg = "original_path is None or a path"
         raise ValueError(msg)
     if isinstance(request.folder_segments, str) or not all(
         isinstance(segment, str) for segment in request.folder_segments
