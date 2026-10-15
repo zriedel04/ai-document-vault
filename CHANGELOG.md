@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Security headers on every response (`vault.core.headers`): a Content-Security-Policy that allows scripts only from this origin as files and sends requests, images and fonts nowhere else, plus `nosniff`, `no-referrer`, no framing and same-origin opener and resource policies, as ADR 0016 recommends before pages show document text. Checked in Chromium against the built app with no policy violations.
 - Phase 0 spike scripts in `scripts/spikes/` (sqlite-vec, embedding model, OCR engine, PDF extraction) that record metrics only, with unit tests that use fakes and a CI job. Nothing has been measured yet; the spikes run on the Windows PC.
 - Seven "find the document" questions in the public eval set (`find_document: true`, reworded from existing lookups in `demo/generate/questions.py`), so the embedding spike can report document-level Hit@1 on the public data.
 - Access token in the page (`frontend/src/api/token.ts`, ADR 0016): the page takes the token from the address fragment `#token=...`, removes it from the address bar, keeps it in `sessionStorage` and sends it as a bearer header; without one it shows a notice with a password field and makes no request that would be refused. The API client, a session check on the dashboard and tests for each are included.
