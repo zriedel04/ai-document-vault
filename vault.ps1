@@ -41,6 +41,12 @@ $script:FrontendDir = Join-Path $script:Root 'frontend'
 $script:RunDir = Join-Path $script:Root '.run'
 $script:RecordFile = Join-Path $script:RunDir 'server.json'
 $script:DevPort = 5173
+# How long the server may take to start before the launcher gives up on it. The first start of an
+# existing vault checks the access list of every file below it, which the backend allows 15 minutes
+# (TREE_TIMEOUT_SECONDS in backend/src/vault/storage/acl.py), before its other checks and the
+# database migration. A server that exits is noticed at once; this only bounds one that hangs.
+# A backend test keeps this above the backend's own bound.
+$script:StartupMinutes = 20
 
 # \A and \z, not ^ and $: in .NET (as in Python) $ also matches before a trailing newline.
 $script:TokenShape = '\A[A-Za-z0-9_-]{32,128}\z'
@@ -311,7 +317,9 @@ function Start-Backend {
         Write-Record $process $Facts
         $url = "http://${HostName}:${Port}/api/health"
         if ($HostName.Contains(':')) { $url = "http://[${HostName}]:${Port}/api/health" }
-        $deadline = (Get-Date).AddSeconds(60)
+        $began = Get-Date
+        $deadline = $began.AddMinutes($script:StartupMinutes)
+        $told = $false
         while ($true) {
             if ($process.HasExited) {
                 throw 'the server stopped while starting; see .run\server.err.log'
@@ -327,7 +335,11 @@ function Start-Backend {
                 # not listening yet
             }
             if ((Get-Date) -gt $deadline) {
-                throw 'the server did not answer within 60 seconds; see .run\server.err.log'
+                throw "the server did not answer within $($script:StartupMinutes) minutes; see .run\server.err.log"
+            }
+            if (-not $told -and ((Get-Date) - $began).TotalSeconds -gt 10) {
+                Write-Host 'Still starting. The first start of a large vault checks the access list of every file in it, which can take several minutes.'
+                $told = $true
             }
             Start-Sleep -Milliseconds 500
         }

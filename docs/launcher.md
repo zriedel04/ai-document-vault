@@ -25,7 +25,7 @@ The record is UTF-8 without a byte order mark, written and read the same way in 
 
 Before it starts anything, the launcher also tries to connect to the configured address, and refuses if something answers. Readiness is "`/api/health` answers", which another copy of the app on the same port would satisfy for a new server that is about to fail to bind; refusing first avoids opening the browser, with the new vault's token, on the wrong server. A program that binds the port in the moment between that check and the server's own bind is not caught.
 
-If start-up does not complete for any reason (the record cannot be written, the server exits or does not answer within 60 seconds, Ctrl+C), the launcher ends the server it started, so no server runs that `stop` cannot find. `stop` removes the record only once the process has actually exited: if Windows refuses to end it, or it is still there after ten seconds, `stop` says so, exits with an error and keeps the record so that it can be run again.
+If start-up does not complete for any reason (the record cannot be written, the server exits or does not answer within 20 minutes, Ctrl+C), the launcher ends the server it started, so no server runs that `stop` cannot find. The wait is long because the first start of an existing vault checks the access list of every file below it, which the backend allows 15 minutes; after ten seconds the launcher says that it is still starting. A server that exits is noticed at once. `stop` removes the record only once the process has actually exited: if Windows refuses to end it, or it is still there after ten seconds, `stop` says so, exits with an error and keeps the record so that it can be run again.
 
 ## The token
 
