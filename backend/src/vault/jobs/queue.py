@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
-from sqlalchemy import ColumnElement, Engine, and_, func, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, and_, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -126,9 +126,14 @@ class JobQueue:
         *,
         priority: int = 0,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        connection: Connection | None = None,
     ) -> str:
         """Queue ``stage`` for the document and return the job's id. If the same document, stage
-        and input are already queued or running, nothing is added and that job's id is returned."""
+        and input are already queued or running, nothing is added and that job's id is returned.
+
+        With ``connection`` the job is written in the caller's transaction, so it exists exactly
+        when the rows that need it do (the import writes the document and its first job together).
+        """
         _check_stages((stage,))
         if not SHA256.fullmatch(input_hash):
             msg = "input_hash is a lower-case SHA-256"
@@ -156,16 +161,19 @@ class JobQueue:
                 index_where=jobs.c.status.in_(_OPEN),
             )
         )
-        with self._engine.begin() as connection:
+        existing = select(jobs.c.id).where(
+            jobs.c.document_id == document_id,
+            jobs.c.stage == stage,
+            jobs.c.input_hash == input_hash,
+            jobs.c.status.in_(_OPEN),
+        )
+        if connection is not None:
             connection.execute(statement)
-            job_id: str = connection.execute(
-                select(jobs.c.id).where(
-                    jobs.c.document_id == document_id,
-                    jobs.c.stage == stage,
-                    jobs.c.input_hash == input_hash,
-                    jobs.c.status.in_(_OPEN),
-                )
-            ).scalar_one()
+            job_id: str = connection.execute(existing).scalar_one()
+            return job_id
+        with self._engine.begin() as own:
+            own.execute(statement)
+            job_id = own.execute(existing).scalar_one()
         return job_id
 
     def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
