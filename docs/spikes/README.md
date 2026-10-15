@@ -6,12 +6,14 @@ A spike is a short, time-boxed experiment that settles a hardware-dependent or r
 
 Metrics and conclusions only. **Never document text.** That means never the text of a private document, extracted or OCR text, file names or paths that reveal private content, screenshots of documents, or embeddings of them. Results measured on private sample files are reported as numbers (counts, rates, timings, scores), and results on the public synthetic corpus can name the synthetic files.
 
+The scripts that take the measurements are in [`scripts/spikes/`](../../scripts/spikes/README.md). They write a draft of the five sections below with metrics only; the owner reviews it before it becomes a spike file.
+
 ## One file per spike
 
 Name the file `NN-topic.md` (for example `01-embedding-model.md`) and include these five sections as `## ` headings (`scripts/check_adrs.py` requires each to be non-empty before a hardware-dependent ADR can be Accepted):
 
 - **Question**: what the spike decides, and the ADR it feeds.
-- **Environment**: Windows version, CPU, RAM, GPU and VRAM, Python version, package versions.
+- **Environment**: Windows version, CPU, RAM, GPU and VRAM, Python version, package versions. The report scripts write the machine lines from a fixed word list and say `unknown` for anything else; read them before committing.
 - **Method**: the script and the commands (scripts live in `scripts/spikes/`), the data set (synthetic, private sample, or both) and how it was measured.
 - **Results**: a table of metrics, per candidate.
 - **Conclusion**: which candidate wins and why, or a recommended alternative.

@@ -1,0 +1,1522 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import logging
+import sys
+import tempfile
+import unittest
+import warnings
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from unittest import mock
+
+from vault_spikes import __main__ as cli
+from vault_spikes import adapters, spike_embedding, spike_ocr, spike_vec
+from vault_spikes import spike_pdf as pdf
+from vault_spikes.corpus import DEFAULT_OVERLAP
+from vault_spikes.report import Environment, Kind, Report, collect_environment
+
+KNOWN = cli.KNOWN
+
+
+def environment_of(spike: str, candidate: str = "", **extra: str) -> Environment:
+    """A machine description with the package versions every report of this spike carries, and
+    those of the candidate (the version of the Tesseract program)."""
+    shape = KNOWN[spike].shape_of(candidate) if candidate else None
+    wanted = KNOWN[spike].required_packages | (shape.packages if shape else frozenset())
+    packages = dict.fromkeys(wanted, "1.0") | extra
+    return Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, packages)
+
+
+def complete_row(spike: str, candidate: str) -> dict[str, float]:
+    """The metrics a row of this candidate must carry, each with a value its kind allows and
+    all of them consistent: nothing was tried or scored (zero counts), except for the sqlite-vec
+    rows, whose counts say that something was measured."""
+    shape = KNOWN[spike].shape_of(candidate)
+    assert shape is not None
+    values = {
+        Kind.COUNT: 1 if spike == "vec" else 0,
+        Kind.AMOUNT: 1.0,
+        Kind.RATIO: 0.5,
+        Kind.FLAG: True,
+    }
+    row = {name: values[KNOWN[spike].metrics[name]] for name in sorted(shape.required)}
+    if spike == "ocr":  # no call failed, so no time was lost in one
+        row["seconds_spent_in_failures"] = 0.0
+    if spike == "embedding":
+        # A run that got this far embedded something, with the overlap the chunker gives, and
+        # projected 36,000 chunks at one chunk a second: ten hours.
+        row |= dict.fromkeys(("chunks", "dimensions", "batch_size"), 1)
+        row |= {
+            "chunk_overlap_chars": DEFAULT_OVERLAP,
+            "vault_chunks_assumed": 36_000,
+            "hours_for_vault_of_chunks": 10.0,
+        }
+    if "same_answer_as_python" in row:  # every probe query got the same answer
+        row["same_answer_as_python"] = 1.0
+    if candidate.startswith("vectors-"):  # the size the name states
+        row["vectors"] = int(candidate.removeprefix("vectors-"))
+    return row
+
+
+PRIVATE_TEXT = "PATIENT-DIAGNOSIS-CONFIDENTIAL"
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+
+class FakeEmbedder:
+    name = "qwen3-embedding-0.6b-cpu"
+    loaded = False
+
+    def load(self) -> None:
+        FakeEmbedder.loaded = True
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+    def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+
+def run(*argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = cli.main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
+class FakeRapid:
+    name = "rapidocr-ppocrv5"
+
+    def load(self) -> None:
+        pass
+
+    def recognise(self, image: Path) -> str:
+        return image.read_text(encoding="utf-8")
+
+
+class CliTest(unittest.TestCase):
+    def test_check_lists_the_optional_pieces_with_the_extra_to_install(self) -> None:
+        with mock.patch.object(
+            cli, "available", return_value={"pypdfium2": False, "tesseract_on_path": False}
+        ):
+            code, out, _ = run("check")
+        self.assertEqual(code, 0)
+        self.assertIn("pypdfium2: no   (pdf extra: uv sync --python 3.12 --all-extras)", out)
+        self.assertIn("sqlite can load extensions:", out)
+
+    def test_an_ocr_run_writes_a_report_with_numbers_only(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = root / "images"
+            images.mkdir()
+            (images / "a.png").write_text(f"{PRIVATE_TEXT} alpha", encoding="utf-8")
+            (images / "a.txt").write_text(f"{PRIVATE_TEXT} alpha", encoding="utf-8")
+            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+                code, out, err = run(
+                    "ocr",
+                    "--engine",
+                    "rapidocr",
+                    "--images",
+                    str(images),
+                    "--out",
+                    str(root / "out"),
+                )
+            self.assertEqual(code, 0, err)
+            written = (root / "out" / "ocr-rapidocr-ppocrv5-private.json").read_text(
+                encoding="utf-8"
+            )
+            markdown = (root / "out" / "ocr-rapidocr-ppocrv5-private.md").read_text(
+                encoding="utf-8"
+            )
+        for text in (written, markdown, out, err):
+            self.assertNotIn(PRIVATE_TEXT, text)
+        self.assertEqual(json.loads(written)["rows"][0]["metrics"]["cer_mean"], 0.0)
+
+    def test_a_successful_run_does_not_print_the_output_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = root / "images"
+            images.mkdir()
+            (images / "a.png").write_text("alpha", encoding="utf-8")
+            (images / "a.txt").write_text("alpha", encoding="utf-8")
+            private = root / "Clients" / "Patient-Name"
+            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+                code, out, err = run(
+                    "ocr", "--engine", "rapidocr", "--images", str(images), "--out", str(private)
+                )
+            self.assertEqual(code, 0, err)
+            self.assertTrue((private / "ocr-rapidocr-ppocrv5-private.json").is_file())
+        for text in (out, err):
+            self.assertNotIn("Patient-Name", text)
+            self.assertNotIn("Clients", text)
+            self.assertNotIn(folder, text)
+        self.assertIn(
+            "report: ocr-rapidocr-ppocrv5-private.json and ocr-rapidocr-ppocrv5-private.md", out
+        )
+
+    def embedding_run(
+        self,
+        root: Path,
+        *extra: str,
+        factory: Callable[..., object] | None = None,
+        cited: str = "a.txt",
+        question_id: str = "q1",
+        revision: str | None = REVISION,
+    ) -> tuple[int, str, str]:
+        """One embedding run on a one-document corpus; the questions are the owner's own."""
+        (root / "corpus").mkdir(exist_ok=True)
+        (root / "corpus" / "a.txt").write_text("alpha beta gamma", encoding="utf-8")
+        (root / "corpus" / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "documents": [
+                        {"path": "a.txt", "kind": "text", "pages": None, "needs_ocr": False}
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "questions.yaml").write_text(
+            f"questions:\n- {{id: {question_id}, question: q, category: lookup, answerable: true,"
+            f" sources: [{{path: {cited}, quote: beta}}]}}\n",
+            encoding="utf-8",
+        )
+        with (
+            mock.patch.object(
+                adapters, "SentenceTransformerEmbedder", factory or (lambda *_a: FakeEmbedder())
+            ),
+            mock.patch.object(adapters, "require_embedding_libraries"),
+            mock.patch.object(adapters, "gpu_name", return_value="NVIDIA RTX 4000 Ada Generation"),
+            mock.patch.object(adapters, "model_revision", return_value=revision),
+        ):
+            return run(
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--corpus",
+                str(root / "corpus"),
+                "--questions",
+                str(root / "questions.yaml"),
+                "--out",
+                str(root / "out"),
+                *extra,
+            )
+
+    def test_a_question_that_cites_an_unlisted_document_stops_the_run_before_it_starts(
+        self,
+    ) -> None:
+        class NeverLoaded(FakeEmbedder):
+            def load(self) -> None:
+                raise AssertionError("the model must not be loaded")
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, out, err = self.embedding_run(
+                root,
+                cited="SECRET-b.txt",
+                question_id="Client-Smith-diagnosis",
+                factory=lambda *_a: NeverLoaded(),
+            )
+            written = (root / "out").exists() and any((root / "out").iterdir())
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("question number 1 of the eval file cites a document the manifest lacks", err)
+        # The id is free text of the owner's file, so it is never printed, nor is the path.
+        for private in ("SECRET", "Client", "Smith", "diagnosis"):
+            self.assertNotIn(private, err)
+        self.assertFalse(written)
+
+    def test_an_embedding_run_keeps_its_measurement_on_a_card_the_vocabulary_lacks(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, _, err = self.embedding_run(root)
+            self.assertEqual(code, 0, err)
+            written = json.loads(
+                (root / "out" / "embedding-qwen3-embedding-0.6b-cpu-private.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(written["environment"]["gpu"], "unknown")
+
+    def test_the_batch_size_asked_for_reaches_the_model_and_the_report(self) -> None:
+        made: list[tuple[object, ...]] = []
+
+        def make(*args: object) -> FakeEmbedder:
+            made.append(args)
+            return FakeEmbedder()
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, _, err = self.embedding_run(root, "--batch-size", "5", factory=make)
+            self.assertEqual(code, 0, err)
+            written = json.loads(
+                (root / "out" / "embedding-qwen3-embedding-0.6b-cpu-private.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(made[0][2], 5)  # the third argument is the batch size
+        self.assertEqual(written["rows"][0]["metrics"]["batch_size"], 5)
+
+    def test_the_public_and_the_private_run_of_a_candidate_keep_separate_reports(self) -> None:
+        # ADR 0013 needs both, and the same candidate on the same device used to write both to
+        # one name, so the second run replaced the first.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.embedding_run(root)
+            with mock.patch.object(cli, "is_public_dataset", return_value=True):
+                code, _, err = self.embedding_run(root)
+            self.assertEqual(code, 0, err)
+            names = sorted(path.name for path in (root / "out").glob("*.json"))
+            flags = {
+                name: json.loads((root / "out" / name).read_text(encoding="utf-8"))["rows"][0][
+                    "metrics"
+                ]["public_dataset"]
+                for name in names
+            }
+        self.assertEqual(
+            flags,
+            {
+                "embedding-qwen3-embedding-0.6b-cpu-private.json": False,
+                "embedding-qwen3-embedding-0.6b-cpu-public.json": True,
+            },
+        )
+
+    def test_a_run_that_would_replace_a_report_stops_before_it_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.embedding_run(root)
+            first = root / "out" / "embedding-qwen3-embedding-0.6b-cpu-private.json"
+            before = first.read_bytes()
+            FakeEmbedder.loaded = False
+            code, out, err = self.embedding_run(root)
+            self.assertEqual(first.read_bytes(), before)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("already in the output folder", err)
+        self.assertNotIn(folder, err)
+        # Stopped before the models were loaded, not after the hour they take.
+        self.assertFalse(FakeEmbedder.loaded)
+
+    def test_an_output_folder_that_cannot_be_written_stops_the_run_before_it_starts(self) -> None:
+        """A protected or misspelled --out found after the measurement would throw it away."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            FakeEmbedder.loaded = False
+            with mock.patch(
+                "vault_spikes.report.tempfile.TemporaryFile",
+                side_effect=PermissionError(PRIVATE_TEXT),
+            ):
+                code, out, err = self.embedding_run(root)
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("cannot be created or written to", err)
+            for private in (folder, PRIVATE_TEXT, "PermissionError"):
+                self.assertNotIn(private, err)
+            self.assertFalse(FakeEmbedder.loaded)
+            blocker = root / "a-file"
+            blocker.write_text("not a folder", encoding="utf-8")
+            code, out, err = self.embedding_run(root, "--out", str(blocker / "inside"))
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("cannot be created or written to", err)
+            self.assertFalse(FakeEmbedder.loaded)
+            # A folder that can be made is made and left empty, ready for the report.
+            self.assertEqual(self.embedding_run(root)[0], 0)
+            self.assertEqual(len(list((root / "out").iterdir())), 2)
+
+    def test_merge_expands_wildcards_itself_because_powershell_does_not(self) -> None:
+        env = environment_of("embedding")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("qwen3-embedding-0.6b", "embeddinggemma-300m"):
+                report = Report("embedding", *KNOWN["embedding"].text, env)
+                report.add(f"{name}-cpu", **complete_row("embedding", f"{name}-cpu"))
+                report.write(root, stem=f"embedding-{name}")
+            pattern = str(root / "embedding-*.json")
+            code, _, err = run("merge", pattern, pattern, "--out", str(root / "merged"))
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
+            # Sorted, each file once even though the pattern was given twice.
+            self.assertEqual(
+                [r["candidate"] for r in merged["rows"]],
+                ["embeddinggemma-300m-cpu", "qwen3-embedding-0.6b-cpu"],
+            )
+            # A pattern that matches nothing is refused without being printed.
+            hidden = str(root / "SECRET-*.json")
+            code, out, err = run("merge", hidden, "--out", str(root / "merged2"))
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("matches no report file", err)
+            for private in (folder, "SECRET"):
+                self.assertNotIn(private, err)
+            # A file that exists is taken as it is, even when its name looks like a pattern, and
+            # a directory the pattern matches is not a report.
+            odd = root / "embedding[1].json"
+            odd.write_bytes((root / "embedding-embeddinggemma-300m.json").read_bytes())
+            (root / "embedding-folder.json").mkdir()
+            code, _, err = run("merge", str(odd), "--out", str(root / "merged3"))
+            self.assertEqual(code, 0, err)
+            code, _, err = run("merge", pattern, "--out", str(root / "merged4"))
+            self.assertEqual(code, 0, err)
+
+    def test_an_embedding_report_names_the_model_revision_it_was_measured_with(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # The test machine lacks the embedding packages, which a merge would refuse.
+            with mock.patch("vault_spikes.report.metadata.version", return_value="1.0"):
+                self.assertEqual(self.embedding_run(root)[0], 0)
+            name = "embedding-qwen3-embedding-0.6b-cpu-private"
+            data = json.loads((root / "out" / f"{name}.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["environment"]["model_revision"], REVISION)
+            self.assertIn(
+                f"- Model revision: {REVISION}", (root / "out" / f"{name}.md").read_text("utf-8")
+            )
+            code, _, err = run(
+                "merge", str(root / "out" / f"{name}.json"), "--out", str(root / "merged")
+            )
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
+            self.assertEqual(merged["environment"]["model_revision"], REVISION)
+            # A revision that cannot be found is stored as unknown: the measurement is kept.
+            self.assertEqual(
+                self.embedding_run(root, "--out", str(root / "o2"), revision=None)[0], 0
+            )
+            other = json.loads((root / "o2" / f"{name}.json").read_text(encoding="utf-8"))
+            self.assertIsNone(other["environment"]["model_revision"])
+
+    def test_a_tesseract_report_reads_back_and_merges_with_another_ocr_report(self) -> None:
+        # The version line is "tesseract 5.5.0": stored whole it fails the read-back check, and
+        # merge, which reads reports from disk, could not combine the two engines.
+        version_line = mock.Mock(stdout="tesseract 5.5.0\n leptonica-1.84\n", stderr="")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = root / "images"
+            images.mkdir()
+            (images / "a.png").write_text("alpha", encoding="utf-8")
+            (images / "a.txt").write_text("alpha", encoding="utf-8")
+            with (
+                mock.patch.object(adapters, "RapidOcrEngine", FakeRapid),
+                mock.patch("vault_spikes.report.metadata.version", return_value="1.0"),
+            ):
+                code, _, err = run(
+                    "ocr", "--engine", "rapidocr", "--images", str(images), "--out", str(root)
+                )
+            self.assertEqual(code, 0, err)
+            ocr_output = mock.Mock(stdout=b"alpha", stderr=b"")
+
+            def fake_run(command: list[str], **_: object) -> mock.Mock:
+                return version_line if "--version" in command else ocr_output
+
+            with (
+                mock.patch("shutil.which", return_value="tess"),
+                mock.patch("subprocess.run", side_effect=fake_run),
+            ):
+                code, _, err = run(
+                    "ocr", "--engine", "tesseract", "--images", str(images), "--out", str(root)
+                )
+            self.assertEqual(code, 0, err)
+            stored = json.loads((root / "ocr-tesseract-private.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["environment"]["packages"]["tesseract"], "5.5.0")
+            code, _, err = run(
+                "merge",
+                str(root / "ocr-rapidocr-ppocrv5-private.json"),
+                str(root / "ocr-tesseract-private.json"),
+                "--out",
+                str(root / "merged"),
+            )
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "ocr.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(merged["rows"]), 2)
+
+    def test_only_the_repositorys_own_files_are_called_the_public_dataset(self) -> None:
+        corpus = cli.REPO_ROOT / "demo" / "corpus"
+        questions = cli.REPO_ROOT / "eval" / "public" / "questions.yaml"
+        self.assertTrue(cli.is_public_dataset(corpus, questions))
+        self.assertTrue(cli.is_public_dataset(corpus / ".." / "corpus", questions))
+        with tempfile.TemporaryDirectory() as folder:
+            elsewhere = Path(folder)
+            self.assertFalse(cli.is_public_dataset(elsewhere, questions))
+            self.assertFalse(cli.is_public_dataset(corpus, elsewhere / "questions.yaml"))
+            # A copy that merely has the same names is the owner's data until proven otherwise.
+            (elsewhere / "demo" / "corpus").mkdir(parents=True)
+            self.assertFalse(cli.is_public_dataset(elsewhere / "demo" / "corpus", questions))
+
+    def test_merge_combines_candidate_reports(self) -> None:
+        env = environment_of("embedding")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = []
+            for name in ("qwen3-embedding-0.6b", "embeddinggemma-300m"):
+                report = Report("embedding", *KNOWN["embedding"].text, env)
+                report.add(f"{name}-cpu", **complete_row("embedding", f"{name}-cpu"))
+                paths.append(str(report.write(root, stem=f"embedding-{name}")[0]))
+            code, _, err = run("merge", *paths, "--out", str(root / "merged"))
+            self.assertEqual(code, 0, err)
+            merged = json.loads((root / "merged" / "embedding.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            [r["candidate"] for r in merged["rows"]],
+            ["qwen3-embedding-0.6b-cpu", "embeddinggemma-300m-cpu"],
+        )
+
+    def test_sizes_that_cannot_work_are_refused_before_anything_runs(self) -> None:
+        for flag in ("--batch-size", "--vault-chunks"):
+            for value in ("0", "-4", "many", "1.5"):
+                with self.subTest(flag=flag, value=value), self.assertRaises(SystemExit) as caught:
+                    run("embedding", "--candidate", "qwen3-embedding-0.6b", flag, value)
+                self.assertEqual(caught.exception.code, 2)
+        for flag in ("--dim", "--queries"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                run("vec", flag, "0")
+        with self.assertRaises(SystemExit):
+            run("vec", "--sizes", "100", "0")
+
+    def test_vec_sizes_must_ascend_and_nothing_is_run_or_written_otherwise(self) -> None:
+        for sizes, expected in (
+            (["100000", "10000"], "smallest to the largest"),
+            (["500", "500"], "smallest to the largest"),
+            # A row is named vectors-N, and N has at most nine digits.
+            (["10", "1000000000"], "from 1 to 999,999,999"),
+        ):
+            with (
+                self.subTest(sizes=sizes),
+                tempfile.TemporaryDirectory() as folder,
+                mock.patch.object(cli, "probe_extension_loading") as probe,
+            ):
+                code, _out, err = run("vec", "--out", folder, "--sizes", *sizes)
+                self.assertNotEqual(code, 0)
+                self.assertIn(expected, err)
+                probe.assert_not_called()
+                self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_merge_can_be_repeated_but_never_replaces_one_of_its_inputs(self) -> None:
+        env = environment_of("embedding")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = Report("embedding", *KNOWN["embedding"].text, env)
+            report.add(
+                "qwen3-embedding-0.6b-cpu", **complete_row("embedding", "qwen3-embedding-0.6b-cpu")
+            )
+            source = str(report.write(root / "in", stem="embedding-a")[0])
+            for _ in range(2):  # the second merge replaces the first, which is derived data
+                code, _, err = run("merge", source, "--out", str(root / "merged"))
+                self.assertEqual(code, 0, err)
+            # A measurement that carries the merge's own name must survive a merge into its folder.
+            own = report.write(root / "own", stem="embedding")[0]
+            before = own.read_bytes()
+            code, out, err = run("merge", str(own), "--out", str(root / "own"))
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("would overwrite one of the reports", err)
+            self.assertEqual(own.read_bytes(), before)
+
+    def test_merge_refuses_a_report_with_text_of_its_own(self) -> None:
+        env = environment_of("embedding")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = Report("embedding", "Patient diagnosis", "Q?", "How.", env)
+            report.add(
+                "qwen3-embedding-0.6b-cpu", **complete_row("embedding", "qwen3-embedding-0.6b-cpu")
+            )
+            path = str(report.write(root, stem="embedding-a")[0])
+            code, out, err = run("merge", path, "--out", str(root / "merged"))
+            self.assertFalse((root / "merged").exists())
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertNotIn("Patient", err)
+
+    def test_merge_refuses_names_that_only_look_harmless(self) -> None:
+        text = "patient-diagnosis-confidential"
+        good = environment_of("embedding")
+        whole = complete_row("embedding", "qwen3-embedding-0.6b-cpu")
+        cases = {
+            "candidate": (good, text, whole),
+            "metric": (good, "qwen3-embedding-0.6b-cpu", {**whole, "medical_record_number": 1}),
+            "package": (
+                environment_of("embedding", **{text: "1.0"}),
+                "qwen3-embedding-0.6b-cpu",
+                whole,
+            ),
+        }
+        for kind, (env, candidate, metrics) in cases.items():
+            with tempfile.TemporaryDirectory() as folder, self.subTest(kind):
+                root = Path(folder)
+                report = Report("embedding", *KNOWN["embedding"].text, env)
+                report.add(candidate, **metrics)
+                path = str(report.write(root, stem="embedding-x")[0])
+                code, out, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertFalse((root / "merged").exists())
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn(f"{kind} name", err)
+            self.assertNotIn("patient", err)
+            self.assertNotIn("medical", err)
+
+    def test_fetch_model_downloads_through_the_adapter(self) -> None:
+        with mock.patch.object(adapters, "fetch_model") as fetch:
+            code, out, err = run("fetch-model", "--candidate", "qwen3-embedding-0.6b")
+        self.assertEqual((code, err), (0, ""))
+        fetch.assert_called_once_with("qwen3-embedding-0.6b")
+        self.assertEqual(out.strip(), "qwen3-embedding-0.6b: downloaded")
+        # The revision that was fetched is shown, so the owner can compare it with the reports.
+        with (
+            mock.patch.object(adapters, "fetch_model"),
+            mock.patch.object(adapters, "model_revision", return_value=REVISION),
+        ):
+            code, out, err = run("fetch-model", "--candidate", "qwen3-embedding-0.6b")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.strip(), f"qwen3-embedding-0.6b: downloaded (revision {REVISION})")
+
+    def test_fetch_model_also_downloads_the_ocr_models_outside_the_timed_load(self) -> None:
+        with mock.patch.object(adapters, "fetch_model") as fetch:
+            code, out, err = run("fetch-model", "--candidate", "rapidocr-ppocrv5")
+        self.assertEqual((code, err), (0, ""))
+        fetch.assert_called_once_with("rapidocr-ppocrv5")
+        self.assertEqual(out.strip(), "rapidocr-ppocrv5: downloaded")
+
+    def test_errors_are_one_line_on_stderr_with_exit_code_two(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            code, out, err = run("pdf", "--extractor", "pypdfium2", "--pdfs", folder)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith("error: no PDF files"))
+
+    def assert_no_detail(self, code: int, out: str, err: str, *kinds: str) -> None:
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertTrue(any(f"the run stopped with {kind};" in err for kind in kinds), err)
+        self.assertEqual(len(err.strip().splitlines()), 1)  # one line, never a traceback
+        for leaked in (PRIVATE_TEXT, "SECRET-FOLDER", "Traceback", ".png", ".pdf"):
+            self.assertNotIn(leaked, err)
+
+    def test_a_missing_input_folder_does_not_print_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            missing = str(Path(folder) / "SECRET-FOLDER")
+            with mock.patch.object(adapters, "RapidOcrEngine", FakeRapid):
+                ocr = run("ocr", "--engine", "rapidocr", "--images", missing)
+            pdf = run("pdf", "--extractor", "pypdfium2", "--pdfs", missing)
+        self.assert_no_detail(*ocr, "FileNotFoundError")
+        self.assert_no_detail(*pdf, "FileNotFoundError")
+
+    def test_an_unreadable_output_folder_does_not_print_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            blocker = Path(folder) / "SECRET-FOLDER"
+            blocker.write_text("a file where the report folder should be", encoding="utf-8")
+            code, out, err = run("vec", "--out", str(blocker / "inside"), "--sizes", "10")
+        # Found before the run, as fixed text, whatever OSError the system gave for the file in
+        # the way (a "not a directory" error on Linux, another one on Windows).
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("cannot be created or written to", err)
+        for leaked in ("SECRET-FOLDER", "Traceback", "Error"):
+            self.assertNotIn(leaked, err)
+
+    def test_a_librarys_error_message_is_never_printed(self) -> None:
+        class Leaky(FakeRapid):
+            def load(self) -> None:
+                raise RuntimeError(f"cannot read {PRIVATE_TEXT}.png in SECRET-FOLDER")
+
+        with tempfile.TemporaryDirectory() as folder:
+            images = Path(folder) / "images"
+            images.mkdir()
+            (images / "a.png").write_text("x", encoding="utf-8")
+            (images / "a.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(adapters, "RapidOcrEngine", Leaky):
+                result = run("ocr", "--engine", "rapidocr", "--images", str(images))
+        self.assert_no_detail(*result, "RuntimeError")
+
+    def test_a_plain_value_error_from_a_library_is_not_printed_either(self) -> None:
+        # int("...") and json.loads quote their input, so a ValueError is not one of ours by type.
+        class Leaky(FakeRapid):
+            def load(self) -> None:
+                int(f"{PRIVATE_TEXT} SECRET-FOLDER")
+
+        with tempfile.TemporaryDirectory() as folder:
+            images = Path(folder)
+            (images / "a.png").write_text("x", encoding="utf-8")
+            (images / "a.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(adapters, "RapidOcrEngine", Leaky):
+                result = run("ocr", "--engine", "rapidocr", "--images", str(images))
+        self.assert_no_detail(*result, "ValueError")
+
+    def test_this_packages_own_errors_are_still_explained(self) -> None:
+        code, _, err = run("embedding", "--candidate", "qwen3-embedding-0.6b", "--questions", "no")
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("error: "))
+
+    def test_missing_inputs_are_named_before_any_model_is_touched(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            mock.patch.object(adapters, "SentenceTransformerEmbedder") as embedder,
+        ):
+            code, out, err = run(
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--corpus",
+                folder,
+                "--questions",
+                str(Path(folder) / "nope.yaml"),
+            )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("cannot find the corpus manifest", err)
+        self.assertIn("and the eval questions", err)
+        self.assertIn("public synthetic corpus and eval set", err)
+        embedder.assert_not_called()
+
+    def test_only_the_missing_input_is_named(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "manifest.json").write_text("{}", encoding="utf-8")
+            code, _, err = run(
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--corpus",
+                folder,
+                "--questions",
+                str(Path(folder) / "nope.yaml"),
+            )
+        self.assertEqual(code, 2)
+        self.assertNotIn("manifest", err.split(". The public")[0])
+        self.assertIn("the eval questions", err)
+
+    def test_unknown_candidates_are_refused_by_the_parser(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(["embedding", "--candidate", "nonsense"])
+
+    def test_a_malformed_command_line_never_repeats_what_was_typed(self) -> None:
+        private = "D:\\Clients\\Patient-Name"
+        cases = {
+            "an extra positional": ["check", private],
+            "a path where a number belongs": ["vec", "--dim", private],
+            "a path in a list of numbers": ["vec", "--sizes", "10", private],
+            "a path as the batch size": [
+                "embedding",
+                "--candidate",
+                "qwen3-embedding-0.6b",
+                "--batch-size",
+                private,
+            ],
+            "a path as a candidate": ["embedding", "--candidate", private],
+            "a path as the command": [private],
+            "an unknown option": ["ocr", "--engine", "tesseract", f"--{private}", "x"],
+            "an abbreviation that fits two options": ["merge", "--o", private],
+            "a missing value": ["pdf", "--pdfs"],
+            "a path as the engine": ["ocr", "--engine", private, "--images", "x"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(name):
+                out, err = io.StringIO(), io.StringIO()
+                with (
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                    self.assertRaises(SystemExit) as caught,
+                ):
+                    cli.main(argv)
+                self.assertEqual(caught.exception.code, 2)
+                self.assertEqual(out.getvalue(), "")
+                for private_part in ("Clients", "Patient", "D:"):
+                    self.assertNotIn(private_part, err.getvalue())
+                self.assertIn("the command line is not valid", err.getvalue())
+                self.assertIn("usage:", err.getvalue())
+
+    def test_help_still_works(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as caught:
+            cli.main(["--help"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("embedding", out.getvalue())
+
+
+class MissingLibraryRunTest(unittest.TestCase):
+    """A missing library stops a run before anything is measured or written: it is a fact about
+    the install, not a result about the technology, and a report would say otherwise."""
+
+    def test_a_pdf_run_without_its_library_writes_no_report(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "pdfs").mkdir()
+            (root / "pdfs" / "a.pdf").write_bytes(b"%PDF-1.4")
+            for extractor, missing in (
+                ("pypdfium2", "pypdfium2"),
+                ("pypdfium2+pdfplumber", "pdfplumber"),
+            ):
+                with (
+                    self.subTest(extractor=extractor),
+                    mock.patch.dict(sys.modules, {"pypdfium2": mock.MagicMock()}),
+                    mock.patch.dict(sys.modules, {"pdfplumber": mock.MagicMock(), missing: None}),
+                ):
+                    code, out, err = run(
+                        "pdf",
+                        "--extractor",
+                        extractor,
+                        "--pdfs",
+                        str(root / "pdfs"),
+                        "--out",
+                        str(root / "out"),
+                    )
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn(f"{missing} is not installed", err)
+                    self.assertEqual(list((root / "out").iterdir()), [])
+
+    def test_a_vec_run_without_sqlite_vec_does_not_report_that_it_fails_to_load(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            mock.patch.dict(sys.modules, {"sqlite_vec": None}),
+            mock.patch.object(cli, "probe_extension_loading") as probe,
+        ):
+            code, out, err = run("vec", "--out", folder, "--sizes", "10")
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("sqlite_vec is not installed", err)
+            probe.assert_not_called()
+            self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_an_embedding_run_without_the_pdf_reader_stops_before_the_corpus_is_read(
+        self,
+    ) -> None:
+        class NeverLoaded(FakeEmbedder):
+            def load(self) -> None:
+                raise AssertionError("the model must not be loaded")
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "manifest.json").write_text('{"documents": []}', encoding="utf-8")
+            (root / "questions.yaml").write_text("questions: []\n", encoding="utf-8")
+            with (
+                mock.patch.dict(
+                    sys.modules, {"sentence_transformers": mock.MagicMock(), "pypdfium2": None}
+                ),
+                mock.patch.object(
+                    adapters, "SentenceTransformerEmbedder", lambda *_a: NeverLoaded()
+                ),
+                mock.patch.object(cli, "load_manifest") as manifest,
+            ):
+                code, out, err = run(
+                    "embedding",
+                    "--candidate",
+                    "qwen3-embedding-0.6b",
+                    "--corpus",
+                    str(root),
+                    "--questions",
+                    str(root / "questions.yaml"),
+                    "--out",
+                    str(root / "out"),
+                )
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("pypdfium2 is not installed", err)
+            manifest.assert_not_called()
+            self.assertEqual(list((root / "out").iterdir()), [])
+
+
+class LibraryOutputTest(unittest.TestCase):
+    """The libraries' own log records and warnings never reach the console: pdfminer logs the
+    tokens of a malformed page (the words on it among them), and others log paths."""
+
+    @staticmethod
+    def chatty(_args: object) -> int:
+        # pdfminer's way: a module logger with no handler, which Python's last-resort handler
+        # prints on the console from the warning level up.
+        logging.getLogger("pdfminer.pdfinterp").warning("not floats: %r", (PRIVATE_TEXT, 0))
+        # RapidOCR's way: a logger with a console handler of its own that does not propagate.
+        own = logging.getLogger("vault_spikes_tests.rapidocr")
+        own.propagate = False
+        own.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stderr)
+        own.addHandler(handler)
+        try:
+            own.info("Using %s", PRIVATE_TEXT)
+        finally:
+            own.removeHandler(handler)
+        # huggingface_hub's way: a warning, also one that a filter of the library lets through.
+        warnings.warn(PRIVATE_TEXT, UserWarning, stacklevel=1)
+        warnings.simplefilter("always")
+        warnings.warn(PRIVATE_TEXT, UserWarning, stacklevel=1)
+        print("numbers only")
+        return 0
+
+    def test_nothing_a_library_logs_or_warns_is_printed(self) -> None:
+        filters = list(warnings.filters)
+        with mock.patch.object(cli, "run", side_effect=self.chatty):
+            code, out, err = run("check")
+        self.assertEqual((code, out, err), (0, "numbers only\n", ""))
+        # Switched back on afterwards: the switch belongs to the command, not to the process.
+        self.assertTrue(logging.getLogger("pdfminer.pdfinterp").isEnabledFor(logging.WARNING))
+        self.assertEqual(warnings.filters, filters)
+
+    def test_the_switch_is_undone_when_a_command_fails(self) -> None:
+        def failing(args: object) -> int:
+            self.chatty(args)
+            raise LookupError(PRIVATE_TEXT)
+
+        with mock.patch.object(cli, "run", side_effect=failing):
+            code, _, err = run("check")
+        self.assertEqual(code, 1)
+        self.assertNotIn(PRIVATE_TEXT, err)
+        self.assertTrue(logging.getLogger("pdfminer.pdfinterp").isEnabledFor(logging.WARNING))
+
+
+class FakePdfExtractor:
+    name = "pypdfium2"
+    detects_headings = False
+
+    def load(self) -> None:
+        pass
+
+    def extract(self, path: Path) -> pdf.PdfText:
+        return pdf.PdfText(["page text"], [])
+
+
+class DatasetNameTest(unittest.TestCase):
+    """The OCR and PDF spikes run on the public synthetic files and on the owner's own, and ADRs
+    0014 and 0015 need both, so each report says which it measured and has its own file name."""
+
+    def test_only_the_public_corpus_and_what_lies_inside_it_is_public(self) -> None:
+        corpus = cli.REPO_ROOT / "demo" / "corpus"
+        self.assertTrue(cli.is_public_folder(corpus))
+        self.assertTrue(cli.is_public_folder(corpus / "scans", corpus / ".." / "corpus" / "notes"))
+        with tempfile.TemporaryDirectory() as folder:
+            elsewhere = Path(folder)
+            self.assertFalse(cli.is_public_folder(elsewhere))
+            # Every folder must be public: the images may be, and the references the owner's own.
+            self.assertFalse(cli.is_public_folder(corpus, elsewhere))
+            self.assertFalse(cli.is_public_folder(elsewhere, corpus))
+        self.assertFalse(cli.is_public_folder(corpus / ".."))
+        self.assertFalse(cli.is_public_folder(cli.REPO_ROOT / "demo" / "corpus-copy"))
+        self.assertFalse(cli.is_public_folder(corpus.parent))
+
+    def run_both(
+        self, command: list[str], patches: list[contextlib.AbstractContextManager[object]]
+    ) -> Path:
+        """Run once on a folder inside a stand-in repository and once outside it, into one
+        output folder, and return that folder."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        public = root / "repo" / "demo" / "corpus" / "samples"
+        private = root / "owner" / "samples"
+        for samples in (public, private):
+            samples.mkdir(parents=True)
+            for name, body in (("a.png", "alpha"), ("a.txt", "alpha"), ("a.pdf", "alpha")):
+                (samples / name).write_text(body, encoding="utf-8")
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(mock.patch.object(cli, "REPO_ROOT", root / "repo"))
+            for samples in (public, private):
+                code, _, err = run(*command, str(samples), "--out", str(root / "out"))
+                self.assertEqual(code, 0, err)
+        return root / "out"
+
+    def test_ocr_runs_on_both_kinds_of_data_are_kept_apart(self) -> None:
+        out = self.run_both(
+            ["ocr", "--engine", "rapidocr", "--images"],
+            [
+                mock.patch.object(adapters, "RapidOcrEngine", FakeRapid),
+                # The test machine has no OCR packages, and a row that needs them is refused on
+                # merge when its environment says they are not installed.
+                mock.patch("vault_spikes.report.metadata.version", return_value="1.0"),
+            ],
+        )
+        flags = {}
+        for kind in ("public", "private"):
+            data = json.loads((out / f"ocr-rapidocr-ppocrv5-{kind}.json").read_text("utf-8"))
+            flags[kind] = data["rows"][0]["metrics"]["public_dataset"]
+        self.assertEqual(flags, {"public": True, "private": False})
+        code, _, err = run(
+            "merge",
+            str(out / "ocr-rapidocr-ppocrv5-public.json"),
+            str(out / "ocr-rapidocr-ppocrv5-private.json"),
+            "--out",
+            str(out / "merged"),
+        )
+        self.assertEqual(code, 0, err)
+        merged = json.loads((out / "merged" / "ocr.json").read_text("utf-8"))
+        self.assertEqual(
+            [row["metrics"]["public_dataset"] for row in merged["rows"]], [True, False]
+        )
+
+    def test_pdf_runs_on_both_kinds_of_data_are_kept_apart(self) -> None:
+        out = self.run_both(
+            ["pdf", "--extractor", "pypdfium2", "--pdfs"],
+            [mock.patch.object(adapters, "Pypdfium2Extractor", FakePdfExtractor)],
+        )
+        flags = {}
+        for kind in ("public", "private"):
+            data = json.loads((out / f"pdf-pypdfium2-{kind}.json").read_text("utf-8"))
+            flags[kind] = data["rows"][0]["metrics"]["public_dataset"]
+        self.assertEqual(flags, {"public": True, "private": False})
+
+    def test_a_report_without_its_baseline_packages_is_refused_on_merge(self) -> None:
+        for spike, candidate in (
+            ("embedding", "qwen3-embedding-0.6b-cpu"),
+            ("ocr", "tesseract"),
+            ("pdf", "pypdfium2"),
+            ("vec", "extension-loading"),
+        ):
+            with self.subTest(spike=spike), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                bare = Environment("Windows 11", "3.12", "cpu", 1, 1.0, None, {})
+                report = Report(spike, *KNOWN[spike].text, bare)
+                report.add(candidate, **complete_row(spike, candidate))
+                path = str(report.write(root, stem=f"{spike}-x")[0])
+                code, _, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertEqual(code, 2)
+                self.assertIn("lacks a package version", err)
+
+    def test_a_tesseract_row_needs_the_version_of_the_program(self) -> None:
+        for candidate, extra, accepted in (
+            ("tesseract", {}, False),
+            ("tesseract", {"tesseract": "5.5.0"}, True),
+            ("rapidocr-ppocrv5", {}, True),
+        ):
+            with self.subTest(candidate=candidate, extra=extra), tempfile.TemporaryDirectory() as f:
+                root = Path(f)
+                report = Report("ocr", *KNOWN["ocr"].text, environment_of("ocr", **extra))
+                report.add(candidate, **complete_row("ocr", candidate))
+                path = str(report.write(root, stem="ocr-x")[0])
+                code, _, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertEqual(code, 0 if accepted else 2, err)
+                if not accepted:
+                    self.assertIn("lacks a version its candidate needs", err)
+
+    def test_a_row_environment_of_its_own_must_carry_the_version_too(self) -> None:
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f)
+            report = Report("ocr", *KNOWN["ocr"].text, environment_of("ocr", "tesseract"))
+            report.add("tesseract", **complete_row("ocr", "tesseract"))
+            report.rows[0].environment = environment_of("ocr")  # its own, without the version
+            path = str(report.write(root, stem="ocr-x")[0])
+            code, _, err = run("merge", path, "--out", str(root / "merged"))
+        self.assertEqual(code, 2)
+        self.assertIn("lacks a version its candidate needs", err)
+
+    def test_every_spike_writes_the_baseline_it_requires(self) -> None:
+        # What the script records must satisfy the rule that merge applies to it.
+        for spike, schema in KNOWN.items():
+            with self.subTest(spike=spike):
+                module = {
+                    "embedding": spike_embedding,
+                    "ocr": spike_ocr,
+                    "pdf": pdf,
+                    "vec": spike_vec,
+                }[spike]
+                recorded = collect_environment(module.PACKAGES)
+                self.assertLessEqual(schema.required_packages, set(recorded.packages))
+
+    def test_a_row_without_its_dataset_flag_is_refused_on_merge(self) -> None:
+        for spike, candidate in (("ocr", "tesseract"), ("pdf", "pypdfium2")):
+            with self.subTest(spike=spike), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                row = complete_row(spike, candidate)
+                del row["public_dataset"]
+                report = Report(spike, *KNOWN[spike].text, environment_of(spike, candidate))
+                report.add(candidate, **row)
+                path = str(report.write(root, stem=f"{spike}-x")[0])
+                code, _, err = run("merge", path, "--out", str(root / "merged"))
+                self.assertEqual(code, 2)
+                self.assertIn("without metrics", err)
+
+
+class MergeRowShapeTest(unittest.TestCase):
+    """What a merge accepts of a row is fixed per candidate, so ADR evidence cannot lose the
+    context a figure needs (what it was measured on, how much was left out) or carry a figure the
+    candidate cannot produce."""
+
+    def merge(self, spike: str, candidate: str, metrics: dict[str, float]) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = Report(spike, *KNOWN[spike].text, environment_of(spike, candidate))
+            report.add(candidate, **metrics)
+            path = str(report.write(root, stem=f"{spike}-x")[0])
+            code, _, err = run("merge", path, "--out", str(root / "merged"))
+        return code, err
+
+    def test_every_candidate_merges_with_its_whole_row(self) -> None:
+        for spike, candidate in (
+            ("embedding", "embeddinggemma-300m-cpu"),
+            ("embedding", "qwen3-embedding-0.6b-cuda"),
+            ("ocr", "rapidocr-ppocrv5"),
+            ("ocr", "tesseract"),
+            ("pdf", "pypdfium2"),
+            ("pdf", "pypdfium2+pdfplumber"),
+            ("vec", "extension-loading"),
+            ("vec", "exact-search-check"),
+            ("vec", "vectors-10000"),
+        ):
+            with self.subTest(candidate=candidate):
+                code, err = self.merge(spike, candidate, complete_row(spike, candidate))
+                self.assertEqual((code, err), (0, ""))
+
+    def test_a_row_without_its_context_is_refused(self) -> None:
+        for spike, candidate, lost in (
+            ("embedding", "qwen3-embedding-0.6b-cpu", "public_dataset"),
+            ("embedding", "qwen3-embedding-0.6b-cpu", "documents_skipped"),
+            ("ocr", "tesseract", "failures"),
+            ("pdf", "pypdfium2", "files_ok"),
+            ("vec", "extension-loading", "vec_loads"),
+        ):
+            with self.subTest(candidate=candidate, lost=lost):
+                row = complete_row(spike, candidate)
+                del row[lost]
+                code, err = self.merge(spike, candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn("without metrics", err)
+                self.assertNotIn(lost, err)
+
+    def test_an_empty_row_is_refused(self) -> None:
+        for spike, candidate in (("embedding", "embeddinggemma-300m-cpu"), ("ocr", "tesseract")):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self.merge(spike, candidate, {})[0], 2)
+
+    def test_a_figure_the_candidate_cannot_produce_is_refused(self) -> None:
+        for spike, candidate, extra in (
+            ("embedding", "qwen3-embedding-0.6b-cpu", "gpu_peak_reserved_mib"),  # no video memory
+            ("ocr", "tesseract", "peak_memory_mib"),  # a separate program
+            ("pdf", "pypdfium2", "heading_f1"),  # this extractor finds no headings
+            ("vec", "extension-loading", "dim"),  # a figure of the size rows
+            ("vec", "exact-search-check", "query_ms_p50"),
+        ):
+            with self.subTest(candidate=candidate, extra=extra):
+                code, err = self.merge(
+                    spike, candidate, {**complete_row(spike, candidate), extra: 1.0}
+                )
+                self.assertEqual(code, 2)
+                self.assertIn("metric name this candidate cannot produce", err)
+
+    def test_a_figure_a_run_may_lack_is_not_required(self) -> None:
+        for spike, candidate, extra in (
+            (
+                "embedding",
+                "qwen3-embedding-0.6b-cuda",
+                ("gpu_peak_reserved_mib", "gpu_peak_allocated_mib"),
+            ),
+            ("ocr", "rapidocr-ppocrv5", ("peak_memory_mib",)),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    self.merge(spike, candidate, complete_row(spike, candidate)), (0, "")
+                )
+                row = {**complete_row(spike, candidate), **dict.fromkeys(extra, 1.0)}
+                self.assertEqual(self.merge(spike, candidate, row), (0, ""))
+
+    def test_half_a_group_of_figures_is_refused(self) -> None:
+        scores: dict[str, float | None] = {
+            "recall_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "hit_at_1_questions": 3,
+        }
+        reads: dict[str, float | None] = dict.fromkeys(("cer_mean", "cer_median", "cer_p90"), 0.1)
+        cases: list[tuple[str, str, dict[str, float | None]]] = [
+            ("embedding", "qwen3-embedding-0.6b-cpu", {"recall_at_10": 0.5}),
+            ("embedding", "qwen3-embedding-0.6b-cpu", {**scores, "mrr_at_10": None}),
+            ("embedding", "qwen3-embedding-0.6b-cuda", {"gpu_peak_reserved_mib": 1.0}),
+            ("ocr", "tesseract", reads),
+            ("pdf", "pypdfium2", {"wer_mean": 0.1}),
+            ("pdf", "pypdfium2+pdfplumber", {"heading_false_positives": 2}),
+        ]
+        for spike, candidate, part in cases:
+            with self.subTest(candidate=candidate, part=sorted(part)):
+                joined = {**complete_row(spike, candidate), **part}
+                row = {name: value for name, value in joined.items() if value is not None}
+                code, err = self.merge(spike, candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn("part of a group", err)
+
+    def test_a_package_the_candidate_needs_cannot_be_not_installed(self) -> None:
+        """The run could not have produced the row without it (the sentinel is for the packages
+        the candidate does not use), and the rule holds for every candidate's packages."""
+        needs = [
+            ("embedding", "qwen3-embedding-0.6b-cpu", "torch"),
+            ("embedding", "embeddinggemma-300m-cuda", "sentence-transformers"),
+            ("embedding", "qwen3-embedding-0.6b-cpu", "pypdfium2"),  # it read the corpus PDFs
+            ("ocr", "rapidocr-ppocrv5", "onnxruntime"),
+            ("ocr", "tesseract", "tesseract"),
+            ("pdf", "pypdfium2", "pypdfium2"),
+            ("pdf", "pypdfium2+pdfplumber", "pdfplumber"),
+            ("vec", "extension-loading", "sqlite-vec"),  # the command refuses to run without it
+            ("vec", "exact-search-check", "sqlite-vec"),
+            ("vec", "vectors-10000", "sqlite-vec"),
+        ]
+        for spike, candidate, package in needs:
+            for version, expected in (("not installed", 2), ("unknown", 0), ("1.0", 0)):
+                with self.subTest(candidate=candidate, package=package, version=version):
+                    report = Report(
+                        spike,
+                        *KNOWN[spike].text,
+                        environment_of(spike, candidate, **{package: version}),
+                    )
+                    report.add(candidate, **complete_row(spike, candidate))
+                    with tempfile.TemporaryDirectory() as folder:
+                        path = str(report.write(Path(folder), stem=f"{spike}-x")[0])
+                        code, _, err = run("merge", path, "--out", str(Path(folder) / "merged"))
+                    self.assertEqual(code, expected, err)
+        # A package the candidate does not use may be missing: the run on the other engine.
+        for spike, candidate, other in (
+            ("ocr", "tesseract", "rapidocr"),
+            ("pdf", "pypdfium2", "pdfplumber"),
+        ):
+            with self.subTest(candidate=candidate, absent=other):
+                report = Report(
+                    spike,
+                    *KNOWN[spike].text,
+                    environment_of(spike, candidate, **{other: "not installed"}),
+                )
+                report.add(candidate, **complete_row(spike, candidate))
+                with tempfile.TemporaryDirectory() as folder:
+                    path = str(report.write(Path(folder), stem=f"{spike}-x")[0])
+                    code, _, err = run("merge", path, "--out", str(Path(folder) / "merged"))
+                self.assertEqual(code, 0, err)
+
+    def test_heading_scores_need_a_reference_and_agree_with_each_other(self) -> None:
+        """A hand-edited report cannot claim heading accuracy with no labelled PDFs behind it, nor
+        scores that the script could not have written together."""
+        candidate = "pypdfium2+pdfplumber"
+        base = {"files": 2, "files_ok": 2, "files_with_heading_reference": 1}
+
+        def attempt(**figures: float) -> int:
+            row = {**complete_row("pdf", candidate), **figures}
+            return self.merge("pdf", candidate, row)[0]
+
+        accepted: list[dict[str, float]] = [
+            {**base, "heading_false_positives": 0},  # a reference with nothing expected or found
+            {**base, "heading_false_positives": 2, "heading_precision": 0.5, "heading_f1": 0.0},
+            {**base, "heading_false_positives": 0, "heading_recall": 1.0, "heading_precision": 1.0}
+            | {"heading_f1": 1.0},
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
+            | {"heading_f1": 0.6667},
+            {**base, "heading_false_positives": 0, "heading_recall": 0.0, "heading_f1": 0.0},
+            # Three detected, two right: precision two thirds, and F1 with full recall 0.8.
+            {
+                **base,
+                "heading_false_positives": 1,
+                "heading_recall": 1.0,
+                "heading_precision": 0.6667,
+            }
+            | {"heading_f1": 0.8},
+            # A stored 1.0 can be a precision just below it, over many detections.
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 1.0}
+            | {"heading_f1": 1.0},
+        ]
+        for figures in accepted:
+            with self.subTest(accepted=figures):
+                self.assertEqual(attempt(**figures), 0)
+        refused: list[dict[str, float]] = [
+            {"heading_recall": 1.0, "heading_precision": 1.0, "heading_f1": 1.0},  # no reference
+            {"heading_f1": 1.0},
+            {"files": 1, "files_ok": 1, "heading_false_positives": 0},  # a group without a count
+            {
+                "files": 1,
+                "files_ok": 1,
+                "files_with_heading_reference": 0,
+                "heading_false_positives": 0,
+            },
+            {**base, "heading_false_positives": 0, "heading_recall": 1.0},  # recall but no F1
+            {**base, "heading_false_positives": 0, "heading_f1": 1.0},  # F1 from nothing
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
+            | {"heading_f1": 0.9},  # not the harmonic mean
+            {**base, "heading_false_positives": 0, "heading_recall": 1.0, "heading_f1": 1.0},
+            {**base, "heading_false_positives": 3},  # false positives, but nothing was detected
+            {**base, "heading_false_positives": 0, "heading_precision": 0.5, "heading_f1": 0.0},
+            # One wrong detection leaves 1/2, 2/3, 3/4 ... right, never 0.6.
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.6}
+            | {"heading_f1": 0.75},
+            # F1 of 1.0 and 0.5 is 0.6667: more than the rounding of the three figures away.
+            {**base, "heading_false_positives": 1, "heading_recall": 1.0, "heading_precision": 0.5}
+            | {"heading_f1": 0.667},
+        ]
+        for figures in refused:
+            with self.subTest(refused=figures):
+                self.assertEqual(attempt(**figures), 2)
+
+    def test_figures_that_contradict_the_counts_are_refused(self) -> None:
+        accuracy = {
+            "cer_mean": 0.1,
+            "cer_median": 0.1,
+            "cer_p90": 0.1,
+            "seconds_per_image_p50": 1.0,
+            "seconds_per_image_p95": 1.0,
+        }
+        cpu = "qwen3-embedding-0.6b-cpu"
+        wer = {"wer_mean": 0.1, "wer_median": 0.1}
+        heading = {"heading_false_positives": 0}
+        scored = {
+            "questions_scored": 5,
+            "recall_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "hit_at_1_questions": 7,
+        }
+        # Two of four images read with a mean error of 0.2, one failed call, one reference unusable.
+        two_read = {
+            "images": 4,
+            "references_unusable": 1,
+            "failures": 1,
+            "seconds_spent_in_failures": 1.0,
+            "cer_mean_failures_as_errors": 0.4667,
+            **accuracy,
+            "cer_mean": 0.2,
+        }
+        all_failed = {
+            "images": 2,
+            "failures": 2,
+            "seconds_spent_in_failures": 3.0,
+            "cer_mean_failures_as_errors": 1.0,
+        }
+        for whole in (two_read, all_failed):  # the cases below each break one of these
+            row = {**complete_row("ocr", "tesseract"), **whole}
+            self.assertEqual(self.merge("ocr", "tesseract", row), (0, ""))
+        cases: list[tuple[str, str, dict[str, float]]] = [
+            # Hit@1 is required exactly when find-the-document questions were scored.
+            ("embedding", cpu, {**scored, "hit_at_1_questions": 3}),  # a count but no hit_at_1
+            ("embedding", cpu, {**scored, "hit_at_1_questions": 0, "hit_at_1": 1.0}),
+            ("embedding", cpu, {**scored, "hit_at_1": 1.0}),  # more marked than scored
+            # Scores exist exactly when questions were scored.
+            ("embedding", cpu, {"recall_at_10": 0.5, "mrr_at_10": 0.5, "hit_at_1_questions": 0}),
+            ("embedding", cpu, {"questions_scored": 5}),
+            # OCR: accuracy exists exactly when an image was read.
+            ("ocr", "tesseract", {"images": 3}),
+            ("ocr", "tesseract", {"images": 3, "failures": 4}),
+            ("ocr", "tesseract", {"images": 3, "references_unusable": 3, **accuracy}),
+            ("ocr", "tesseract", {"images": 3, "empty_results": 4, **accuracy}),
+            # PDF: outcomes add up, and error rates need references.
+            ("pdf", "pypdfium2", {"files": 3, "files_ok": 2}),
+            ("pdf", "pypdfium2", {"files": 3, "files_ok": 3, "references_used": 1}),
+            ("pdf", "pypdfium2", {"pages": 1, "pages_without_text": 2}),
+            ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "references_used": 99, **wer}),
+            # A file's reference is used or unusable, never both, and a file has one reference.
+            ("pdf", "pypdfium2", {"files": 1, "files_corrupt": 1, "references_unusable": 2}),
+            (
+                "pdf",
+                "pypdfium2",
+                {"files": 2, "files_ok": 2, "references_used": 1, "references_unusable": 2, **wer},
+            ),
+            ("pdf", "pypdfium2", {"pages": 3}),  # pages come from files that were read
+            ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "files_with_heading_candidates": 2}),
+            (
+                "pdf",
+                "pypdfium2+pdfplumber",
+                {"files": 1, "files_ok": 1, "files_with_heading_reference": 5, **heading},
+            ),
+            ("pdf", "pypdfium2", {"pages": 0, "pages_per_second": 2.0}),
+            # OCR: time is lost in failures only when a call failed.
+            ("ocr", "tesseract", {"seconds_spent_in_failures": 4.0}),
+            # An embedding row has embedded something.
+            ("embedding", cpu, {"chunks": 0}),
+            ("embedding", cpu, {"batch_size": 0}),
+            # The projection is the assumed chunks at the measured throughput (36,000 chunks at
+            # one a second is ten hours), so neither can be edited alone.
+            ("embedding", cpu, {"hours_for_vault_of_chunks": 10.01}),
+            ("embedding", cpu, {"vault_chunks_assumed": 72_000}),
+            ("embedding", cpu, {"chunks_per_second": 2.0}),
+            ("embedding", cpu, {"chunks_per_second": 0.0}),
+            # Chunks hold 1 to 800 characters and overlap by 100 to 400 (corpus.overlap_for).
+            ("embedding", cpu, {"chunk_overlap_chars": 99}),
+            ("embedding", cpu, {"chunk_overlap_chars": 401}),
+            ("embedding", cpu, {"mean_chunk_chars": 0.5}),
+            ("embedding", cpu, {"mean_chunk_chars": 800.5}),
+            # Hit@1 is a whole number of hits out of its questions (here 2).
+            ("embedding", cpu, {**scored, "hit_at_1_questions": 2, "hit_at_1": 0.3}),
+            # Only the passages of scored questions are looked for.
+            ("embedding", cpu, {"sources_not_in_any_chunk": 1}),
+            # torch never allocates more than its allocator reserved.
+            (
+                "embedding",
+                "qwen3-embedding-0.6b-cuda",
+                {"gpu_peak_allocated_mib": 2.0, "gpu_peak_reserved_mib": 1.0},
+            ),
+            # OCR: the failures-as-errors mean follows from the mean of the images read.
+            ("ocr", "tesseract", {**two_read, "cer_mean_failures_as_errors": 0.5}),
+            ("ocr", "tesseract", {**all_failed, "cer_mean_failures_as_errors": 0.9}),
+            # A median is never above the higher percentile of the same figures.
+            ("ocr", "tesseract", {**two_read, "cer_median": 0.4, "cer_p90": 0.3}),
+            (
+                "ocr",
+                "tesseract",
+                {**two_read, "seconds_per_image_p50": 3.0, "seconds_per_image_p95": 2.0},
+            ),
+            # Images per minute needs some OCR work, and is above 0 exactly when one was read.
+            ("ocr", "tesseract", {"images_per_minute": 5.0}),
+            ("ocr", "tesseract", {"images": 2, "references_unusable": 2, "images_per_minute": 0.0}),
+            ("ocr", "tesseract", {**two_read, "images_per_minute": 0.0}),
+            ("ocr", "tesseract", {**all_failed, "images_per_minute": 3.0}),
+            # PDF: heading candidates come from some file, and pypdfium2 alone finds none.
+            ("pdf", "pypdfium2+pdfplumber", {"files": 1, "files_ok": 1, "heading_candidates": 2}),
+            (
+                "pdf",
+                "pypdfium2",
+                {
+                    "files": 1,
+                    "files_ok": 1,
+                    "heading_candidates": 2,
+                    "files_with_heading_candidates": 1,
+                },
+            ),
+            ("pdf", "pypdfium2", {"files": 1, "files_ok": 1, "pages": 3, "pages_per_second": 0.0}),
+            # sqlite-vec: an extension cannot load into a Python that cannot load extensions.
+            ("vec", "extension-loading", {"can_load_extensions": False, "vec_loads": True}),
+            ("vec", "exact-search-check", {"vectors": 0}),
+            # The check asks five queries, so its share is a whole number of fifths.
+            ("vec", "exact-search-check", {"same_answer_as_python": 0.5}),
+            # A measured size inserted something into a file of some size.
+            ("vec", "vectors-10000", {"insert_vectors_per_second": 0.0}),
+            ("vec", "vectors-10000", {"database_mib": 0.0}),
+            # One vector of one value is 4 bytes, under the rounding, but a file is never empty.
+            ("vec", "vectors-1", {"database_mib": 0.0}),
+            ("vec", "vectors-10000", {"query_ms_p50": 2.0, "query_ms_p95": 1.0}),
+            ("vec", "vectors-10000", {"vectors": 0}),
+            # 10,000 vectors of 1,024 float32 values are 39.0625 MiB, so the database is no smaller.
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 39.0624}),
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 3.9}),
+        ]
+        for spike, candidate, change in cases:
+            with self.subTest(candidate=candidate, change=change):
+                row = {**complete_row(spike, candidate), **change}
+                code, err = self.merge(spike, candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn("figures do not fit together", err)
+
+    def test_figures_that_agree_with_the_counts_are_accepted(self) -> None:
+        cpu = "qwen3-embedding-0.6b-cpu"
+        marked = {
+            "questions_scored": 5,
+            "recall_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "hit_at_1_questions": 2,
+        }
+        read = {"images": 4, "references_unusable": 1, "failures": 1, "empty_results": 1}
+        cases: list[tuple[str, str, dict[str, float]]] = [
+            ("embedding", cpu, {**marked, "hit_at_1": 0.5}),
+            ("embedding", cpu, {**marked, "hit_at_1_questions": 0}),
+            # A scored question's passage that no chunk holds is counted.
+            ("embedding", cpu, {**marked, "hit_at_1": 0.5, "sources_not_in_any_chunk": 2}),
+            # The projection is checked within the rounding of both figures: a throughput stored
+            # as 0.0123 was between 0.01225 and 0.01235 chunks a second.
+            (
+                "embedding",
+                cpu,
+                {
+                    "chunks_per_second": 37.1234,
+                    "vault_chunks_assumed": 100_000,
+                    "hours_for_vault_of_chunks": 0.7483,
+                },
+            ),
+            (
+                "embedding",
+                cpu,
+                {
+                    "chunks_per_second": 0.0123,
+                    "vault_chunks_assumed": 100_000,
+                    "hours_for_vault_of_chunks": 2250.1,
+                },
+            ),
+            ("embedding", cpu, {"chunk_overlap_chars": 400, "mean_chunk_chars": 800.0}),
+            (
+                "embedding",
+                "qwen3-embedding-0.6b-cuda",
+                {"gpu_peak_allocated_mib": 1.0, "gpu_peak_reserved_mib": 2.0},
+            ),
+            # Every call failed: each counts as a wrong image, and nothing was read in the time.
+            (
+                "ocr",
+                "tesseract",
+                {
+                    "images": 2,
+                    "failures": 2,
+                    "seconds_spent_in_failures": 3.0,
+                    "cer_mean_failures_as_errors": 1.0,
+                    "images_per_minute": 0.0,
+                },
+            ),
+            (
+                "ocr",
+                "tesseract",
+                # Two images read with a mean of 0.2 and one failure: (0.2 * 2 + 1) / 3.
+                {**read, "cer_mean_failures_as_errors": 0.4667, "cer_mean": 0.2}
+                | {
+                    "cer_median": 0.2,
+                    "cer_p90": 0.3,
+                    "seconds_per_image_p50": 1.0,
+                    "seconds_per_image_p95": 2.0,
+                    "images_per_minute": 12.5,
+                },
+            ),
+            ("pdf", "pypdfium2", {"files": 3, "files_ok": 2, "files_corrupt": 1}),
+            (
+                "pdf",
+                "pypdfium2+pdfplumber",
+                {
+                    "files": 2,
+                    "files_ok": 2,
+                    "pages": 4,
+                    "pages_per_second": 8.0,
+                    "heading_candidates": 3,
+                    "files_with_heading_candidates": 2,
+                },
+            ),
+            ("vec", "exact-search-check", {"same_answer_as_python": 0.8}),
+            ("vec", "vectors-10000", {"query_ms_p50": 2.0, "query_ms_p95": 2.0}),
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 39.0625}),
+            ("vec", "vectors-10000", {"dim": 1024, "database_mib": 41.5}),
+            # A PDF that could not be read can still have had a blank reference.
+            ("pdf", "pypdfium2", {"files": 1, "files_corrupt": 1, "references_unusable": 1}),
+            (
+                "pdf",
+                "pypdfium2",
+                {
+                    "files": 2,
+                    "files_ok": 1,
+                    "files_corrupt": 1,
+                    "references_used": 1,
+                    "references_unusable": 1,
+                    "wer_mean": 0.1,
+                    "wer_median": 0.1,
+                },
+            ),
+            (
+                "pdf",
+                "pypdfium2",
+                {
+                    "files": 1,
+                    "files_ok": 1,
+                    "references_used": 1,
+                    "wer_mean": 0.1,
+                    "wer_median": 0.1,
+                },
+            ),
+        ]
+        for spike, candidate, change in cases:
+            with self.subTest(candidate=candidate, change=change):
+                row = {**complete_row(spike, candidate), **change}
+                self.assertEqual(self.merge(spike, candidate, row), (0, ""))
+
+    def test_a_size_row_is_named_after_the_vectors_it_measured(self) -> None:
+        """The name states the size, so a hand edit cannot move a measurement to another size:
+        not by the name alone, nor by a spelling of the number the script does not write."""
+        measured = complete_row("vec", "vectors-10000")
+        for candidate, row, expected in (
+            ("vectors-100000", measured, "candidate name does not match its figures"),
+            ("vectors-10000", {**measured, "vectors": 100_000}, "does not match its figures"),
+            ("vectors-010000", measured, "candidate name this spike cannot produce"),
+            ("vectors-0", {**measured, "vectors": 0}, "candidate name this spike cannot produce"),
+            ("vectors-1000000000", measured, "candidate name this spike cannot produce"),
+        ):
+            with self.subTest(candidate=candidate, vectors=row["vectors"]):
+                code, err = self.merge("vec", candidate, row)
+                self.assertEqual(code, 2)
+                self.assertIn(expected, err)
+        largest = f"vectors-{spike_vec.LARGEST_SIZE}"
+        for candidate, row in (
+            ("vectors-1", complete_row("vec", "vectors-1")),
+            (largest, {**complete_row("vec", largest), "database_mib": 4000.0}),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self.merge("vec", candidate, row), (0, ""))
+
+    def test_a_whole_group_is_accepted(self) -> None:
+        row = {
+            **complete_row("embedding", "qwen3-embedding-0.6b-cpu"),
+            **{
+                "questions_scored": 5,
+                "recall_at_10": 0.5,
+                "mrr_at_10": 0.5,
+                "hit_at_1_questions": 0,
+            },
+        }
+        self.assertEqual(self.merge("embedding", "qwen3-embedding-0.6b-cpu", row), (0, ""))
+
+
+if __name__ == "__main__":
+    unittest.main()

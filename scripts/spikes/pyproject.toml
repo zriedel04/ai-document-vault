@@ -1,0 +1,42 @@
+[project]
+name = "vault-spikes"
+version = "0.1.0"
+description = "Phase 0 measurement scripts. Run on the owner's Windows PC only; CI runs only the unit tests."
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0"]
+
+# Heavy or hardware-specific libraries are extras, so CI never installs them.
+[project.optional-dependencies]
+vec = ["sqlite-vec>=0.1.6"]
+# The embedding spike reads the PDFs of the corpus with pypdfium2.
+embedding = ["sentence-transformers>=5.0", "pypdfium2>=4.30"]
+ocr = ["rapidocr>=3.4", "onnxruntime>=1.20"]
+pdf = ["pypdfium2>=4.30", "pdfplumber>=0.11"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "N", "RUF", "S", "SIM", "UP", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["vault_spikes", "tests"]
+
+[[tool.mypy.overrides]]
+# Optional libraries that are not installed in CI and ship no type information.
+module = [
+    "sentence_transformers",
+    "huggingface_hub",
+    "sqlite_vec",
+    "rapidocr",
+    "pypdfium2",
+    "pdfplumber",
+    "torch",
+]
+ignore_missing_imports = true
