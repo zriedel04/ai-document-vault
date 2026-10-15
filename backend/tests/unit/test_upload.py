@@ -17,6 +17,7 @@ from sqlalchemy import Engine, select
 from vault.api import imports
 from vault.api.imports import parse_length, parse_mtime
 from vault.core.config import Settings
+from vault.core.security import current_user
 from vault.db import ids
 from vault.db.schema import blobs, documents, import_sources, jobs
 from vault.ingest.importer import Importer, ImportRequest
@@ -185,6 +186,8 @@ PRIVATE = "Diagnosis-Patient"
         ({"X-Vault-Filename": "a.txt", "X-Vault-Last-Modified": "1.5"}, "milliseconds"),
         ({"X-Vault-Filename": "a.txt", "X-Vault-Last-Modified": "9" * 20}, "milliseconds"),
         ({"X-Vault-Filename": "a.txt", "X-Vault-Last-Modified": PRIVATE}, "milliseconds"),
+        ({"X-Vault-Filename": "a.txt", "X-Vault-Last-Modified": "1" * 5000}, "milliseconds"),
+        ({"X-Vault-Filename": "a.txt", "X-Vault-Last-Modified": "0" * 5000}, "milliseconds"),
     ],
 )
 def test_a_malformed_request_is_a_400_in_fixed_words(
@@ -289,6 +292,13 @@ def test_the_file_name_never_reaches_a_log(client: TestClient) -> None:
         assert PRIVATE not in text
 
 
+def test_a_content_length_of_thousands_of_digits_is_too_large_not_an_error() -> None:
+    """int() refuses more than 4,300 digits with a ValueError of its own."""
+    with pytest.raises(HTTPException) as refused:
+        parse_length("9" * 5000, 100)
+    assert refused.value.status_code == 413
+
+
 @pytest.mark.parametrize("value", ["-1", "1e3", chr(0x661)])
 def test_a_content_length_that_is_not_a_number_is_a_400(value: str) -> None:
     with pytest.raises(HTTPException) as refused:
@@ -380,3 +390,20 @@ def test_no_more_than_one_write_chunk_waits_in_memory(
     assert target.read_bytes() == TEXT
     assert written == [20, 20, 8]  # four parts of 5 reach 20, then the rest
     assert max(written) < 16 + 5  # never more than one chunk plus one part
+
+
+def test_the_route_asks_for_the_current_user(
+    app: FastAPI, client: TestClient, engine: Engine
+) -> None:
+    """Codex #32: like every signed-in route, so that real accounts later cover it too. A
+    current_user that refuses must stop the upload."""
+
+    def nobody() -> None:
+        raise HTTPException(status_code=401, detail="no user")
+
+    app.dependency_overrides[current_user] = nobody
+    try:
+        assert send(client, TEXT).status_code == 401
+    finally:
+        app.dependency_overrides.clear()
+    assert rows(engine, blobs) == []

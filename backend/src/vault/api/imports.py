@@ -29,10 +29,11 @@ from pathlib import Path
 from typing import Annotated, BinaryIO, Final
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from vault.core.security import LocalUser, current_user
 from vault.db import ids
 from vault.ingest.importer import Importer, ImportRequest, Outcome
 from vault.ingest.validate import EXTENSIONS, Reason
@@ -96,7 +97,13 @@ def parse_mtime(header: str | None) -> datetime | None:
     """Milliseconds since 1970 as naive UTC, as the database stores times."""
     if header is None:
         return None
-    if not header.isascii() or not header.isdigit() or int(header) > MAX_MTIME_MS:
+    # The length first: int() refuses a string of more than 4,300 digits with its own error.
+    if (
+        not header.isascii()
+        or not header.isdigit()
+        or len(header) > len(str(MAX_MTIME_MS))
+        or int(header) > MAX_MTIME_MS
+    ):
         raise _bad_request("X-Vault-Last-Modified is not a time in milliseconds")
     # Plain arithmetic from 1970: datetime.fromtimestamp goes through the C library, whose range
     # on Windows ends in the year 3000, so a time the check above accepts could fail there.
@@ -109,7 +116,7 @@ def parse_length(header: str | None, max_bytes: int) -> None:
         return
     if not header.isascii() or not header.isdigit():
         raise _bad_request("Content-Length is not a number")
-    if int(header) > max_bytes:
+    if len(header) > len(str(max_bytes)) or int(header) > max_bytes:
         raise HTTPException(status_code=413, detail="the file is larger than the size limit")
 
 
@@ -162,6 +169,7 @@ async def _receive(request: Request, target: Path, max_bytes: int) -> bool:
 )
 async def upload(
     request: Request,
+    _user: Annotated[LocalUser, Depends(current_user)],
     x_vault_filename: Annotated[str | None, Header()] = None,
     x_vault_batch: Annotated[str | None, Header()] = None,
     x_vault_last_modified: Annotated[str | None, Header()] = None,
