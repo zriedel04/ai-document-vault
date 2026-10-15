@@ -16,6 +16,7 @@ from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
+from vault.jobs.queue import JobQueue
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
 from vault.web import INDEX, find_file, install_frontend
@@ -31,10 +32,11 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
 
     With ``vault.path`` set, the vault folder is validated and created, the install's token is read
     (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
-    every blob is made read-only again) and the database is migrated before the first request. A
-    bad vault folder (inside a Git repository, say) or a damaged blob store (the temporary folder
-    is a link) stops the start-up. Without a vault (demo mode, tests) there is
-    no database and the token is random for this process only, so only the open endpoints work.
+    every blob is made read-only again), the database is migrated and jobs that a killed process
+    left running are queued again, all before the first request. A bad vault folder (inside a Git
+    repository, say) or a damaged blob store (the temporary folder is a link) stops the start-up.
+    Without a vault (demo mode, tests) there is no database and the token is random for this
+    process only, so only the open endpoints work.
 
     The built frontend is served when ``dist/index.html`` exists (the ``frontend.dist`` setting, or
     ``frontend/dist`` by default). ``serve_frontend=False`` leaves it out, for the schema export.
@@ -53,6 +55,14 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         log_event(logger, "blobs.recovered", removed=metric(removed), sealed=metric(sealed))
         upgrade_to_latest(paths.db)
         engine = create_vault_engine(paths.db)
+        # Before any worker runs: jobs a killed process left running are queued again.
+        recovery = JobQueue(engine).recover()
+        log_event(
+            logger,
+            "jobs.recovered",
+            requeued=metric(recovery.requeued),
+            failed=metric(recovery.failed),
+        )
     else:
         token = new_token()
 
