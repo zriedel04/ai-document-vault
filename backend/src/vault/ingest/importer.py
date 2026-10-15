@@ -44,7 +44,7 @@ from vault.db.schema import (
 )
 from vault.ingest.validate import DEFAULT_LIMITS, Limits, Reason, validate_file
 from vault.jobs.queue import JobQueue, utc_now
-from vault.storage.blobs import BlobStore, BlobTooLargeError
+from vault.storage.blobs import BlobIntegrityError, BlobStore, BlobTooLargeError
 
 FIRST_STAGE: Final = "extract"
 
@@ -167,6 +167,13 @@ class Importer:
                 return ImportResult(Outcome.REFUSED, reason=Reason.TOO_LARGE)
             except SourceReadError:
                 return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
+        # A blob that was already there was copied by an earlier import and has not been read
+        # since. Its name claims these bytes; re-hash it, or a hand edit or damage that kept the
+        # file's type would be recorded as the source's bytes. Damage is the vault's fault, not
+        # the file's, so it raises.
+        if not stored.created and not self._store.verify(stored.sha256):
+            msg = "the stored copy of these bytes no longer matches its hash"
+            raise BlobIntegrityError(msg)
         verdict = validate_file(stored.path, self._limits)
         if not verdict.ok or verdict.extension is None or verdict.mime is None:
             if stored.created:
