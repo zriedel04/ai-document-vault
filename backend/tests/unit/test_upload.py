@@ -171,6 +171,10 @@ PRIVATE = "Diagnosis-Patient"
         ({}, "X-Vault-Filename is required"),
         ({"X-Vault-Filename": ""}, "X-Vault-Filename is required"),
         ({"X-Vault-Filename": f"{PRIVATE}%FF.txt"}, "not percent-encoded UTF-8"),
+        ({"X-Vault-Filename": f"{PRIVATE}%ZZ.txt"}, "not percent-encoded UTF-8"),
+        ({"X-Vault-Filename": f"{PRIVATE}%.txt"}, "not percent-encoded UTF-8"),
+        ({"X-Vault-Filename": f"{PRIVATE}%4.txt"}, "not percent-encoded UTF-8"),
+        ({"X-Vault-Filename": f"{PRIVATE}.txt%"}, "not percent-encoded UTF-8"),
         ({"X-Vault-Filename": quote(f"School/{PRIVATE}.txt", safe="")}, "not a file name"),
         ({"X-Vault-Filename": quote(f"School\\{PRIVATE}.txt", safe="")}, "not a file name"),
         ({"X-Vault-Filename": ".."}, "not a file name"),
@@ -407,3 +411,16 @@ def test_the_route_asks_for_the_current_user(
     finally:
         app.dependency_overrides.clear()
     assert rows(engine, blobs) == []
+
+
+def test_a_name_with_latin_1_bytes_in_the_header_is_refused() -> None:
+    """A header can carry Latin-1; encodeURIComponent writes ASCII only."""
+    with pytest.raises(HTTPException) as refused:
+        imports.parse_filename("R" + chr(0xE9) + "sum" + chr(0xE9) + ".txt")
+    assert refused.value.status_code == 400
+
+
+def test_an_escaped_percent_sign_is_kept_in_the_name(client: TestClient, engine: Engine) -> None:
+    send(client, TEXT, "100% done.txt")
+    (source,) = rows(engine, import_sources)
+    assert source.original_filename == "100% done.txt"

@@ -23,6 +23,7 @@ logs.
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,7 @@ router = APIRouter(tags=["imports"])
 MAX_NAME_CHARS: Final = 255  # what Windows and most file systems allow for one name
 # 1970 to the end of year 9999: what a browser's lastModified can mean and a datetime can hold.
 MAX_MTIME_MS: Final = 253_402_300_799_999
+PERCENT_ENCODED: Final = re.compile(r"(?:[^%]|%[0-9A-Fa-f]{2})+")
 WRITE_CHUNK: Final = 1024 * 1024  # the most of a body held in memory before it is written
 EPOCH: Final = datetime(1970, 1, 1)  # naive UTC, as the database stores times
 
@@ -70,6 +72,10 @@ def parse_filename(header: str | None) -> str:
     """The decoded file name, or a 400. A name is one name: no folders, no control characters."""
     if header is None or not header:
         raise _bad_request("X-Vault-Filename is required")
+    # unquote() leaves a broken escape (%ZZ, a lone %) as it is, and a header may carry Latin-1
+    # bytes: only ASCII with complete escapes is what encodeURIComponent writes.
+    if not header.isascii() or not PERCENT_ENCODED.fullmatch(header):
+        raise _bad_request("X-Vault-Filename is not percent-encoded UTF-8")
     try:
         name = unquote(header, encoding="utf-8", errors="strict")
     except UnicodeDecodeError:
