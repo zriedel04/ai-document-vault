@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from vault.api import health, session
 from vault.core.config import Settings, load_settings
+from vault.core.headers import SecurityHeadersMiddleware
 from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
@@ -73,6 +74,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.engine = engine
     app.state.blobs = blobs
     app.add_middleware(LocalSecurityMiddleware, token=token)
+    # Added last, so it is outermost and its headers are on the refusals above as well.
+    app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(health.router, prefix="/api")
     app.include_router(session.router, prefix="/api")
     dist = settings.frontend.dist or DEFAULT_FRONTEND_DIST
