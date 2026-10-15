@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import BinaryIO, Final, cast
 
 from sqlalchemy import Engine, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -81,6 +81,24 @@ class ImportResult:
     reason: Reason | None = None
 
 
+class SourceReadError(Exception):
+    """Reading the file being imported failed (as opposed to writing it into the store)."""
+
+
+class _SourceReader:
+    """The source file, with a read failure marked as the source's, so the importer can tell it
+    from a failure of the blob store that is copying it."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._stream = stream
+
+    def read(self, size: int = -1) -> bytes:
+        try:
+            return self._stream.read(size)
+        except OSError as error:
+            raise SourceReadError from error
+
+
 def _check(request: ImportRequest) -> None:
     """Refuse a request the ``import_sources`` table would refuse, before the file is copied: a
     request that failed only at the end would leave a blob that no row uses."""
@@ -129,16 +147,26 @@ class Importer:
         first = validate_file(request.path, self._limits)
         if not first.ok or first.extension is None:  # an accepted verdict names its extension
             return ImportResult(Outcome.REFUSED, reason=first.reason)
+        # Only a failure to open or read the source is the file's fault and a refusal. A failure
+        # of the blob store (its folder cannot be written, the disk is full) is the vault's and
+        # propagates, or every import would be refused as if the documents were bad.
         try:
-            stored = self._store.put_file(
-                request.path, first.extension, max_bytes=self._limits.max_bytes
-            )
-        except BlobTooLargeError:
-            return ImportResult(Outcome.REFUSED, reason=Reason.TOO_LARGE)
+            source = request.path.open("rb")
         except FileNotFoundError:
             return ImportResult(Outcome.REFUSED, reason=Reason.NOT_A_FILE)
-        except PermissionError:
+        except OSError:
             return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
+        with source:
+            try:
+                stored = self._store.put(
+                    cast("BinaryIO", _SourceReader(source)),
+                    first.extension,
+                    max_bytes=self._limits.max_bytes,
+                )
+            except BlobTooLargeError:
+                return ImportResult(Outcome.REFUSED, reason=Reason.TOO_LARGE)
+            except SourceReadError:
+                return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
         verdict = validate_file(stored.path, self._limits)
         if not verdict.ok or verdict.extension is None or verdict.mime is None:
             if stored.created:
