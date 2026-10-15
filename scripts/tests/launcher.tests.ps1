@@ -192,6 +192,141 @@ try {
     }
     Remove-Record
 
+    # A record that names another process belongs to a server started since (dev's server was
+    # ended by "stop", and "run" started another): ending the old one must not remove it.
+    $other = New-Sleeper
+    $old = New-Sleeper
+    try {
+        Write-Record $other $facts
+        Stop-Backend $old
+        Assert-That 'ending a server keeps a record that names another process' `
+            ($old.HasExited -and ((Get-RunningServer).Process.Id -eq $other.Id))
+        $otherStarted = Get-StartStamp $other
+        Stop-Backend $old 630822816000000000
+        Assert-That 'and so does ending one that has already exited' ((Get-RunningServer).Process.Id -eq $other.Id)
+        Stop-Backend $other $otherStarted
+        Assert-That 'the record of the process that is ended is removed' (-not (Test-Path -LiteralPath $script:RecordFile))
+    }
+    finally {
+        foreach ($p in $other, $old) { if (-not $p.HasExited) { $p.Kill() } }
+    }
+    Remove-Record
+
+    # --- the launch id: the browser goes only to the process that was started -------------------
+    $launch = New-LaunchId
+    Assert-That 'a launch id has the shape the server and Vite echo' (Test-TokenShape $launch)
+    Assert-That 'each launch id is new' ($launch -cne (New-LaunchId))
+
+    $before = [Environment]::GetEnvironmentVariable('VAULT_LAUNCH_ID', 'Process')
+    $seen = Start-WithLaunchId $launch { [Environment]::GetEnvironmentVariable('VAULT_LAUNCH_ID', 'Process') }
+    Assert-That 'a process started inside the block gets the launch id' ($seen -ceq $launch)
+    Assert-That 'and it is taken out of the environment afterwards' `
+        ([Environment]::GetEnvironmentVariable('VAULT_LAUNCH_ID', 'Process') -ceq $before)
+    $null = Get-ThrownMessage { Start-WithLaunchId $launch { throw 'boom' } }
+    Assert-That 'also when the block fails' `
+        ([Environment]::GetEnvironmentVariable('VAULT_LAUNCH_ID', 'Process') -ceq $before)
+
+    # A small HTTP server on a free port that gives every request the same answer.
+    function Start-FakeServer {
+        param([string]$Body)
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $shell = [powershell]::Create().AddScript({
+                param($listener, $body)
+                while ($true) {
+                    try { $client = $listener.AcceptTcpClient() } catch { return }
+                    try {
+                        $stream = $client.GetStream()
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        while ($true) {
+                            $line = $reader.ReadLine()
+                            if ($null -eq $line -or $line -eq '') { break }
+                        }
+                        $content = [System.Text.Encoding]::UTF8.GetBytes($body)
+                        $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($content.Length)`r`nConnection: close`r`n`r`n")
+                        $stream.Write($head, 0, $head.Length)
+                        $stream.Write($content, 0, $content.Length)
+                        $stream.Flush()
+                    }
+                    catch { }
+                    finally { $client.Close() }
+                }
+            }).AddArgument($listener).AddArgument($Body)
+        return [pscustomobject]@{
+            Listener = $listener
+            Shell    = $shell
+            Pending  = $shell.BeginInvoke()
+            Url      = "http://127.0.0.1:$(([System.Net.IPEndPoint]$listener.LocalEndpoint).Port)/api/health"
+        }
+    }
+    function Stop-FakeServer {
+        param($Fake)
+        $Fake.Listener.Stop()
+        try { $null = $Fake.Shell.EndInvoke($Fake.Pending) } catch { }
+        $Fake.Shell.Dispose()
+    }
+
+    $alive = New-Sleeper
+    try {
+        $cases = @(
+            @{ name = 'the same launch id'; body = '{"status": "ok", "launch": "' + $launch + '"}'; expect = $null },
+            @{ name = 'another launch id'; body = '{"status": "ok", "launch": "' + (New-LaunchId) + '"}'; expect = 'another program answers' },
+            @{ name = 'the id in another case'; body = '{"status": "ok", "launch": "' + $launch.ToUpperInvariant() + '"}'; expect = 'another program answers' },
+            @{ name = 'no launch id'; body = '{"status": "ok", "launch": null}'; expect = 'another program answers' },
+            @{ name = 'no launch field'; body = '{"status": "ok"}'; expect = 'another program answers' },
+            @{ name = 'text that is not JSON'; body = 'hello'; expect = 'another program answers' }
+        )
+        foreach ($case in $cases) {
+            $fake = Start-FakeServer $case.body
+            try {
+                $message = Get-ThrownMessage { Wait-Launch -Url $fake.Url -Launch $launch -Process $alive -Name 'server' -Hint 'see the log' -Minutes 0.5 }
+            }
+            finally {
+                Stop-FakeServer $fake
+            }
+            if ($null -eq $case.expect) {
+                Assert-That "an answer with $($case.name) is ready" ($null -eq $message)
+            }
+            else {
+                Assert-That "an answer with $($case.name) is refused" (($null -ne $message) -and ($message -match $case.expect))
+                Assert-That "and the refusal does not echo the launch id ($($case.name))" (($null -ne $message) -and (-not $message.Contains($launch)))
+            }
+        }
+        $closed = "http://127.0.0.1:$taken/api/health"   # the listener on it was stopped above
+        $message = Get-ThrownMessage { Wait-Launch -Url $closed -Launch $launch -Process $alive -Name 'server' -Hint 'see the log' -Minutes 0.02 }
+        Assert-That 'a server that never answers is given up on' (($null -ne $message) -and ($message -match 'did not answer'))
+    }
+    finally {
+        if (-not $alive.HasExited) { $alive.Kill() }
+    }
+    $null = $alive.WaitForExit(10000)
+    $message = Get-ThrownMessage { Wait-Launch -Url $closed -Launch $launch -Process $alive -Name 'server' -Hint 'see the log' -Minutes 1 }
+    Assert-That 'a server that has exited is reported at once' (($null -ne $message) -and ($message -match 'stopped while starting'))
+
+    # Start-Backend gives the server a launch id of its own and waits for that one.
+    $script:childLaunch = $null
+    $script:waitedFor = $null
+    $script:started = $null
+    & {
+        function Get-BackendPython { return 'unused' }
+        function Start-Process {
+            $script:childLaunch = [Environment]::GetEnvironmentVariable('VAULT_LAUNCH_ID', 'Process')
+            $script:started = New-Sleeper
+            return $script:started
+        }
+        function Wait-Launch { param($Url, $Launch, $Process, $Name, $Hint, $Minutes, $SlowNote) $script:waitedFor = $Launch; throw 'another program answers' }
+        try {
+            $null = Get-ThrownMessage { Start-Backend ([pscustomobject]@{ host = '127.0.0.1'; port = $taken; vault = 'C:\v' }) }
+            Assert-That 'the server is started with a launch id' (Test-TokenShape $script:childLaunch)
+            Assert-That 'and the launcher waits for that id' ($script:waitedFor -ceq $script:childLaunch)
+            Assert-That 'a server that is not the one answering is ended' ($null -ne $script:started -and $script:started.HasExited)
+            Assert-That 'and its record removed' (-not (Test-Path -LiteralPath $script:RecordFile))
+        }
+        finally {
+            if ($null -ne $script:started -and -not $script:started.HasExited) { $script:started.Kill() }
+        }
+    }
+
     # A record that cannot be written after the server has started: the server must not be left
     # running. The functions are replaced inside this block only.
     $script:started = $null

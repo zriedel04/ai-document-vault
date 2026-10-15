@@ -50,6 +50,8 @@ export interface components {
     schemas: {
         /** Health */
         Health: {
+            /** Launch */
+            launch?: string | null;
             /**
              * Status
              * @constant

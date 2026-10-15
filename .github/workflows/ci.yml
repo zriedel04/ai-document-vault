@@ -287,6 +287,8 @@ jobs:
           # PowerShell 7's utf8 has no byte order mark, which the TOML reader would refuse.
           Set-Content -LiteralPath $config -Encoding utf8 -Value @("[vault]", "path = '$vault'", "[server]", "port = 18766")
           Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'no-vault.toml') -Encoding utf8 -Value @("[server]", "port = 18766")
+          # dev needs the address the Vite proxy is fixed to, the default 127.0.0.1:8765.
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'dev.toml') -Encoding utf8 -Value @("[vault]", "path = '$vault'")
           Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'other-port.toml') -Encoding utf8 -Value @("[vault]", "path = '$vault'", "[server]", "port = 18767")
           Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'ipv6.toml') -Encoding utf8 -Value @("[vault]", "path = '$vault'", "[server]", 'host = "::1"')
           "AIVAULT_CONFIG=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -381,6 +383,72 @@ jobs:
           if ($text -notmatch 'dev expects server.host 127.0.0.1') { throw "unexpected message: $text" }
           if (Test-Path .run\server.json) { throw 'a server was started anyway' }
           exit 0
+      - name: dev refuses a Vite port that something else holds
+        shell: pwsh
+        run: |
+          $env:AIVAULT_CONFIG = Join-Path $env:RUNNER_TEMP 'dev.toml'
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 5173)
+          $listener.Start()
+          try {
+            foreach ($edition in 'powershell', 'pwsh') {
+              $text = & $edition -NoProfile -File .\vault.ps1 dev -NoBrowser 2>&1 | Out-String
+              if ($LASTEXITCODE -eq 0) { throw "dev started in $edition although port 5173 was taken" }
+              if ($text -notmatch 'already answers on 127.0.0.1:5173') { throw "unexpected message in ${edition}: $text" }
+              if (Test-Path .run\server.json) { throw 'a server was started anyway' }
+            }
+          }
+          finally { $listener.Stop() }
+          exit 0
+      - name: dev answers with its launch id, and leaves a newer server alone when it ends
+        shell: pwsh
+        run: |
+          $env:AIVAULT_CONFIG = Join-Path $env:RUNNER_TEMP 'dev.toml'
+          function Test-Answers([string]$Url) {
+            try { Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 | Out-Null; return $true } catch { return $false }
+          }
+          function Start-Dev([string]$Edition) {
+            $out = Join-Path $env:RUNNER_TEMP "dev-$Edition.out"
+            $process = Start-Process -FilePath $Edition -NoNewWindow -PassThru `
+              -ArgumentList '-NoProfile', '-File', '.\vault.ps1', 'dev', '-NoBrowser' `
+              -RedirectStandardOutput $out -RedirectStandardError (Join-Path $env:RUNNER_TEMP "dev-$Edition.err")
+            $null = $process.Handle
+            $deadline = (Get-Date).AddMinutes(3)
+            while (-not ((Test-Path $out) -and ((Get-Content -Raw $out) -match 'The dev server is at'))) {
+              if ($process.HasExited) { throw "dev ended in ${Edition}: $(Get-Content -Raw $out) $(Get-Content -Raw (Join-Path $env:RUNNER_TEMP "dev-$Edition.err"))" }
+              if ((Get-Date) -gt $deadline) { $process.Kill(); throw "dev did not start in $Edition" }
+              Start-Sleep -Milliseconds 500
+            }
+            return $process
+          }
+          function Stop-Vite([System.Diagnostics.Process]$Dev, [string]$Edition) {
+            # Vite ending (as on Ctrl+C) is what makes dev end the server.
+            Get-NetTCPConnection -LocalPort 5173 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+            if (-not $Dev.WaitForExit(60000)) { $Dev.Kill(); throw "dev did not end with Vite in $Edition" }
+          }
+          foreach ($edition in 'powershell', 'pwsh') {
+            Write-Host "== $edition"
+            $dev = Start-Dev $edition
+            $answer = (Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:5173/__vault/launch).Content | ConvertFrom-Json
+            if ($answer.launch -notmatch '\A[A-Za-z0-9_-]{43}\z') { throw "Vite did not answer with a launch id: $($answer.launch)" }
+            $health = (Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:5173/api/health).Content | ConvertFrom-Json
+            if (($health.launch -notmatch '\A[A-Za-z0-9_-]{43}\z') -or ($health.launch -ceq $answer.launch)) { throw 'the server did not answer with a launch id of its own' }
+            Stop-Vite $dev $edition
+            if (Test-Path .run\server.json) { throw 'dev left its record behind' }
+            if (Test-Answers http://127.0.0.1:8765/api/health) { throw 'dev left its server running' }
+
+            # stop ends dev's server while dev is open, and run starts another one.
+            $dev = Start-Dev $edition
+            & $edition -NoProfile -File .\vault.ps1 stop
+            if ($LASTEXITCODE -ne 0) { throw "stop failed in $edition" }
+            & $edition -NoProfile -File .\vault.ps1 run -NoBrowser
+            if ($LASTEXITCODE -ne 0) { throw "run failed in $edition" }
+            Stop-Vite $dev $edition
+            if (-not (Test-Path .run\server.json)) { throw 'dev removed the record of the server that run started' }
+            if (-not (Test-Answers http://127.0.0.1:8765/api/health)) { throw 'the server that run started is gone' }
+            & $edition -NoProfile -File .\vault.ps1 stop
+            if ($LASTEXITCODE -ne 0) { throw "stop failed in $edition" }
+            if (Test-Answers http://127.0.0.1:8765/api/health) { throw 'stop did not find the server that run started' }
+          }
       - name: A settings file without a vault folder is refused
         shell: pwsh
         run: |

@@ -17,7 +17,9 @@
 
     The token the app needs (ADR 0016) is read from the vault folder and handed to the page in the
     address fragment. It is never printed. It is visible to local programs for a moment as part of
-    the browser's command line, a limit that ADR 0016 accepts.
+    the browser's command line, a limit that ADR 0016 accepts. The browser is opened only once the
+    server (or, for dev, Vite) answers with the random launch id it was started with, so the token
+    never goes to another program that holds the port.
 
     Works in Windows PowerShell 5.1 and PowerShell 7.
 #>
@@ -50,6 +52,9 @@ $script:StartupMinutes = 20
 
 # \A and \z, not ^ and $: in .NET (as in Python) $ also matches before a trailing newline.
 $script:TokenShape = '\A[A-Za-z0-9_-]{32,128}\z'
+# The environment variable that carries a start's launch id to the server and to Vite; see
+# backend/src/vault/api/health.py and frontend/vite.config.ts.
+$script:LaunchVariable = 'VAULT_LAUNCH_ID'
 
 
 function Test-TokenShape {
@@ -187,6 +192,22 @@ function Write-Record {
 }
 
 function Remove-Record {
+    <# Forget the server. Given a process, only if the record still names that process (and that
+       start time, when it is known): "stop" can end the server of a "dev" that is still open, and
+       a later "run" then starts another and writes its record, which dev must not remove when it
+       closes, or that server would run where "stop" cannot find it. #>
+    param([object]$Process, [object]$Started)
+    if ($null -ne $Process) {
+        try {
+            $record = Read-TextFile $script:RecordFile | ConvertFrom-Json
+            $mine = ([int]$record.pid -eq [int]$Process.Id) -and
+                (($null -eq $Started) -or ([int64]$record.started -eq [int64]$Started))
+        }
+        catch {
+            return   # no record, or one that Get-RunningServer will clear
+        }
+        if (-not $mine) { return }
+    }
     Remove-Item -LiteralPath $script:RecordFile -Force -ErrorAction SilentlyContinue
 }
 
@@ -296,8 +317,91 @@ function Invoke-Locked {
     }
 }
 
+function New-LaunchId {
+    <# 32 random bytes as base64url (43 characters, the token's alphabet). #>
+    $bytes = New-Object byte[] 32
+    $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($bytes)
+    }
+    finally {
+        $random.Dispose()
+    }
+    return ([Convert]::ToBase64String($bytes).TrimEnd('=') -replace '\+', '-' -replace '/', '_')
+}
+
+function Start-WithLaunchId {
+    <# Run a block that starts a process with the launch id in its environment, and take the id
+       out of this process's environment again afterwards, whatever happens. #>
+    param([Parameter(Mandatory)][string]$Launch, [Parameter(Mandatory)][scriptblock]$Body)
+    $previous = [Environment]::GetEnvironmentVariable($script:LaunchVariable, 'Process')
+    [Environment]::SetEnvironmentVariable($script:LaunchVariable, $Launch, 'Process')
+    try {
+        & $Body
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable($script:LaunchVariable, $previous, 'Process')
+    }
+}
+
+function Wait-Launch {
+    <# Wait until the address answers with the launch id the process was started with. "Something
+       answers" is not enough: the port is checked before the process starts, but another program
+       (another Windows account's, too) can take it while the process is still starting, which for
+       the server can be many minutes, and the browser would then hand it the vault's token. No
+       other program can read the environment of the process started here, so the id proves
+       which one answered. #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Launch,
+        [Parameter(Mandatory)][object]$Process,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Hint,
+        [Parameter(Mandatory)][double]$Minutes,
+        [string]$SlowNote
+    )
+    $began = Get-Date
+    $deadline = $began.AddMinutes($Minutes)
+    $told = $false
+    while ($true) {
+        if ($Process.HasExited) {
+            throw "the $Name stopped while starting; $Hint"
+        }
+        $body = $null
+        try {
+            $answer = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
+            if ($answer.StatusCode -eq 200) {
+                $body = $answer.Content
+                if ($body -is [byte[]]) { $body = [System.Text.Encoding]::UTF8.GetString($body) }
+            }
+        }
+        catch {
+            # not listening yet
+        }
+        if ($null -ne $body) {
+            $id = $null
+            try {
+                $id = ([string]$body | ConvertFrom-Json).launch
+            }
+            catch {
+                # not JSON, or no launch id in it
+            }
+            if (($id -is [string]) -and ($id -ceq $Launch)) { return }
+            throw "another program answers on the $Name's address, which it took while the $Name was starting; the browser was not opened and the $Name is stopped"
+        }
+        if ((Get-Date) -gt $deadline) {
+            throw "the $Name did not answer within $Minutes minutes; $Hint"
+        }
+        if ($SlowNote -and -not $told -and ((Get-Date) - $began).TotalSeconds -gt 10) {
+            Write-Host $SlowNote
+            $told = $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Start-Backend {
-    <# Start the server hidden, remember it and wait until it answers. #>
+    <# Start the server hidden, remember it and wait until it answers with its launch id. #>
     param([Parameter(Mandatory)][object]$Facts)
     $HostName = [string]$Facts.host
     $Port = [int]$Facts.port
@@ -306,10 +410,13 @@ function Start-Backend {
     }
     $python = Get-BackendPython
     New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
-    $process = Start-Process -FilePath $python -ArgumentList @('-m', 'vault') `
-        -WorkingDirectory $script:BackendDir -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $script:RunDir 'server.out.log') `
-        -RedirectStandardError (Join-Path $script:RunDir 'server.err.log')
+    $launch = New-LaunchId
+    $process = Start-WithLaunchId $launch {
+        Start-Process -FilePath $python -ArgumentList @('-m', 'vault') `
+            -WorkingDirectory $script:BackendDir -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput (Join-Path $script:RunDir 'server.out.log') `
+            -RedirectStandardError (Join-Path $script:RunDir 'server.err.log')
+    }
     # Whatever stops start-up from completing (a record that cannot be written, a server that
     # exits or never answers, Ctrl+C) must not leave a server running that "stop" cannot find.
     $ready = $false
@@ -317,32 +424,11 @@ function Start-Backend {
         Write-Record $process $Facts
         $url = "http://${HostName}:${Port}/api/health"
         if ($HostName.Contains(':')) { $url = "http://[${HostName}]:${Port}/api/health" }
-        $began = Get-Date
-        $deadline = $began.AddMinutes($script:StartupMinutes)
-        $told = $false
-        while ($true) {
-            if ($process.HasExited) {
-                throw 'the server stopped while starting; see .run\server.err.log'
-            }
-            try {
-                $answer = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 2
-                if ($answer.StatusCode -eq 200) {
-                    $ready = $true
-                    return $process
-                }
-            }
-            catch {
-                # not listening yet
-            }
-            if ((Get-Date) -gt $deadline) {
-                throw "the server did not answer within $($script:StartupMinutes) minutes; see .run\server.err.log"
-            }
-            if (-not $told -and ((Get-Date) - $began).TotalSeconds -gt 10) {
-                Write-Host 'Still starting. The first start of a large vault checks the access list of every file in it, which can take several minutes.'
-                $told = $true
-            }
-            Start-Sleep -Milliseconds 500
-        }
+        Wait-Launch -Url $url -Launch $launch -Process $process -Name 'server' `
+            -Hint 'see .run\server.err.log' -Minutes $script:StartupMinutes `
+            -SlowNote 'Still starting. The first start of a large vault checks the access list of every file in it, which can take several minutes.'
+        $ready = $true
+        return $process
     }
     finally {
         if (-not $ready) {
@@ -361,7 +447,11 @@ function Stop-Backend {
     <# End the server and forget it. The record stays if the process could not be ended, so
        that "stop" can be tried again and the launcher never reports a server that is still
        holding the port as stopped. #>
-    param([Parameter(Mandatory)][object]$Process)
+    param([Parameter(Mandatory)][object]$Process, [object]$Started)
+    if ($null -eq $Started) {
+        # Read before the process is ended; an ended one may no longer say when it started.
+        try { $Started = Get-StartStamp $Process } catch { $Started = $null }
+    }
     if (-not $Process.HasExited) {
         try {
             Stop-Process -Id $Process.Id -Force -ErrorAction Stop
@@ -376,7 +466,7 @@ function Stop-Backend {
             throw 'the server did not exit within 10 seconds; its record is kept, so run .\vault.ps1 stop to try again'
         }
     }
-    Remove-Record
+    Remove-Record -Process $Process -Started $Started
 }
 
 function Open-App {
@@ -445,8 +535,9 @@ function Invoke-Stop {
 }
 
 function Invoke-Dev {
-    Assert-Tool 'npm' 'Install Node 22.13 or newer: winget install OpenJS.NodeJS.LTS'
-    if (-not (Test-Path -LiteralPath (Join-Path $script:FrontendDir 'node_modules') -PathType Container)) {
+    Assert-Tool 'node' 'Install Node 22.13 or newer: winget install OpenJS.NodeJS.LTS'
+    $vite = Join-Path $script:FrontendDir 'node_modules\vite\bin\vite.js'
+    if (-not (Test-Path -LiteralPath $vite -PathType Leaf)) {
         throw 'the frontend is not installed yet; run .\vault.ps1 install first'
     }
     $facts = Get-VaultFacts
@@ -455,21 +546,49 @@ function Invoke-Dev {
         # there. "localhost" is not enough: it can resolve to ::1.
         throw "dev expects server.host 127.0.0.1 and server.port 8765 (the Vite proxy is fixed to that address), but the settings say $($facts.host) and $($facts.port)"
     }
+    # Refused before anything starts; Wait-Launch catches a program that takes it later.
+    if (Test-PortInUse '127.0.0.1' $script:DevPort) {
+        throw "something already answers on 127.0.0.1:$($script:DevPort) (another dev server, or another program); stop it before starting dev"
+    }
     $server = Invoke-Locked {
         if (Get-RunningServer) {
             throw 'a server started by "run" is already running; stop it first with .\vault.ps1 stop'
         }
         Start-Backend $facts
     }
+    # Taken while the server is surely running: an ended process may no longer say when it started.
+    $serverStarted = Get-StartStamp $server
+    $dev = $null
     try {
+        $launch = New-LaunchId
+        # Node runs Vite directly, in this window: Ctrl+C reaches it, and no cmd.exe asks
+        # "Terminate batch job?". The script path is relative, as Windows PowerShell 5.1 does not
+        # quote the arguments it passes.
+        $dev = Start-WithLaunchId $launch {
+            Start-Process -FilePath (Get-Command node -CommandType Application | Select-Object -First 1).Source `
+                -ArgumentList @('node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', "$($script:DevPort)", '--strictPort') `
+                -WorkingDirectory $script:FrontendDir -NoNewWindow -PassThru
+        }
+        $null = $dev.Handle   # keeps the exit code readable once it has ended
+        Wait-Launch -Url "http://127.0.0.1:$($script:DevPort)/__vault/launch" -Launch $launch -Process $dev `
+            -Name 'dev server' -Hint 'see the messages above' -Minutes 2
         $token = Read-Token $facts.vault
         $address = Get-AppAddress -HostName '127.0.0.1' -Port $script:DevPort -Token $token
         Open-App $address
         Write-Host "The dev server is at http://127.0.0.1:$($script:DevPort)/ . Press Ctrl+C to stop it and the server. The server does not reload: stop and start dev after a backend change."
-        Invoke-Native 'npm' @('run', 'dev', '--', '--host', '127.0.0.1', '--port', "$($script:DevPort)", '--strictPort') $script:FrontendDir
+        # A short wait in a loop, so that Ctrl+C reaches this script between the waits.
+        while (-not $dev.WaitForExit(500)) { }
+        if ($dev.ExitCode -ne 0) {
+            throw "the dev server exited with code $($dev.ExitCode)"
+        }
     }
     finally {
-        Stop-Backend $server
+        if (($null -ne $dev) -and -not $dev.HasExited) {
+            Stop-Process -Id $dev.Id -Force -ErrorAction SilentlyContinue
+            $null = $dev.WaitForExit(10000)
+        }
+        # Under the lock, like every other change to the record.
+        Invoke-Locked { Stop-Backend $server $serverStarted }
     }
 }
 
