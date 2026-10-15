@@ -100,6 +100,8 @@ jobs:
         run: |
           uv sync --locked --no-dev
           uv run --no-sync python ../scripts/check_python_licenses.py --strict --ignore vault
+      - name: Third-party notices list every Python runtime package
+        run: uv run --no-sync python ../scripts/third_party_notices.py check python --ignore vault
 
   backend-windows:
     name: Backend (Windows)
@@ -164,6 +166,8 @@ jobs:
         run: python scripts/check_npm_licenses.py
       - name: Licence check (runtime only, no exceptions)
         run: python scripts/check_npm_licenses.py --strict
+      - name: Third-party notices list every npm runtime package
+        run: python scripts/third_party_notices.py check npm
       - name: Dependency audit
         working-directory: frontend
         run: npm audit
