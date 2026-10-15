@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Document tables (`blobs`, `documents`, `document_versions`, `import_sources`, migration `0002`) with ULID ids (`vault.db.ids`) and CHECK constraints on every value the application writes; the first part of Phase 1. Nothing writes them yet.
 - Security headers on every response (`vault.core.headers`): a Content-Security-Policy that allows scripts only from this origin as files and sends requests, images and fonts nowhere else, plus `nosniff`, `no-referrer`, no framing and same-origin opener and resource policies, as ADR 0016 recommends before pages show document text. Checked in Chromium against the built app with no policy violations.
 - Phase 0 spike scripts in `scripts/spikes/` (sqlite-vec, embedding model, OCR engine, PDF extraction) that record metrics only, with unit tests that use fakes and a CI job. Nothing has been measured yet; the spikes run on the Windows PC.
 - Seven "find the document" questions in the public eval set (`find_document: true`, reworded from existing lookups in `demo/generate/questions.py`), so the embedding spike can report document-level Hit@1 on the public data.
