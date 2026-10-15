@@ -24,5 +24,5 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Changed
 
-- Dependabot no longer moves `@types/node` to a new major version: the types stay on the oldest Node.js the frontend supports (22), and a test in `scripts/tests/test_node_types.py` checks that `engines.node`, CI and the types agree.
+- `@types/node` is pinned to the oldest Node.js release the frontend supports (22.13, was 22.20), and Dependabot no longer proposes its major or minor updates; a test in `scripts/tests/test_node_types.py` checks that `engines.node`, CI and the types agree.
 - Dependabot no longer proposes a TypeScript major version (TypeScript 7 does not install next to `openapi-typescript` and `typescript-eslint`, so the npm group failed to resolve) or a `uv-build` bump (the build backend is pinned to the tested minor series and is bumped by hand).
