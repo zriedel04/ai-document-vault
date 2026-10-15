@@ -22,6 +22,7 @@ No personal documents, extracted text, databases, keys, logs or local configurat
 
 ## Development
 
+- [Running it on Windows](docs/launcher.md): `.\vault.ps1 install`, `run`, `stop` and `dev`
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Changelog](CHANGELOG.md)

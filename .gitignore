@@ -14,6 +14,9 @@ derived/
 *.bkp
 *.dump
 
+# The launcher's own state (vault.ps1): a process id and the server's logs
+/.run/
+
 # The install's API token (it is created inside the vault folder, never in the repository)
 local-token
 
