@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from alembic import command
-from sqlalchemy import CheckConstraint, Engine, insert, inspect, select, text, update
+from sqlalchemy import Engine, insert, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from vault.db import ids
@@ -27,6 +27,7 @@ from vault.db.schema import (
     document_versions,
     documents,
     import_sources,
+    metadata,
 )
 from vault.ingest.validate import MIME_TYPES
 
@@ -498,18 +499,28 @@ def test_the_document_tables_can_be_undone_with_documents_in_them(
     upgrade_to_latest(db_file)
 
 
-def test_the_check_constraints_in_the_migration_match_the_schema(engine: Engine) -> None:
-    """Alembic's comparison does not look at CHECK constraints, so compare them by name and text."""
-    inspector = inspect(engine)
-    for table in (blobs, documents, document_versions, import_sources):
-        declared = {
-            f"ck_{table.name}_{constraint.name}": " ".join(str(constraint.sqltext).split())
-            for constraint in table.constraints
-            if isinstance(constraint, CheckConstraint)
-        }
-        stored = {
-            str(check["name"]): " ".join(str(check["sqltext"]).split())
-            for check in inspector.get_check_constraints(table.name)
-        }
-        assert declared
-        assert stored == declared, table.name
+def test_the_check_constraints_in_the_migration_match_the_schema(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """Alembic's comparison does not look at CHECK constraints, so compare them by name and text
+    with a database made from the schema itself. The names are compared as stored: a later
+    migration drops a constraint by the name the database holds (the migrations once stored every
+    name with its prefix twice, and a test that built the expected name the same way missed it)."""
+    reference = create_vault_engine(tmp_path / "from-schema.db")
+    try:
+        metadata.create_all(reference)
+
+        def checks(target: Engine, table: str) -> dict[str, str]:
+            return {
+                str(check["name"]): " ".join(str(check["sqltext"]).split())
+                for check in inspect(target).get_check_constraints(table)
+            }
+
+        for table in metadata.sorted_tables:
+            stored = checks(engine, table.name)
+            assert stored == checks(reference, table.name), table.name
+            assert all(name.startswith(f"ck_{table.name}_") for name in stored)
+            assert not any(name.count(f"ck_{table.name}_") > 1 for name in stored)
+        assert checks(engine, "documents")  # the comparison is not between two empty sets
+    finally:
+        reference.dispose()

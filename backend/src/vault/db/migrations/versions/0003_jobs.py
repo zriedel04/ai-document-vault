@@ -36,38 +36,38 @@ def upgrade() -> None:
         sa.Column("locked_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("finished_at", sa.DateTime(), nullable=True),
-        sa.CheckConstraint(ULID_CHECK.format(c="id"), name="ck_jobs_id_is_a_ulid"),
+        sa.CheckConstraint(ULID_CHECK.format(c="id"), name=op.f("ck_jobs_id_is_a_ulid")),
         sa.CheckConstraint(
             "stage IN ('extract', 'ocr', 'metadata', 'chunk', 'embed', 'enrich')",
-            name="ck_jobs_stage_known",
+            name=op.f("ck_jobs_stage_known"),
         ),
         sa.CheckConstraint(
-            "status IN ('queued', 'running', 'done', 'failed')", name="ck_jobs_status_known"
+            "status IN ('queued', 'running', 'done', 'failed')", name=op.f("ck_jobs_status_known")
         ),
         sa.CheckConstraint(
-            "attempts >= 0 AND attempts <= max_attempts", name="ck_jobs_attempts_in_range"
+            "attempts >= 0 AND attempts <= max_attempts", name=op.f("ck_jobs_attempts_in_range")
         ),
-        sa.CheckConstraint("max_attempts >= 1", name="ck_jobs_max_attempts_positive"),
+        sa.CheckConstraint("max_attempts >= 1", name=op.f("ck_jobs_max_attempts_positive")),
         sa.CheckConstraint(
             "length(input_hash) = 64 AND input_hash NOT GLOB '*[^0-9a-f]*'",
-            name="ck_jobs_input_is_a_hash",
+            name=op.f("ck_jobs_input_is_a_hash"),
         ),
         sa.CheckConstraint(
             "last_error IS NULL OR (length(last_error) BETWEEN 1 AND 100"
             " AND last_error NOT GLOB '*[^A-Za-z0-9_]*')",
-            name="ck_jobs_error_is_a_class_name",
+            name=op.f("ck_jobs_error_is_a_class_name"),
         ),
         sa.CheckConstraint(
             "locked_by IS NULL OR (" + ULID_CHECK.format(c="locked_by") + ")",
-            name="ck_jobs_worker_is_a_ulid",
+            name=op.f("ck_jobs_worker_is_a_ulid"),
         ),
         sa.CheckConstraint(
             "(status = 'running') = (locked_by IS NOT NULL AND locked_at IS NOT NULL)",
-            name="ck_jobs_lock_matches_status",
+            name=op.f("ck_jobs_lock_matches_status"),
         ),
         sa.CheckConstraint(
             "(status IN ('done', 'failed')) = (finished_at IS NOT NULL)",
-            name="ck_jobs_finished_when_ended",
+            name=op.f("ck_jobs_finished_when_ended"),
         ),
         sa.ForeignKeyConstraint(
             ["document_id"],
