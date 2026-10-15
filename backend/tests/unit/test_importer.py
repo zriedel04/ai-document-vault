@@ -161,12 +161,16 @@ def test_a_trashed_document_imported_again_leaves_the_trash(
 ) -> None:
     first = importer.import_file(request(write(incoming, "a.txt", TEXT)))
     with engine.begin() as connection:
-        connection.execute(update(documents).values(trashed_at=NOW))
+        connection.execute(
+            update(documents).values(state="trashed", trashed_at=NOW, state_before_trash="ready")
+        )
     again = importer.import_file(request(write(incoming, "b.txt", TEXT)))
     assert again.outcome is Outcome.DUPLICATE
     assert again.document_id == first.document_id
     (document,) = rows(engine, documents)
+    assert document.state == "ready"  # as it was before the trash
     assert document.trashed_at is None
+    assert document.state_before_trash is None
 
 
 def test_other_bytes_make_another_document(

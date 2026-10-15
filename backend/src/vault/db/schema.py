@@ -21,6 +21,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -43,9 +44,12 @@ NAMING = {
 
 metadata = MetaData(naming_convention=NAMING)
 
-# The lifecycle of a document while it is processed (ADR 0005). Being in the trash is not one of
-# them: it is ``trashed_at``, so a document restored from the trash comes back as it was.
-DOCUMENT_STATES: Final = ("processing", "searchable", "ready", "failed")
+# The lifecycle state of a document (ADR 0005). The first four are the states of a document in
+# use; ``trashed`` replaces them while it is in the trash, and the one it had is kept in
+# ``state_before_trash`` so that a restore brings it back as it was.
+LIVE_STATES: Final = ("processing", "searchable", "ready", "failed")
+TRASHED: Final = "trashed"
+DOCUMENT_STATES: Final = (*LIVE_STATES, TRASHED)
 VERSION_ORIGINS: Final = ("import", "user", "ai_copy")
 IMPORT_METHODS: Final = ("upload", "folder", "watch")
 # The processing stages of section 7 (Tier B and C), each a job of its own (ADR 0005).
@@ -90,24 +94,36 @@ blobs = Table(
 )
 
 # The logical document. ``current_version_id`` is empty only while the document and its first
-# version are being written, inside one transaction.
+# version are being written, inside one transaction. It must name a version of this document: the
+# foreign key covers the pair (version, document), so another document's version is refused.
 documents = Table(
     "documents",
     metadata,
     Column("id", String, primary_key=True),
-    Column(
-        "current_version_id",
-        String,
-        ForeignKey("document_versions.id", ondelete="RESTRICT", use_alter=True),
-        nullable=True,
-    ),
+    Column("current_version_id", String, nullable=True),
     Column("state", String, nullable=False),
+    Column("state_before_trash", String, nullable=True),
     Column("local_only", Boolean, nullable=False),
     Column("created_at", DateTime, nullable=False),
     Column("trashed_at", DateTime, nullable=True),
     CheckConstraint(ulid_check("id"), name="id_is_a_ulid"),
     CheckConstraint(_one_of("state", DOCUMENT_STATES), name="state_known"),
+    # In the trash exactly when the state says so, with the time it went there and the state to
+    # restore.
+    CheckConstraint(
+        f"(state = '{TRASHED}') = (trashed_at IS NOT NULL)"
+        f" AND (state = '{TRASHED}') = (state_before_trash IS NOT NULL)"
+        f" AND (state_before_trash IS NULL OR {_one_of('state_before_trash', LIVE_STATES)})",
+        name="trash_consistent",
+    ),
     CheckConstraint("local_only IN (0, 1)", name="local_only_flag"),
+    ForeignKeyConstraint(
+        ["current_version_id", "id"],
+        ["document_versions.id", "document_versions.document_id"],
+        name="fk_documents_current_version_document_versions",
+        ondelete="RESTRICT",
+        use_alter=True,
+    ),
     Index("ix_documents_state", "state"),
     Index("ix_documents_trashed_at", "trashed_at"),
 )
@@ -128,6 +144,8 @@ document_versions = Table(
     CheckConstraint("version_no >= 1", name="version_no_positive"),
     CheckConstraint(_one_of("origin", VERSION_ORIGINS), name="origin_known"),
     UniqueConstraint("document_id", "version_no", name="uq_document_versions_number"),
+    # The target of the documents' foreign key to their current version.
+    UniqueConstraint("id", "document_id", name="uq_document_versions_id_document"),
     Index("ix_document_versions_blob_sha256", "blob_sha256"),
 )
 

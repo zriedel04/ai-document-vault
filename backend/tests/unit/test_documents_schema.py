@@ -20,6 +20,8 @@ from vault.db.migrate import alembic_config, upgrade_to_latest
 from vault.db.schema import (
     DOCUMENT_STATES,
     IMPORT_METHODS,
+    LIVE_STATES,
+    TRASHED,
     VERSION_ORIGINS,
     blobs,
     document_versions,
@@ -233,6 +235,19 @@ def test_the_current_version_cannot_be_deleted_from_under_its_document(engine: E
         connection.execute(document_versions.delete().where(document_versions.c.id == version_id))
 
 
+def test_the_current_version_must_be_one_of_the_documents_own(engine: Engine) -> None:
+    first, _ = add_document(engine)
+    _, other_version = add_document(engine)
+    with pytest.raises(IntegrityError, match="FOREIGN KEY"), engine.begin() as connection:
+        connection.execute(
+            update(documents)
+            .where(documents.c.id == first)
+            .values(current_version_id=other_version)
+        )
+    with pytest.raises(IntegrityError, match="FOREIGN KEY"), engine.begin() as connection:
+        connection.execute(insert(documents).values(document_row(current_version_id=other_version)))
+
+
 @pytest.mark.parametrize(
     ("table", "column", "value"),
     [
@@ -358,8 +373,13 @@ def test_every_listed_value_is_accepted(engine: Engine) -> None:
     """The lists in vault.db.schema and the CHECK constraints the migration wrote agree."""
     document_id, _ = add_document(engine)
     with engine.begin() as connection:
-        for state in DOCUMENT_STATES:
+        for state in LIVE_STATES:
             connection.execute(insert(documents).values(document_row(state=state)))
+            connection.execute(
+                insert(documents).values(
+                    document_row(state=TRASHED, trashed_at=NOW, state_before_trash=state)
+                )
+            )
         for number, origin in enumerate(VERSION_ORIGINS, start=2):
             connection.execute(
                 insert(document_versions).values(
@@ -370,6 +390,52 @@ def test_every_listed_value_is_accepted(engine: Engine) -> None:
             connection.execute(
                 insert(import_sources).values(source_row(document_id, method=method))
             )
+
+
+def test_the_states_are_the_live_ones_and_trashed() -> None:
+    """ADR 0005 names the states: Processing, Searchable, Ready, Failed and Trashed."""
+    assert DOCUMENT_STATES == ("processing", "searchable", "ready", "failed", "trashed")
+    assert set(LIVE_STATES) == set(DOCUMENT_STATES) - {TRASHED}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"state": TRASHED},
+        {"state": TRASHED, "trashed_at": NOW},
+        {"state": TRASHED, "state_before_trash": "ready"},
+        {"state": TRASHED, "trashed_at": NOW, "state_before_trash": TRASHED},
+        {"state": TRASHED, "trashed_at": NOW, "state_before_trash": "Ready"},
+        {"state": "ready", "trashed_at": NOW},
+        {"state": "ready", "state_before_trash": "ready"},
+        {"state": "ready", "trashed_at": NOW, "state_before_trash": "ready"},
+    ],
+)
+def test_the_trash_columns_agree_with_the_state(engine: Engine, change: dict[str, Any]) -> None:
+    with pytest.raises(IntegrityError, match="CHECK"), engine.begin() as connection:
+        connection.execute(insert(documents).values(document_row(**change)))
+
+
+def test_a_document_goes_to_the_trash_and_comes_back_as_it_was(engine: Engine) -> None:
+    document_id, _ = add_document(engine)
+    where = documents.c.id == document_id
+    with engine.begin() as connection:
+        connection.execute(update(documents).where(where).values(state="ready"))
+        connection.execute(
+            update(documents)
+            .where(where)
+            .values(state=TRASHED, trashed_at=NOW, state_before_trash=documents.c.state)
+        )
+        assert (
+            connection.execute(select(documents.c.state_before_trash).where(where)).scalar_one()
+            == "ready"
+        )
+        connection.execute(
+            update(documents)
+            .where(where)
+            .values(state=documents.c.state_before_trash, trashed_at=None, state_before_trash=None)
+        )
+        assert connection.execute(select(documents.c.state).where(where)).scalar_one() == "ready"
 
 
 def test_a_browser_upload_may_have_no_path(engine: Engine) -> None:
@@ -413,6 +479,23 @@ def test_the_document_tables_can_be_undone(tmp_path: Path) -> None:
     finally:
         engine.dispose()
     upgrade_to_latest(db_file)  # and done again
+
+
+@pytest.mark.parametrize("target", ["0001", "base"])
+def test_the_document_tables_can_be_undone_with_documents_in_them(
+    tmp_path: Path, target: str
+) -> None:
+    """Dropping the versions deletes them, which a document pointing at one used to refuse."""
+    db_file = tmp_path / "vault.db"
+    upgrade_to_latest(db_file)
+    engine = create_vault_engine(db_file)
+    try:
+        add_document(engine)
+        add_document(engine)
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_file), target)
+    upgrade_to_latest(db_file)
 
 
 def test_the_check_constraints_in_the_migration_match_the_schema(engine: Engine) -> None:

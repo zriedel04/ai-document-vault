@@ -9,8 +9,8 @@ section 7).
 4. In one transaction: the blob row, then either a new document with its first version, its
    import source and its first job (``extract``), or, when a document already holds these bytes,
    only a new import source for that document. Importing the same file twice gives one document
-   with two sources. A document in the trash that is imported again comes out of the trash: the
-   import is the owner saying they want it.
+   with two sources. A document in the trash that is imported again comes out of the trash, with
+   the state it had before: the import is the owner saying they want it.
 
 Two imports of the same bytes at the same moment must not both create a document. The
 transaction's first statement writes (the blob row), which takes SQLite's write lock, so the
@@ -34,7 +34,14 @@ from sqlalchemy import Engine, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from vault.db import ids
-from vault.db.schema import IMPORT_METHODS, blobs, document_versions, documents, import_sources
+from vault.db.schema import (
+    IMPORT_METHODS,
+    TRASHED,
+    blobs,
+    document_versions,
+    documents,
+    import_sources,
+)
 from vault.ingest.validate import DEFAULT_LIMITS, Limits, Reason, validate_file
 from vault.jobs.queue import JobQueue, utc_now
 from vault.storage.blobs import BlobStore, BlobTooLargeError
@@ -160,8 +167,12 @@ class Importer:
             if existing is not None:
                 connection.execute(
                     update(documents)
-                    .where(documents.c.id == existing, documents.c.trashed_at.is_not(None))
-                    .values(trashed_at=None)
+                    .where(documents.c.id == existing, documents.c.state == TRASHED)
+                    .values(
+                        state=documents.c.state_before_trash,
+                        trashed_at=None,
+                        state_before_trash=None,
+                    )
                 )
                 document_id: str = existing
                 outcome = Outcome.DUPLICATE
