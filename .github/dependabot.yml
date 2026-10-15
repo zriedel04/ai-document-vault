@@ -13,6 +13,11 @@ updates:
       # support it.
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
+      # @types/node describes one Node.js major. It stays on the oldest major the frontend
+      # supports (engines.node, and what CI runs), or the type check accepts APIs that version
+      # lacks. scripts/tests/test_node_types.py checks the three agree. Move it with them.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: build
   - package-ecosystem: uv
