@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import os
 import unicodedata
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, BinaryIO, Final
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -43,7 +43,8 @@ router = APIRouter(tags=["imports"])
 MAX_NAME_CHARS: Final = 255  # what Windows and most file systems allow for one name
 # 1970 to the end of year 9999: what a browser's lastModified can mean and a datetime can hold.
 MAX_MTIME_MS: Final = 253_402_300_799_999
-WRITE_CHUNK: Final = 1024 * 1024
+WRITE_CHUNK: Final = 1024 * 1024  # the most of a body held in memory before it is written
+EPOCH: Final = datetime(1970, 1, 1)  # naive UTC, as the database stores times
 
 BODY_SCHEMA: Final = {
     "requestBody": {
@@ -97,9 +98,9 @@ def parse_mtime(header: str | None) -> datetime | None:
         return None
     if not header.isascii() or not header.isdigit() or int(header) > MAX_MTIME_MS:
         raise _bad_request("X-Vault-Last-Modified is not a time in milliseconds")
-    seconds, millis = divmod(int(header), 1000)
-    moment = datetime.fromtimestamp(seconds, tz=UTC).replace(microsecond=millis * 1000)
-    return moment.replace(tzinfo=None)
+    # Plain arithmetic from 1970: datetime.fromtimestamp goes through the C library, whose range
+    # on Windows ends in the year 3000, so a time the check above accepts could fail there.
+    return EPOCH + timedelta(milliseconds=int(header))
 
 
 def parse_length(header: str | None, max_bytes: int) -> None:
@@ -118,17 +119,39 @@ def claimed_extension(name: str) -> str | None:
     return extension if extension in EXTENSIONS else None
 
 
+def _write(out: BinaryIO, data: bytes) -> None:
+    out.write(data)
+
+
+def _finish(out: BinaryIO) -> None:
+    out.flush()
+    os.fsync(out.fileno())
+
+
 async def _receive(request: Request, target: Path, max_bytes: int) -> bool:
-    """Write the body to ``target``; False if it grew past ``max_bytes`` (nothing more is kept)."""
+    """Write the body to ``target``; False if it grew past ``max_bytes`` (nothing more is kept).
+
+    Every disk call runs in a worker thread, so a large upload or a slow disk never holds up the
+    event loop that answers the page's other requests. At most ``WRITE_CHUNK`` bytes wait in
+    memory: the next part of the body is read only after the last write finished.
+    """
     size = 0
-    with target.open("xb") as out:
+    pending = bytearray()
+    out = await run_in_threadpool(target.open, "xb")
+    try:
         async for chunk in request.stream():
             size += len(chunk)
             if size > max_bytes:
                 return False
-            out.write(chunk)
-        out.flush()
-        os.fsync(out.fileno())
+            pending += chunk
+            if len(pending) >= WRITE_CHUNK:
+                await run_in_threadpool(_write, out, bytes(pending))
+                pending.clear()
+        if pending:
+            await run_in_threadpool(_write, out, bytes(pending))
+        await run_in_threadpool(_finish, out)
+    finally:
+        await run_in_threadpool(out.close)
     return True
 
 
@@ -160,7 +183,7 @@ async def upload(
         return UploadResult(
             outcome=Outcome.REFUSED, batch_id=batch_id, reason=Reason.UNSUPPORTED_EXTENSION
         )
-    staged = store.staging_path(extension)
+    staged = await run_in_threadpool(store.staging_path, extension)
     try:
         if not await _receive(request, staged, max_bytes):
             raise HTTPException(status_code=413, detail="the file is larger than the size limit")
@@ -175,7 +198,7 @@ async def upload(
             ),
         )
     finally:
-        staged.unlink(missing_ok=True)
+        await run_in_threadpool(staged.unlink, missing_ok=True)
     return UploadResult(
         outcome=result.outcome,
         batch_id=batch_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, select
 
+from vault.api import imports
 from vault.api.imports import parse_length, parse_mtime
 from vault.core.config import Settings
 from vault.db import ids
@@ -292,3 +294,89 @@ def test_a_content_length_that_is_not_a_number_is_a_400(value: str) -> None:
     with pytest.raises(HTTPException) as refused:
         parse_length(value, 100)
     assert refused.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("millis", "stored"),
+    [
+        ("32535216000000", "3001-01-01T00:00:00"),  # past the Windows C library's range
+        (str(imports.MAX_MTIME_MS), "9999-12-31T23:59:59.999000"),
+    ],
+)
+def test_a_time_far_in_the_future_is_kept_on_every_system(
+    client: TestClient, engine: Engine, millis: str, stored: str
+) -> None:
+    """Codex #32: datetime.fromtimestamp fails on Windows after the year 3000."""
+    assert send(client, TEXT, **{"X-Vault-Last-Modified": millis}).status_code == 200
+    (source,) = rows(engine, import_sources)
+    assert source.original_mtime.isoformat() == stored
+
+
+def test_one_millisecond_past_the_last_time_is_a_400(client: TestClient) -> None:
+    late = str(imports.MAX_MTIME_MS + 1)
+    assert send(client, TEXT, **{"X-Vault-Last-Modified": late}).status_code == 400
+
+
+def off_the_loop(calls: list[str], name: str, function: Any) -> Any:
+    """Wrap a disk call so that it records whether it ran outside the event loop's thread."""
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            calls.append(name)  # no loop in this thread: a worker thread
+        else:
+            calls.append(f"{name} ON THE LOOP")
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
+def test_disk_work_runs_outside_the_event_loop_in_bounded_writes(
+    app: FastAPI, client: TestClient, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex #32: a large upload must not hold up the loop that answers other requests."""
+    calls: list[str] = []
+    monkeypatch.setattr(imports, "WRITE_CHUNK", 16)
+    monkeypatch.setattr(imports, "_write", off_the_loop(calls, "write", imports._write))
+    monkeypatch.setattr(imports, "_finish", off_the_loop(calls, "finish", imports._finish))
+    store: BlobStore = app.state.blobs
+    monkeypatch.setattr(store, "staging_path", off_the_loop(calls, "stage", store.staging_path))
+
+    def chunks() -> Iterator[bytes]:
+        for start in range(0, len(TEXT), 5):
+            yield TEXT[start : start + 5]
+
+    assert send(client, chunks()).json()["outcome"] == "imported"
+    assert not [call for call in calls if "LOOP" in call]
+    assert "write" in calls
+    assert calls[0] == "stage"
+    assert calls[-1] == "finish"
+    (blob,) = rows(engine, blobs)
+    assert blob.size == len(TEXT)  # every part arrived, in order (the hash is checked on import)
+
+
+def test_no_more_than_one_write_chunk_waits_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test client sends a body as one part, so the buffering is driven directly."""
+    monkeypatch.setattr(imports, "WRITE_CHUNK", 16)
+    written: list[int] = []
+    real_write = imports._write
+
+    def record(out: Any, data: bytes) -> None:
+        written.append(len(data))
+        real_write(out, data)
+
+    monkeypatch.setattr(imports, "_write", record)
+
+    class Parts:
+        async def stream(self) -> Any:
+            for start in range(0, len(TEXT), 5):
+                yield TEXT[start : start + 5]
+
+    target = tmp_path / "staged.txt"
+    assert asyncio.run(imports._receive(Parts(), target, 100))  # type: ignore[arg-type]
+    assert target.read_bytes() == TEXT
+    assert written == [20, 20, 8]  # four parts of 5 reach 20, then the rest
+    assert max(written) < 16 + 5  # never more than one chunk plus one part
