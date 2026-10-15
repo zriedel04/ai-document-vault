@@ -3,6 +3,7 @@ name = "demo-generate"
 version = "0.1.0"
 description = "Builds the synthetic demo corpus and public eval set. All content is fictional."
 requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
 dependencies = [
     "pillow>=11",
     "reportlab>=4",
