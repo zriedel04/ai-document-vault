@@ -1,0 +1,70 @@
+name: Spike scripts
+
+# The Phase 0 spike scripts (scripts/spikes) are only unit-tested here, with fakes. CI never
+# installs the model, OCR or PDF libraries, never downloads a model and never runs a benchmark:
+# those run on the owner's Windows PC (docs/spikes/README.md).
+
+on:
+  push:
+    branches: [main]
+    paths: ["scripts/spikes/**", ".github/workflows/spikes.yml"]
+  pull_request:
+    paths: ["scripts/spikes/**", ".github/workflows/spikes.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spikes-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUFF_VERSION: 0.16.10
+  MYPY_VERSION: 2.4.0
+  PYYAML_VERSION: 6.0.3
+  TYPES_PYYAML_VERSION: 6.0.12.20260906
+
+jobs:
+  spikes:
+    name: Spike scripts (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install the test and lint tools
+        run: >
+          python -m pip install
+          "pyyaml==${PYYAML_VERSION}" "types-pyyaml==${TYPES_PYYAML_VERSION}"
+          "ruff==${RUFF_VERSION}" "mypy==${MYPY_VERSION}"
+      - name: Ruff
+        working-directory: scripts/spikes
+        run: ruff check . && ruff format --check .
+      - name: Mypy
+        working-directory: scripts/spikes
+        run: mypy
+      - name: Unit tests
+        working-directory: scripts/spikes
+        run: python -m unittest discover -s tests -t . -v
+
+  spikes-windows:
+    name: Spike scripts (Windows)
+    # The memory and RAM probes use Windows-only calls, so the tests run there too.
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install the test tools
+        run: python -m pip install "pyyaml==$env:PYYAML_VERSION"
+      - name: Unit tests
+        working-directory: scripts/spikes
+        run: python -m unittest discover -s tests -t . -v

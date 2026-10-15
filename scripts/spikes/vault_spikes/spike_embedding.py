@@ -1,0 +1,312 @@
+"""Spike 2: embedding speed and retrieval quality of the candidate models on this PC.
+
+Decides ADR 0013. For each candidate the script measures load time, throughput in chunks per
+second, peak memory, a projection for a vault of a given size, and Recall@10, MRR and Hit@1 on
+the eval questions. The models are injected (:class:`Embedder`), so the unit tests run the
+whole spike with a fake and CI never downloads a model.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Protocol
+
+from vault_spikes.corpus import (
+    DEFAULT_MAX_CHARS,
+    DEFAULT_OVERLAP,
+    Chunk,
+    Corpus,
+    Document,
+    Question,
+    canonical_paths,
+)
+from vault_spikes.errors import OwnRuntimeError, OwnValueError
+from vault_spikes.metrics import gpu_peak_memory_mib, mean, peak_memory_mib, per_second
+from vault_spikes.report import (
+    ROUNDING,
+    Environment,
+    Kind,
+    Number,
+    Report,
+    RowShape,
+    collect_environment,
+    rounded_within,
+    whole_share,
+)
+from vault_spikes.retrieval import (
+    K,
+    can_be_scored,
+    rank_by_similarity,
+    score_all,
+    sources_missing_from,
+)
+
+TITLE = "Embedding models on this PC"
+QUESTION = (
+    "How fast does each candidate embedding model run on this PC (CPU and GPU if present), how "
+    "much memory does it need, how long would a vault of the stated size take, and how well does "
+    "it retrieve on the eval questions? Feeds ADR 0013."
+)
+METHOD = (
+    "`python -m vault_spikes embedding --candidate NAME --device DEVICE`, one candidate per "
+    "process so the peak memory is that candidate's. The model is downloaded beforehand with "
+    "`fetch-model` and loaded only from the local cache, so the load time never includes a "
+    "download. Memory is the process's peak working set (host RAM); a CUDA run also reports the "
+    "peak video memory torch allocated and reserved, since the working set does not include it. "
+    "The text of PDF pages is read with pypdfium2. The corpus is cut "
+    "into chunks of at most 800 characters that overlap by at least the longest evidence quote, "
+    "so no quote is split between two chunks (the overlap is reported); throughput is chunks "
+    "embedded per second in batches of `batch_size`, which is reported with every row because it "
+    "changes throughput and memory, so rows compare only when it is the same (the script gives "
+    "the encoder that same batch size, and leaves every other setting, such as precision and the "
+    "maximum sequence length, at the library's defaults). These are plain "
+    "windows over the page text, not the application's planned structure-aware chunks of about "
+    "400 to 600 tokens with the document title and section path in front (the chunker is not "
+    "built yet). 800 characters is roughly 200 tokens, so chunks per second and the projection "
+    "for a vault of N chunks hold for chunks of this size and do not carry over to the planned "
+    "ones, and the comparison of the candidates holds for this representation. "
+    "Each answerable evaluation question is embedded and its top 10 chunks are ranked by cosine "
+    "similarity. Retrieval is scored by passage: a chunk counts only if it comes from the right "
+    "document and holds the quote the eval file names as the evidence. Recall@10 is the share of "
+    "required passages found, MRR@10 the reciprocal rank of the first chunk holding an acceptable "
+    "passage. Hit@1 is scored by document and only for the questions the eval file marks as "
+    "find-the-document questions (`find_document: true`, evidence in one document): whether the "
+    "top chunk comes from a document that holds it. Required passages that "
+    "no chunk holds at all are counted separately. Documents the script cannot "
+    "read (scans, pictures, damaged files) are counted as `documents_skipped`, and the questions "
+    "that need them are left out and counted. The "
+    "`public_dataset` metric is true only when the corpus and the questions are the repository's "
+    "public synthetic ones (`demo/corpus/`, `eval/public/`); otherwise they are the owner's own "
+    "files, kept outside the repository, and only numbers about them are reported."
+)
+# pypdfium2 reads the PDFs of the corpus, so the text that is chunked depends on its version.
+PACKAGES = ("sentence-transformers", "torch", "transformers", "numpy", "pypdfium2")
+HAS_MODEL = True  # the environment records the revision of the model files that were loaded
+# What a report of this spike may contain (checked when a report is read back for a merge).
+METRICS: dict[str, Kind] = {
+    "dimensions": Kind.COUNT,
+    "load_seconds": Kind.AMOUNT,
+    "chunks": Kind.COUNT,
+    "chunk_overlap_chars": Kind.COUNT,
+    "mean_chunk_chars": Kind.AMOUNT,
+    "batch_size": Kind.COUNT,
+    "chunks_per_second": Kind.AMOUNT,
+    "hours_for_vault_of_chunks": Kind.AMOUNT,
+    "vault_chunks_assumed": Kind.COUNT,
+    "documents_skipped": Kind.COUNT,
+    "questions_scored": Kind.COUNT,
+    "questions_left_out": Kind.COUNT,
+    "sources_not_in_any_chunk": Kind.COUNT,
+    "public_dataset": Kind.FLAG,
+    "recall_at_10": Kind.RATIO,
+    "mrr_at_10": Kind.RATIO,
+    "hit_at_1_questions": Kind.COUNT,
+    "hit_at_1": Kind.RATIO,
+    "peak_memory_mib": Kind.AMOUNT,
+    "gpu_peak_allocated_mib": Kind.AMOUNT,
+    "gpu_peak_reserved_mib": Kind.AMOUNT,
+}
+_EMBEDDING_REQUIRED = frozenset(
+    {
+        "dimensions",
+        "load_seconds",
+        "chunks",
+        "chunk_overlap_chars",
+        "mean_chunk_chars",
+        "batch_size",
+        "chunks_per_second",
+        "hours_for_vault_of_chunks",
+        "vault_chunks_assumed",
+        "documents_skipped",
+        "questions_scored",
+        "questions_left_out",
+        "sources_not_in_any_chunk",
+        "public_dataset",
+    }
+)
+# Scores exist only when some question could be scored; the peak is left out where the system
+# does not report one. Only a run on the GPU has video memory figures.
+_EMBEDDING_OPTIONAL = frozenset(
+    {"recall_at_10", "mrr_at_10", "hit_at_1_questions", "hit_at_1", "peak_memory_mib"}
+)
+_EMBEDDING_SCORES = frozenset({"recall_at_10", "mrr_at_10", "hit_at_1_questions"})
+_EMBEDDING_GPU = frozenset({"gpu_peak_allocated_mib", "gpu_peak_reserved_mib"})
+
+
+def _projection_fits(row: Mapping[str, Number]) -> bool:
+    """``hours_for_vault_of_chunks`` is ``vault_chunks_assumed / chunks_per_second / 3600``,
+    worked out before either figure was rounded, so it must lie in the range that the stored
+    throughput allows; the throughput of a run that embedded something is above 0."""
+    speed = row["chunks_per_second"]
+    if speed <= 0:
+        return False
+    vault = row["vault_chunks_assumed"]
+    low = vault / (speed + ROUNDING) / 3600
+    high = vault / (speed - ROUNDING) / 3600 if speed > ROUNDING else math.inf
+    return rounded_within(row["hours_for_vault_of_chunks"], low, high)
+
+
+def _scores_fit_the_counts(row: Mapping[str, Number]) -> bool:
+    """Scores exist exactly when questions were scored, and Hit@1 exactly when some of them are
+    find-the-document questions, which cannot be more than the questions scored; Hit@1 is a whole
+    number of hits out of those. A run that got this far embedded at least one chunk, in vectors
+    of at least one dimension, in batches of at least one, and projected a vault of at least one
+    chunk at the throughput it measured. Its chunks hold 1 to ``DEFAULT_MAX_CHARS`` characters and
+    overlap by what ``corpus.overlap_for`` can give (``DEFAULT_OVERLAP`` to half a chunk). Only
+    the passages of scored questions are looked for in the chunks, and torch never allocates more
+    video memory than its allocator has reserved."""
+    scored = row["questions_scored"] > 0
+    marked = row.get("hit_at_1_questions", 0)
+    return (
+        row["chunks"] >= 1
+        and row["dimensions"] >= 1
+        and row["batch_size"] >= 1
+        and row["vault_chunks_assumed"] >= 1
+        and _projection_fits(row)
+        and 1 <= row["mean_chunk_chars"] <= DEFAULT_MAX_CHARS
+        and DEFAULT_OVERLAP <= row["chunk_overlap_chars"] <= DEFAULT_MAX_CHARS // 2
+        and ("recall_at_10" in row) == scored
+        and (scored or row["sources_not_in_any_chunk"] == 0)
+        and ("hit_at_1" in row) == (marked > 0)
+        and marked <= row["questions_scored"]
+        and ("hit_at_1" not in row or whole_share(row["hit_at_1"], int(marked)))
+        and (
+            "gpu_peak_allocated_mib" not in row
+            or row["gpu_peak_allocated_mib"] <= row["gpu_peak_reserved_mib"]
+        )
+    )
+
+
+ROWS = (
+    RowShape(
+        re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cpu"),
+        _EMBEDDING_REQUIRED,
+        _EMBEDDING_OPTIONAL,
+        (_EMBEDDING_SCORES,),
+        _scores_fit_the_counts,
+        frozenset(PACKAGES),
+    ),
+    RowShape(
+        re.compile(r"(?:qwen3-embedding-0\.6b|embeddinggemma-300m)-cuda"),
+        _EMBEDDING_REQUIRED,
+        _EMBEDDING_OPTIONAL | _EMBEDDING_GPU,
+        (_EMBEDDING_SCORES, _EMBEDDING_GPU),
+        _scores_fit_the_counts,
+        frozenset(PACKAGES),
+    ),
+)
+"""The metrics of each kind of row. A report read from a file must give every ``required`` one and
+nothing outside ``required`` and ``optional``, so a row cannot lose its context or borrow another
+candidate's figures."""
+CANDIDATES = re.compile("|".join(f"(?:{shape.candidate.pattern})" for shape in ROWS))
+
+
+class Embedder(Protocol):
+    """A model that turns text into vectors. ``name`` is a label fixed in code."""
+
+    name: str
+
+    def load(self) -> None: ...
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+    def embed_queries(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+
+@dataclass(frozen=True)
+class EmbeddingInputs:
+    corpus: Corpus
+    documents: list[Document]
+    questions: list[Question]
+    chunk_overlap_chars: int = DEFAULT_OVERLAP
+
+
+def run_embedding_spike(
+    embedder: Embedder,
+    inputs: EmbeddingInputs,
+    *,
+    batch_size: int = 16,
+    vault_chunks: int = 100_000,
+    public_dataset: bool = True,
+    environment: Environment | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+    gpu_memory: Callable[[], tuple[float, float] | None] = gpu_peak_memory_mib,
+) -> Report:
+    """Measure one candidate and return a report with one row."""
+    corpus = inputs.corpus
+    if not corpus.chunks:
+        msg = "the corpus has no readable chunks"
+        raise OwnValueError(msg)
+    report = Report(
+        "embedding",
+        TITLE,
+        QUESTION,
+        METHOD,
+        environment or collect_environment(PACKAGES),
+    )
+
+    begin = clock()
+    embedder.load()
+    load_seconds = clock() - begin
+
+    texts = [chunk.text for chunk in corpus.chunks]
+    embedder.embed_documents(texts[:batch_size])  # warm-up, not timed: the first call allocates
+    begin = clock()
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        vectors.extend(embedder.embed_documents(texts[start : start + batch_size]))
+    embed_seconds = clock() - begin
+    if len(vectors) != len(texts):
+        msg = "the model returned the wrong number of vectors"
+        raise OwnRuntimeError(msg)
+    chunks_per_second = per_second(len(texts), embed_seconds)
+
+    readable = corpus.readable
+    scored = [q for q in inputs.questions if can_be_scored(q, readable)]
+    canonical = canonical_paths(inputs.documents)
+    ranked: dict[str, list[Chunk]] = {}
+    if scored:
+        query_vectors = embedder.embed_queries([q.text for q in scored])
+        for question, vector in zip(scored, query_vectors, strict=True):
+            ranked[question.id] = rank_by_similarity(vector, vectors, corpus.chunks, K)
+    scores = score_all(scored, ranked, canonical) if scored else None
+
+    metrics: dict[str, int | float] = {
+        "dimensions": len(vectors[0]),
+        "load_seconds": load_seconds,
+        "chunks": len(texts),
+        "chunk_overlap_chars": inputs.chunk_overlap_chars,
+        "mean_chunk_chars": mean([len(t) for t in texts]),
+        "batch_size": batch_size,
+        "chunks_per_second": chunks_per_second,
+        "hours_for_vault_of_chunks": vault_chunks / chunks_per_second / 3600,
+        "vault_chunks_assumed": vault_chunks,
+        "documents_skipped": corpus.skipped,
+        "questions_scored": scores.questions if scores else 0,
+        "questions_left_out": len([q for q in inputs.questions if q.answerable])
+        - (scores.questions if scores else 0),
+        "sources_not_in_any_chunk": sources_missing_from(
+            scored, corpus.chunks, canonical, readable
+        ),
+        "public_dataset": public_dataset,
+    }
+    if scores:
+        metrics |= {
+            "recall_at_10": scores.recall_at_10,
+            "mrr_at_10": scores.mrr_at_10,
+            "hit_at_1_questions": scores.hit_at_1_questions,
+        }
+        if scores.hit_at_1 is not None:
+            metrics["hit_at_1"] = scores.hit_at_1
+    if (peak := peak_memory_mib()) is not None:
+        metrics["peak_memory_mib"] = peak
+    # The host number above is the process's RAM. A candidate run on the GPU also needs video
+    # memory, which is what limits it on a 12 GB card, so it is reported separately.
+    if embedder.name.endswith("-cuda") and (gpu := gpu_memory()) is not None:
+        metrics["gpu_peak_allocated_mib"], metrics["gpu_peak_reserved_mib"] = gpu
+    report.add(embedder.name, **metrics)
+    return report

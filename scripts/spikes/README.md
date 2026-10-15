@@ -1,0 +1,143 @@
+# Phase 0 spike scripts
+
+Measurement scripts for the hardware-dependent decisions in [ADR 0004](../../docs/decisions/0004-sqlite-instead-of-postgresql.md) (sqlite-vec), [0013](../../docs/decisions/0013-embedding-model.md) (embedding model), [0014](../../docs/decisions/0014-ocr-engine.md) (OCR engine) and [0015](../../docs/decisions/0015-pdf-extraction-quality.md) (PDF extraction). **They are run on the owner's Windows PC, never on another machine as a substitute.** CI runs only the unit tests, which use fakes and measure nothing.
+
+Nothing has been measured yet. The numbers come from runs on the owner's PC.
+
+## Set up (Windows PowerShell)
+
+Install [uv](https://docs.astral.sh/uv/) if `uv --version` is not found (`winget install --id astral-sh.uv`), then open a new terminal. The scripts need Python 3.12; uv downloads it by itself, so a newer Python on the PC (3.13 or 3.14) is not used and does not need to be removed.
+
+```powershell
+cd scripts\spikes
+uv sync --python 3.12 --all-extras   # the libraries of every spike
+uv run python -m vault_spikes check  # what is installed, and whether sqlite-vec loads
+```
+
+- Install every extra in one command. `uv sync` makes the environment hold exactly what that command lists, so `uv sync --extra ocr` run after `uv sync --extra vec` removes sqlite-vec again. `uv run` does not remove anything.
+- There is no lock file in the repository: the versions that were actually installed are recorded in each report's Environment section. The heavy libraries are extras so that CI never installs them.
+- A command whose library is missing stops before it measures anything and names the library, so a missing install is never written up as a result (every PDF "failing", or sqlite-vec "not loading").
+
+**GPU for the embedding spike.** The `torch` that PyPI serves for Windows is CPU-only, so `--device cuda` stops with a message until the CUDA build is in the spikes' environment. Run the `--device cpu` measurements first, because they need none of this. Then take the install command from pytorch.org (Get Started, Windows, Pip, CUDA). It starts with `pip3 install`, which would install into the PC's own Python, not into this environment, so run it through uv from `scripts\spikes` and let it replace the CPU build, for example `uv pip install --reinstall-package torch torch --index-url https://download.pytorch.org/whl/cu128` (with the CUDA tag pytorch.org shows). From then on run every command with `uv run --no-sync`, so uv does not put the CPU build back.
+
+## Commands
+
+| Spike | Command | Feeds |
+| --- | --- | --- |
+| sqlite-vec | `uv run python -m vault_spikes vec` | ADR 0004 |
+| Embedding model | first `uv run python -m vault_spikes fetch-model --candidate qwen3-embedding-0.6b` (downloads the model once, not timed), then `uv run python -m vault_spikes embedding --candidate qwen3-embedding-0.6b --device cpu` (then `--device cuda`, and the same steps for `embeddinggemma-300m`) | ADR 0013 |
+| OCR | first `uv run python -m vault_spikes fetch-model --candidate rapidocr-ppocrv5` (downloads RapidOCR's model files once, not timed), then `uv run python -m vault_spikes ocr --engine rapidocr --images <folder>` (then `--engine tesseract`) | ADR 0014 |
+| PDF | `uv run python -m vault_spikes pdf --extractor pypdfium2 --pdfs <folder>` (then `pypdfium2+pdfplumber`) | ADR 0015 |
+| Combine | `uv run python -m vault_spikes merge spike-results\embedding-*.json` | one table per spike |
+
+Each command measures one candidate in its own process, so memory numbers do not mix, and `merge` joins the reports of one spike. Reports are written to `spike-results/` (git-ignored) unless `--out` names another folder.
+
+- **Before a run starts**, the command checks what would otherwise fail after the measurement: the report names must be free (a run never replaces a report that already exists, so move the old file or pass another `--out`), and the `--out` folder is made if it is missing and tried with a temporary file. Either failure stops the run in a second with fixed text that does not print a path, and so does a missing library, before anything is measured. An empty folder stays if the run then stops for another reason.
+- **The sqlite-vec spike** measures its sizes in one process, and `peak_memory_mib` is the process's high-water mark, which only grows, so `--sizes` must be listed from the smallest to the largest, each once. Anything else is refused before the run, so a 100,000-vector store cannot put its peak in the row of the 10,000-vector one. Each size is also from 1 to 999,999,999, the sizes a row name (`vectors-N`) can state.
+- **Size options** (`--batch-size`, `--vault-chunks`, `--sizes`, `--dim`, `--queries`) must be whole numbers from 1.
+
+## Public and private data
+
+ADRs 0013, 0014 and 0015 each need every candidate measured on the repository's public synthetic files and on the owner's own, so the embedding, OCR and PDF reports carry the data set in their name (`embedding-<candidate>-public` or `-private`, `ocr-<engine>-public` or `-private`, `pdf-<extractor>-public` or `-private`) and in a required `public_dataset` metric. One name would let the second run replace the first, and a merged row would not say which it measured.
+
+- The embedding spike reads `demo/corpus/` and `eval/public/questions.yaml` unless `--corpus` and `--questions` point elsewhere. `public_dataset` is true only when both are exactly those files; a copy with the same names counts as private.
+- For OCR and PDF, `public_dataset` is true only when every folder the run read (the images or PDFs, and the reference texts, which default to the same folder) is inside `demo/corpus/`. A copy elsewhere, or references kept elsewhere, count as the owner's own data, which is the safe way to be wrong.
+- The public corpus has no reference texts yet. Without them the OCR spike stops ("no image has a reference text file") and the PDF spike reports speed and failures but no error rates, so public reference texts for the synthetic images and PDFs have to be added inside `demo/corpus/` first.
+- Private files stay outside the repository, and only numbers about them are reported.
+
+## What each spike measures
+
+The method of each spike is also written into its report, so a report explains itself.
+
+### sqlite-vec
+
+- Whether this Python's sqlite3 can load extensions and whether sqlite-vec loads, then insert rate, database size and exact-search latency at each size, on random vectors (no document is involved).
+- `queries_timed` is the number of searches the p50 and p95 latencies rest on, and `vectors` in a `vectors-N` row is the N vectors that row inserted.
+- The exact-search check asks five random queries over a separate set of `vectors` (500) and compares each answer of the extension with a plain-Python search place by place; `same_answer_as_python` is the share of the five that match. The comparison is place by place, so the right ten neighbours in the wrong order (farthest first, for example) fail it. A neighbour is accepted in place of the exact one only when its distance is equal within float32 rounding (a tie); a repeated id, a missing id or an id outside the data fails.
+
+### Embedding model
+
+- Load time, throughput (chunks per second), peak memory, a projection for a vault of `--vault-chunks` chunks, and retrieval quality on the eval questions: Recall@10, MRR@10 and Hit@1.
+- **Memory.** `peak_memory_mib` is the process's peak working set (host RAM). A CUDA run also reports `gpu_peak_allocated_mib` and `gpu_peak_reserved_mib`, the most video memory torch allocated and reserved, because the working set does not include video memory and a model that nearly fills the card would otherwise look small.
+- **Chunks.** Plain windows of at most 800 characters (about 200 tokens) over the page text, not the structure-aware chunks of 400 to 600 tokens with the title and section path that `docs/architecture.md` plans for the application (that chunker is not built yet). The comparison of the candidates holds for this representation, and chunks per second and the projection hold for chunks of this size; they are not the application's figures. The chunks overlap by at least the longest quote in the eval file (a quarter more, within 100 to 400 characters), so a boundary cannot cut a quote in two; the overlap is a metric of the report (`chunk_overlap_chars`) and the same for every candidate.
+- **Batch size.** The report records `batch_size`, and the encoder is given the same size (sentence-transformers batches by 32 unless told otherwise), because the batch changes throughput and memory and rows measured with different batches do not compare. Precision and the maximum sequence length stay at the library's defaults.
+- **Model revision.** The report's environment names the Git commit of the cached model files (40 hexadecimal digits, or `unknown`), read after the run from the Hugging Face cache the load used. A model repository's default branch moves and `fetch-model` follows it each time it runs, so the name alone does not say which weights, configuration and prompts a row was measured with. `fetch-model` prints the revision it left in the cache. The script does not pin one; to keep one, do not run `fetch-model` again between the public and the private run, and compare the two reports' revisions.
+- **Reading the corpus.** Text files and DOCX are read directly, PDF pages with pypdfium2 (part of the embedding extra; its version is recorded, since the chunked text depends on it). Scans and pictures need OCR and are not read. A document the script cannot read (an encrypted or corrupt PDF, a damaged DOCX, a file that fails with an operating-system error, such as one another Windows program holds with deny-read sharing) is skipped and counted in `documents_skipped`, not a reason to stop the run.
+- **Exact duplicates.** Only the first of a set of exact duplicates (`exact_duplicate_of` in the manifest) is chunked, as the import pipeline stops at an exact-duplicate match; identical copies would take several of the ten ranked places and push a required passage out. A question may still cite the copy, which counts as the original. A copy whose original cannot be read, or whose bytes cannot be read for the comparison, is counted with the skipped documents.
+- **Scoring by passage.** For Recall@10 and MRR a chunk counts only if it comes from the right document and holds the whole `quote` the eval file gives as evidence; half a quote is not the passage. Recall@10 is the share of required passages found, MRR the reciprocal rank of the first chunk that holds an acceptable passage. One rule says which passages count in every score (`accepted_passages`): the required ones, and for a question with one required passage its `alternatives`.
+- **Hit@1** is scored by document, as the architecture plan defines it, and only for the questions the eval file marks `find_document: true`; the mark is never guessed from the category. It asks whether the top chunk comes from a document that holds the evidence, and `hit_at_1_questions` says how many questions it covers. If no question is marked, `hit_at_1` is left out instead of reading as 0.
+- **Questions left out.** A question is scored when every passage it needs is in a document the script could read, or, for a question with one passage, when one of its alternatives is. The other answerable questions are counted in `questions_left_out`.
+- **Passages no chunk holds.** `sources_not_in_any_chunk` counts the required passages that a readable document should hold and no chunk does (a mistyped quote, text the reader cannot extract, a quote longer than the overlap that a boundary cut), so they do not lower Recall and MRR unnoticed. A passage in a document that could not be read is not counted. For a question with one required passage, the count asks whether any acceptable passage is held, the required one or an alternative.
+
+### OCR
+
+- Character error rate against a reference text and time per image, for each image in the folder that has a reference text file of the same name (`scan1.png` and `scan1.txt`, in `--references` or next to the image). Images without one are ignored. The recognised and reference texts are compared in memory and discarded.
+- Images per minute counts the time lost in failed calls as well (a timeout can take minutes), and `cer_mean_failures_as_errors` counts each failed image as a wrong one.
+- RapidOCR is configured explicitly with the PP-OCRv5 mobile detection and recognition models, because the package's own default is PP-OCRv4 before release 3.9 and PP-OCRv6 from 3.9 (checked in the packages' `config.yaml`); the extra requires `rapidocr>=3.4`, the oldest release checked with those settings. It downloads its model files the first time it is loaded, which is why `fetch-model` comes first: otherwise that run's `load_seconds` includes the download.
+- `peak_memory_mib` is reported only for RapidOCR, which runs inside the process. Tesseract runs as a separate program for each image, so this process's working set would be the wrapper's; read Tesseract's memory in Task Manager while it runs.
+- The Tesseract version is stored as the bare number (`5.5.0`); a first line with no number is stored as `unknown`.
+
+### PDF extraction
+
+- Pages per second, pages without text (scans), failures by kind (encrypted, corrupt, other) and heading candidates by font size, for every PDF in the folder.
+- A PDF may have a reference text, `name.txt`; the report then gives the word error rate. A reference with no words (an empty file, or only spaces and line breaks) has no error rate: it is counted in `references_unusable`, whatever its PDF's outcome, and its PDF is still measured, so a blank or mistyped file cannot take a sample out of the word error rates unseen.
+- A PDF may also have `name.headings.txt`, one expected heading per line. With `--extractor pypdfium2+pdfplumber` the report then gives heading precision, recall and F1; without such a file no heading accuracy is claimed, because a count of candidates alone cannot tell good detection from bad. An empty file says the PDF has no headings, so every heading found in it counts as a false one. Headings are counted once per occurrence: a running header found on 20 pages is 20 false positives, and a heading expected twice and found once is half found.
+- Every reference file is read before the first PDF is measured, so one that cannot be read stops the run before the measurement instead of halfway through it.
+
+### Files the owner writes
+
+The manifest, the eval file, the reference texts and the heading lists may be saved as UTF-8 with or without a byte order mark, or as UTF-16 or UTF-32 with one: Windows PowerShell 5.1 writes UTF-16 with `>` and `Out-File`, UTF-32 with `-Encoding UTF32` and puts a mark in front of UTF-8 with `Set-Content -Encoding UTF8`, and Notepad can save "UTF-8 with BOM". A mark read as a character would stick to the first word or heading and lower a score without a warning. A file that is not text in those encodings stops the run with a message that names the kind of file, not the file; so does UTF-16 or UTF-32 without a mark, which would otherwise read as text with a NUL between the letters.
+
+The loaders check what the scores depend on:
+
+- **Eval file.** Question ids must be unique and non-empty (scores are kept per id), and a blank question or category is refused (a blank question would be an empty query). `alternatives` are allowed only on a question with exactly one source, because an alternative is a whole answer in one passage and cannot stand for one of several. The loader refuses `find_document: true` on a question that is unanswerable or needs several documents.
+- **Manifest.** `needs_ocr`, `pages` and `exact_duplicate_of` are read as exactly their kind (a boolean, a whole number from 0, text; absent or null means the default), and any other value is refused naming only the field: `"needs_ocr": "false"` would otherwise have been read as true and skipped a readable document. A document listed twice is refused, counting spellings Windows treats as one file (case, the kind of slash, a leading `./`). An `exact_duplicate_of` that names an unlisted document, the document itself or a loop is refused, and the corpus builder compares the bytes of a copy with its original (size first, then SHA-256) before it drops the copy, so a mislabelled file stops the run instead of being scored against another document.
+- **Cited paths.** Before an embedding run starts, every path that a question or an alternative cites must be a document the manifest lists, spelled exactly as the manifest spells it, because scoring compares paths as written (a spelling Windows would accept, such as another case or a backslash, would never match a chunk). The error gives the question's position in the eval file; its id and the path are the owner's free text and are never printed.
+
+## Combining reports
+
+`merge` joins the reports of one spike into one JSON file and one Markdown table (for example `embedding.json`).
+
+- It expands wildcards itself, because Windows PowerShell and cmd pass `*` to a program as it is and Python does not expand it. A name that exists is used as it is, and a pattern is replaced by the files it matches, in sorted order and each once. A pattern that matches no file is an error that does not print the pattern.
+- Its own output is derived, so a later merge may replace it, but it refuses to write over one of the reports it was given.
+- It keeps each candidate's own environment. The documented order runs the CPU candidates, then swaps the CPU-only torch for a CUDA build, so a merged report lists both environments by candidate instead of showing the first one for every row. In the Markdown each row also says its data set (`qwen3-embedding-0.6b-cpu (public data)`), so the public and the private row of one candidate are told apart.
+
+It accepts only reports this script could have written, so a hand-edited file cannot carry text into a merged report or claim figures the script would never have produced. Every error names the kind of fault and never repeats text from the file: a metric is named only once its name has been found in the spike's list, and a value is never printed.
+
+- **Text and names.** The title, question and method must equal the spike's own text. Every candidate, metric and package name must be one that spike can produce (each spike module lists them as `CANDIDATES`, `METRICS` and its packages), so a lower-case word of the right shape, such as a diagnosis, is refused.
+- **Versions.** Every package version and the Python version must be a version number (numbers with an optional `a`, `b` or `rc`, `.post`, `.dev`, or a fixed local label such as `+cu128`) or `not installed` or `unknown`. A version found on the machine in any other shape is stored as `unknown`.
+- **Machine description.** The system, CPU and GPU must be made only of words from a fixed list of operating system, processor and graphics card words (`MACHINE_WORDS` in `report.py`, such as `Windows`, `Ryzen`, `GeForce`, `RTX`) and model numbers (`7800X3D`, `3080`, `i7-12700K`), at most 100 characters, so `Patient diagnosis confidential` is refused, and so is any name the list does not know. The code that reads the machine never copies a string it cannot vouch for: the system is the OS name and the leading numbers of its release (`Windows 11`, `Linux 6.18.44`), and a CPU or GPU name with an unlisted word is stored as `unknown`, after the run as well (a card such as `NVIDIA RTX 4000 Ada Generation` cannot discard a finished measurement). Add the word to the list in a reviewed change if a real card or processor shows up as `unknown`. Digits are still digits: a model-number-shaped token such as `123456` passes, which is why the Environment lines are read before a report is committed.
+- **Packages.** A report's environment must list every package its spike always records (for example sentence-transformers, torch, transformers, numpy and pypdfium2 for an embedding report) and may add only the allowed extras. Each row also needs an installed version, in the environment that applies to it, of every package its candidate runs on (the four model libraries and pypdfium2 for an embedding row, RapidOCR and onnxruntime for a RapidOCR row, the Tesseract program for a Tesseract row, pypdfium2 for a PDF row and pdfplumber as well for the heading extractor, sqlite-vec for every sqlite-vec row), because the run could not have produced the row without them. `not installed` is allowed only for a package the candidate does not use (RapidOCR on a Tesseract report); `unknown` is accepted.
+- **Values.** Every metric value must be of its metric's kind: a count is a whole number from 0, a ratio such as `recall_at_10` is from 0 to 1, an amount such as `load_seconds` is 0 or more, a flag is true or false, and a boolean is never a number. So `"recall_at_10": -5` and `"load_seconds": true` are refused.
+- **Row shape.** Each row must carry the metrics every row of its candidate has (`public_dataset`, `documents_skipped` and the counts of what was measured) and only the others it can emit (video memory only for a `-cuda` embedding run, a peak memory figure for RapidOCR but not Tesseract, heading scores only for `pypdfium2+pdfplumber`, the size figures only on a `vectors-N` row). Figures a run gives together come as a whole group or not at all: the recall, MRR and question count of one scored set, the two video-memory figures, the read-accuracy and timing figures of OCR, the word error rates of PDF extraction, and the heading reference count with its false positives.
+- **Consistency.** A row's numbers must agree with each other as the script writes them. A figure the script computes from others in the same row must fit its formula within the rounding the report applies (four decimals, so each stored figure may be 0.00005 from the computed one), and a share of a count must be a whole number of parts:
+  - embedding: scores exist exactly when `questions_scored` is above 0, `hit_at_1` exactly when `hit_at_1_questions` is above 0, which is at most the questions scored, and `hit_at_1` is a whole number of hits out of them; passages that no chunk holds are counted only for scored questions; at least one chunk was embedded, in at least one dimension and one batch, for a vault of at least one chunk; `hours_for_vault_of_chunks` is `vault_chunks_assumed / chunks_per_second / 3600`, with a throughput above 0; chunks hold 1 to 800 characters on average and overlap by 100 to 400; and the video memory allocated is at most the memory reserved;
+  - OCR: accuracy figures exist exactly when some image was read, and there are no more empty results than images read; `cer_mean_failures_as_errors` is the mean of the images read with each failed call counted as 1 (so 1 when every call failed); a median is at most its 90th or 95th percentile; and images per minute needs some OCR work behind it and is above 0 exactly when an image was read;
+  - PDF: the outcomes add up to the files tried, references used and heading references cannot exceed the files read, a file's reference is used or unusable but not both (so the two counts add up to at most the files tried), pages come only from files read and a page rate is above 0, heading candidates come from some file exactly when there are any (and never from `pypdfium2` alone), word error rates exist exactly when references were used, heading scores and false-positive counts need a positive count of heading reference files, F1 exists exactly when recall or precision does and is their harmonic mean (0 when only one exists), no precision means no false positives, and a precision is the right detections out of a whole number of them, `heading_false_positives` of which were wrong (none wrong means a precision of 1);
+  - sqlite-vec: a row cannot say that the extension loaded into a Python that cannot load extensions; `same_answer_as_python` is a whole number of the five probe queries; and a measured size has an insert rate and a database size above 0 and a median latency at most its 95th percentile. A `vectors-N` row's name states its size, so the row's `vectors` must be N (written as the script writes it: no leading zero, never 0), and its database must hold at least the bytes of its vectors (`vectors * dim * 4`, since `vec0` stores each value as a float32). So a row whose name alone was edited is refused, and so is one whose name and `vectors` were moved to a size whose vectors its database could not hold. A move to a smaller size with `vectors` edited to match still passes: a database can be far larger than its vectors (`vec0` reserves room for 1,024 vectors at a time, so one vector of 1,024 values made a 4 MiB file with sqlite-vec 0.1.9), so an upper bound would refuse real measurements, and no check of a row can tell figures edited to agree from a real run. That is why the owner reads a report before it is committed.
+
+## What the scripts print and store
+
+Metrics only: counts, rates, timings and scores. A report cannot hold document text: `Report.add` accepts only numbers and booleans, and names are checked against strict patterns.
+
+- **Console output** is built from the report, so extracted and OCR text, file names and paths are never printed. The last line names only the two files written (for example `embedding-<candidate>-public.json` and `.md`), never the `--out` folder, which is whatever the caller typed.
+- **Libraries' messages.** No log record and no warning of a library is shown while a command runs. pdfminer, which pdfplumber runs, logs the tokens of a malformed page, the words on it among them; RapidOCR logs the paths of its model files; huggingface_hub warns with the path of its cache. Output that native code writes itself (onnxruntime, torch) and the download progress bars do not go through Python's logging and still appear; they name models and devices, not documents.
+- **Errors.** The command line prints a failure in full only when it is one of this package's own errors (`OwnValueError`, `OwnTypeError`, `OwnRuntimeError`, `SpikeInputError`, `MissingDependencyError`), whose messages name no file and quote no document; a test fails if any module raises a plain `ValueError`, `TypeError` or `RuntimeError`. Any other exception, such as a missing or unreadable input folder or a library's own error, is reported as one line with its class name only and exit code 1, because Python's message and traceback would carry the path of a private folder or file or a piece of a document. To investigate one, rerun on the public data set or in the unit tests.
+- **Command-line mistakes.** `argparse` quotes the token it rejects (a stray folder name, a path given where a number belongs), so the parser prints its usage line and says only that the command line is not valid.
+
+## From a report to a spike file
+
+Each report is written as JSON and as a Markdown draft with the five sections `scripts/check_adrs.py` requires. The Conclusion is a placeholder on purpose. The owner reviews the numbers, copies the draft to `docs/spikes/NN-topic.md`, writes the conclusion and only then links it from the ADR. See [docs/spikes/README.md](../../docs/spikes/README.md).
+
+## What these scripts cannot show
+
+The unit tests prove that the measurements are computed and recorded correctly with fakes. They do not prove that the sentence-transformers, RapidOCR and Tesseract adapters run on the PC: their first real run is the first test. If an adapter fails there, that is a bug in the script, not a result about the technology.
+
+## Checks
+
+```
+cd scripts/spikes
+uv run --with pyyaml python -m unittest discover -s tests -v
+uvx ruff check . ; uvx ruff format --check .
+uvx --with pyyaml --with types-pyyaml mypy
+```

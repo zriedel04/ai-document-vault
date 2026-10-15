@@ -1,0 +1,425 @@
+"""Command line: ``python -m vault_spikes <check|vec|fetch-model|embedding|ocr|pdf|merge>``.
+
+Run from ``scripts/spikes`` on the owner's Windows PC. Console output and reports hold numbers
+only, never document text or file names.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import glob
+import importlib.util
+import json
+import logging
+import os
+import shutil
+import sys
+import tempfile
+import warnings
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+from typing import NoReturn
+
+from vault_spikes import adapters, spike_embedding, spike_ocr, spike_pdf, spike_vec
+from vault_spikes.corpus import (
+    SpikeInputError,
+    build_corpus,
+    check_sources_listed,
+    load_manifest,
+    load_questions,
+    overlap_for,
+)
+from vault_spikes.errors import OwnMessage, OwnValueError
+from vault_spikes.report import (
+    Report,
+    SpikeSchema,
+    SpikeText,
+    merge,
+    require_free,
+    with_gpu,
+    with_model_revision,
+    with_package,
+)
+from vault_spikes.spike_embedding import EmbeddingInputs, run_embedding_spike
+from vault_spikes.spike_ocr import find_labelled_images, run_ocr_spike
+from vault_spikes.spike_pdf import run_pdf_spike
+from vault_spikes.spike_vec import SqliteVecStore, probe_extension_loading, run_vec_spike
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_OUT = Path("spike-results")
+OPTIONAL = {
+    "sqlite_vec": "vec",
+    "sentence_transformers": "embedding",
+    "torch": "embedding",
+    "rapidocr": "ocr",
+    "onnxruntime": "ocr",
+    "pypdfium2": "pdf",
+    "pdfplumber": "pdf",
+}
+
+
+KNOWN = {
+    name: SpikeSchema(
+        SpikeText(module.TITLE, module.QUESTION, module.METHOD),
+        module.ROWS,
+        module.METRICS,
+        frozenset(getattr(module, "REPORT_PACKAGES", module.PACKAGES)),
+        frozenset(module.PACKAGES),
+        getattr(module, "HAS_MODEL", False),
+    )
+    for name, module in (
+        ("embedding", spike_embedding),
+        ("ocr", spike_ocr),
+        ("pdf", spike_pdf),
+        ("vec", spike_vec),
+    )
+}
+
+
+def positive_int(text: str) -> int:
+    """A whole number of at least 1 (a batch of 0 would never advance, and a negative size is
+    meaningless); argparse reports the refusal."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+class FixedErrorParser(argparse.ArgumentParser):
+    """An argument parser whose errors are fixed text.
+
+    ``argparse`` quotes the rejected token in its message (``unrecognized arguments: <a folder>``,
+    ``invalid positive_int value: '<a folder>'``, ``invalid choice``), and parsing happens before
+    the exception boundary in :func:`main`, so a mistyped command line that contained a private
+    folder or file name would leave it in redirected console output. The usage line, which is
+    written from the definitions in this file, still says what the arguments are.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            "error: the command line is not valid; its arguments are listed above "
+            "(the rejected text is not repeated because it could be a file name)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def parser() -> argparse.ArgumentParser:
+    main = FixedErrorParser(prog="vault_spikes", description=__doc__)
+    commands = main.add_subparsers(dest="command", required=True)
+    commands.add_parser("check", help="list which optional libraries and programs are available")
+
+    def common(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--out", type=Path, default=DEFAULT_OUT, help="folder for the report")
+
+    vec = commands.add_parser("vec", help="sqlite-vec loading and search latency")
+    common(vec)
+    vec.add_argument("--sizes", type=positive_int, nargs="+", default=[10_000, 100_000])
+    vec.add_argument("--dim", type=positive_int, default=1024)
+    vec.add_argument("--queries", type=positive_int, default=30)
+
+    emb = commands.add_parser("embedding", help="embedding throughput and retrieval quality")
+    common(emb)
+    emb.add_argument("--candidate", choices=sorted(adapters.EMBEDDING_MODELS), required=True)
+    emb.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    emb.add_argument("--corpus", type=Path, default=REPO_ROOT / "demo" / "corpus")
+    emb.add_argument(
+        "--questions", type=Path, default=REPO_ROOT / "eval" / "public" / "questions.yaml"
+    )
+    emb.add_argument("--batch-size", type=positive_int, default=adapters.DEFAULT_BATCH_SIZE)
+    emb.add_argument("--vault-chunks", type=positive_int, default=100_000)
+
+    fetch = commands.add_parser(
+        "fetch-model",
+        help="download an embedding model, or RapidOCR's model files, before it is measured",
+    )
+    fetch.add_argument(
+        "--candidate",
+        choices=[*sorted(adapters.EMBEDDING_MODELS), adapters.RapidOcrEngine.name],
+        required=True,
+    )
+
+    ocr = commands.add_parser("ocr", help="OCR accuracy and speed")
+    common(ocr)
+    ocr.add_argument("--engine", choices=["rapidocr", "tesseract"], required=True)
+    ocr.add_argument("--images", type=Path, required=True)
+    ocr.add_argument("--references", type=Path, help="folder of <image name>.txt (default: images)")
+    ocr.add_argument("--tesseract-path")
+
+    pdf = commands.add_parser("pdf", help="PDF extraction speed, accuracy and failure behaviour")
+    common(pdf)
+    pdf.add_argument("--extractor", choices=["pypdfium2", "pypdfium2+pdfplumber"], required=True)
+    pdf.add_argument("--pdfs", type=Path, required=True)
+    pdf.add_argument(
+        "--references",
+        type=Path,
+        help="folder of <pdf name>.txt (text) and <pdf name>.headings.txt (headings, one per "
+        "line); default: the PDF folder",
+    )
+
+    joined = commands.add_parser("merge", help="combine the reports of one spike into one")
+    common(joined)
+    joined.add_argument("inputs", type=Path, nargs="+", help="report .json files")
+    return main
+
+
+def is_public_dataset(corpus: Path, questions: Path) -> bool:
+    """True only if both are the repository's own public synthetic files, whatever they are
+    called. A copy elsewhere counts as the owner's own data, which is the safe way to be wrong."""
+    return (
+        corpus.resolve() == (REPO_ROOT / "demo" / "corpus").resolve()
+        and questions.resolve() == (REPO_ROOT / "eval" / "public" / "questions.yaml").resolve()
+    )
+
+
+def is_public_folder(*folders: Path) -> bool:
+    """True only if every folder is the repository's public synthetic corpus or inside it. The
+    OCR and PDF spikes read images, PDFs and reference texts from folders of their own, so the
+    report says whether all of them were the public ones; anything else, a copy included, counts
+    as the owner's own data."""
+    public = (REPO_ROOT / "demo" / "corpus").resolve()
+    return all(folder.resolve().is_relative_to(public) for folder in folders)
+
+
+def available() -> dict[str, bool]:
+    facts = {name: importlib.util.find_spec(name) is not None for name in OPTIONAL}
+    facts["tesseract_on_path"] = shutil.which("tesseract") is not None
+    return facts
+
+
+def require_embedding_inputs(corpus: Path, questions: Path) -> None:
+    """Say plainly what is missing, instead of failing in the middle of a model download.
+
+    The defaults point at the public synthetic corpus and eval set (``demo/corpus`` and
+    ``eval/public``); ``--corpus`` and ``--questions`` point at the owner's own.
+    """
+    missing = [
+        what
+        for what, ok in (
+            (
+                "the corpus manifest (--corpus FOLDER with manifest.json)",
+                (corpus / "manifest.json").is_file(),
+            ),
+            ("the eval questions (--questions FILE)", questions.is_file()),
+        )
+        if not ok
+    ]
+    if missing:
+        msg = (
+            "cannot find " + " and ".join(missing) + ". Without the options the spike reads the "
+            "public synthetic corpus and eval set (demo/corpus and eval/public in the repository)"
+        )
+        raise SpikeInputError(msg)
+
+
+def show(report: Report, written: tuple[Path, Path]) -> None:
+    """Print the numbers of the report (never anything else) and the names of the files written.
+
+    Only the two file names are printed, never the folder: ``--out`` is whatever the caller typed
+    (``D:\\Clients\\Patient-Name`` is a possible value), while a file name is built by this package
+    from a fixed stem that ``Report.write`` checks.
+    """
+    for row in report.rows:
+        print(row.candidate)
+        for name, value in row.metrics.items():
+            print(f"  {name}: {value}")
+    print(f"report: {written[0].name} and {written[1].name}, in the --out folder")
+
+
+def run(args: argparse.Namespace) -> int:
+    if args.command == "check":
+        for name, ok in available().items():
+            extra = OPTIONAL.get(name)
+            hint = (
+                "" if ok or not extra else f"   ({extra} extra: uv sync --python 3.12 --all-extras)"
+            )
+            print(f"{name}: {'yes' if ok else 'no'}{hint}")
+        loading = probe_extension_loading()
+        print(f"sqlite can load extensions: {'yes' if loading['can_load_extensions'] else 'NO'}")
+        print(f"sqlite-vec loads: {'yes' if loading['vec_loads'] else 'no'}")
+        return 0
+
+    if args.command == "vec":
+        spike_vec.check_sizes(args.sizes)
+        require_free(args.out, "vec")
+        # Without the package the probe below would report that sqlite-vec does not load, which
+        # is a finding about this PC; a missing install is not one.
+        adapters.require_installed("sqlite_vec", "vec")
+        with tempfile.TemporaryDirectory() as folder:
+            report = run_vec_spike(
+                lambda dim: SqliteVecStore(dim, Path(folder)),
+                loading=probe_extension_loading(),
+                sizes=tuple(args.sizes),
+                dim=args.dim,
+                queries=args.queries,
+            )
+        show(report, report.write(args.out, stem="vec"))
+        return 0
+
+    if args.command == "fetch-model":
+        adapters.fetch_model(args.candidate)
+        revision = adapters.model_revision(args.candidate)
+        print(f"{args.candidate}: downloaded" + (f" (revision {revision})" if revision else ""))
+        return 0
+
+    if args.command == "embedding":
+        require_embedding_inputs(args.corpus, args.questions)
+        embedder = adapters.SentenceTransformerEmbedder(
+            args.candidate, args.device, args.batch_size
+        )
+        # The same candidate is measured on the public and on the private questions, and both
+        # reports are needed, so the data set is part of the name; checked before the long run.
+        public = is_public_dataset(args.corpus, args.questions)
+        stem = f"embedding-{embedder.name}-{'public' if public else 'private'}"
+        require_free(args.out, stem)
+        adapters.require_embedding_libraries()
+        documents = load_manifest(args.corpus / "manifest.json")
+        questions = load_questions(args.questions)
+        check_sources_listed(questions, documents)
+        overlap = overlap_for(questions)
+        inputs = EmbeddingInputs(
+            build_corpus(args.corpus, documents, adapters.pdf_pages_for_corpus, overlap=overlap),
+            documents,
+            questions,
+            overlap,
+        )
+        report = run_embedding_spike(
+            embedder,
+            inputs,
+            batch_size=args.batch_size,
+            vault_chunks=args.vault_chunks,
+            public_dataset=public,
+        )
+        report.environment = with_gpu(report.environment, adapters.gpu_name())
+        report.environment = with_model_revision(
+            report.environment, adapters.model_revision(args.candidate)
+        )
+        show(report, report.write(args.out, stem=stem))
+        return 0
+
+    if args.command == "ocr":
+        engine: adapters.RapidOcrEngine | adapters.TesseractEngine = (
+            adapters.RapidOcrEngine()
+            if args.engine == "rapidocr"
+            else adapters.TesseractEngine(args.tesseract_path)
+        )
+        # Each engine is measured on the public and on the private images, and both reports are
+        # needed, so the data set is part of the name; checked before the long run.
+        public = is_public_folder(args.images, args.references or args.images)
+        stem = f"ocr-{engine.name}-{'public' if public else 'private'}"
+        require_free(args.out, stem)
+        report = run_ocr_spike(
+            engine, find_labelled_images(args.images, args.references), public_dataset=public
+        )
+        if isinstance(engine, adapters.TesseractEngine):
+            # Rebuilt through the constructor, so the version is checked like any other.
+            report.environment = with_package(report.environment, "tesseract", engine.version())
+        show(report, report.write(args.out, stem=stem))
+        return 0
+
+    if args.command == "pdf":
+        extractor: adapters.Pypdfium2Extractor | adapters.PypdfiumPlumberExtractor = (
+            adapters.Pypdfium2Extractor()
+            if args.extractor == "pypdfium2"
+            else adapters.PypdfiumPlumberExtractor()
+        )
+        public = is_public_folder(args.pdfs, args.references or args.pdfs)
+        stem = f"pdf-{extractor.name.replace('+', '-')}-{'public' if public else 'private'}"
+        require_free(args.out, stem)
+        pdfs = sorted(p for p in args.pdfs.iterdir() if p.suffix.lower() == ".pdf" and p.is_file())
+        report = run_pdf_spike(
+            extractor, pdfs, public_dataset=public, references_dir=args.references
+        )
+        show(report, report.write(args.out, stem=stem))
+        return 0
+
+    report_files = expand_inputs(args.inputs)
+    reports = [
+        Report.from_json(json.loads(path.read_text(encoding="utf-8")), KNOWN)
+        for path in report_files
+    ]
+    combined = merge(reports)
+    # A merged report is derived, so a new merge may replace the last one, but never an input.
+    target = (args.out / f"{combined.spike}.json").resolve()
+    if any(path.resolve() == target for path in report_files):
+        msg = "the merged report would overwrite one of the reports it was made from"
+        raise OwnValueError(msg)
+    show(combined, combined.write(args.out, overwrite=True))
+    return 0
+
+
+def expand_inputs(given: Sequence[Path]) -> list[Path]:
+    """The report files named on the command line, with wildcards expanded here.
+
+    Windows PowerShell and cmd hand ``*`` to the program as it is, and Python does not expand it,
+    so ``merge spike-results\\embedding-*.json`` would look for a file with a star in its name.
+    A path that exists is taken as it is (a name may contain ``[``); another that has a wildcard is
+    expanded to the files it matches, in sorted order and without repeats. A pattern that matches
+    nothing is refused without printing it, because it is a path the owner typed.
+    """
+    found: list[Path] = []
+    for path in given:
+        if os.path.lexists(path) or not any(mark in str(path) for mark in "*?["):
+            matches = [path]
+        else:
+            matches = [Path(n) for n in sorted(glob.glob(str(path))) if os.path.isfile(n)]
+            if not matches:
+                msg = "a pattern on the command line matches no report file"
+                raise OwnValueError(msg)
+        found.extend(match for match in matches if match not in found)
+    return found
+
+
+@contextlib.contextmanager
+def libraries_silenced() -> Iterator[None]:
+    """Keep what libraries log and warn off the console while a command runs.
+
+    What a library says is not this package's to vouch for. pdfminer, which pdfplumber runs,
+    logs the tokens of a malformed page (the words on it among them), RapidOCR logs the paths of
+    its model files, and huggingface_hub warns with the path of its cache. Python prints a
+    library's warnings and errors on the console when nothing else handles them, and RapidOCR
+    gives its logger a console handler of its own, so the switch is global: no log record and no
+    warning is shown until the command is over. Native code (onnxruntime, torch) and the
+    download progress bars write to the console without Python's logging; what they say names
+    models and devices, not documents.
+    """
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        # record=True: a warning that a library lets through with a filter of its own is collected
+        # here and dropped, not printed.
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        logging.disable(previous)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    try:
+        with libraries_silenced():
+            return run(args)
+    except OwnMessage as error:
+        # Fixed text written in this package; it names no file and quotes no document.
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except Exception as error:  # a library's error or a failed read of an input folder
+        # Python's own message and traceback would carry the path of a private folder or file, or
+        # text of a document, so only the kind of error is printed. Re-run the unit tests or use
+        # the public dataset to investigate a failure with a full traceback.
+        print(
+            f"error: the run stopped with {type(error).__name__}; no further detail is printed "
+            "because it could contain a file name or document text",
+            file=sys.stderr,
+        )
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
