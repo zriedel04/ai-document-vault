@@ -10,6 +10,7 @@ import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
@@ -46,7 +47,8 @@ def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
             versions = connection.execute(text("SELECT version_num FROM alembic_version")).all()
     finally:
         engine.dispose()
-    assert [row[0] for row in versions] == ["0001"]
+    head = ScriptDirectory.from_config(alembic_config(db_file)).get_current_head()
+    assert [row[0] for row in versions] == [head]
 
 
 def test_the_migrations_match_the_table_definitions(tmp_path: Path) -> None:
