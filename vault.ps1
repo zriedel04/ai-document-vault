@@ -340,7 +340,14 @@ function Start-WithLaunchId {
         & $Body
     }
     finally {
-        [Environment]::SetEnvironmentVariable($script:LaunchVariable, $previous, 'Process')
+        # [NullString]: PowerShell passes $null to a string parameter as "", and PowerShell 7's
+        # .NET then keeps the variable, empty, instead of removing it.
+        if ($null -eq $previous) {
+            [Environment]::SetEnvironmentVariable($script:LaunchVariable, [NullString]::Value, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($script:LaunchVariable, $previous, 'Process')
+        }
     }
 }
 
