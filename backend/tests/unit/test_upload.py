@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -420,6 +423,52 @@ def test_a_part_larger_than_a_chunk_is_written_in_chunk_slices(
     assert asyncio.run(imports._receive(Parts(), target, 1000))  # type: ignore[arg-type]
     assert target.read_bytes() == body
     assert written == [16] * 32
+
+
+def test_no_more_imports_run_at_once_than_there_are_slots(
+    app: FastAPI, token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex #32: waiting imports must not fill the shared worker pool the other routes use."""
+    importer: Importer = app.state.importer
+    real_import = importer.import_file
+    lock = threading.Lock()
+    running = 0
+    most = 0
+    release = threading.Event()
+
+    def slow_import(request: ImportRequest) -> Any:
+        nonlocal running, most
+        with lock:
+            running += 1
+            most = max(most, running)
+        release.wait(timeout=10)
+        try:
+            return real_import(request)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(importer, "import_file", slow_import)
+    uploads = imports.IMPORT_SLOTS + 2
+    headers = {"Authorization": f"Bearer {token}", "Origin": LOCAL}
+    with (
+        TestClient(app, base_url=LOCAL, headers=headers) as shared,  # one event loop for all
+        ThreadPoolExecutor(uploads) as pool,
+    ):
+        futures = [
+            pool.submit(send, shared, TEXT + str(n).encode(), f"note-{n}.txt")
+            for n in range(uploads)
+        ]
+        deadline = time.monotonic() + 10
+        while running < imports.IMPORT_SLOTS and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)  # time for a third import to start, if nothing stopped it
+        assert running == imports.IMPORT_SLOTS
+        assert shared.get("/api/health").status_code == 200  # the page is still answered
+        release.set()
+        results = [future.result(timeout=10).json()["outcome"] for future in futures]
+    assert results == ["imported"] * uploads
+    assert most == imports.IMPORT_SLOTS
 
 
 def test_the_route_asks_for_the_current_user(

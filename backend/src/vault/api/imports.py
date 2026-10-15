@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Annotated, BinaryIO, Final
 from urllib.parse import unquote
 
+import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -47,6 +48,10 @@ MAX_NAME_CHARS: Final = 255  # what Windows and most file systems allow for one 
 MAX_MTIME_MS: Final = 253_402_300_799_999
 PERCENT_ENCODED: Final = re.compile(r"(?:[^%]|%[0-9A-Fa-f]{2})+")
 WRITE_CHUNK: Final = 1024 * 1024  # the most of a body held in memory before it is written
+# Imports that may run at once. The rest wait for a slot without holding a worker thread, so the
+# shared thread pool that also answers the page's synchronous routes (health, session) is never
+# filled by imports. Two, as the plan's extraction stage.
+IMPORT_SLOTS: Final = 2
 EPOCH: Final = datetime(1970, 1, 1)  # naive UTC, as the database stores times
 
 BODY_SCHEMA: Final = {
@@ -207,7 +212,7 @@ async def upload(
     try:
         if not await _receive(request, staged, max_bytes):
             raise HTTPException(status_code=413, detail="the file is larger than the size limit")
-        result = await run_in_threadpool(
+        result = await anyio.to_thread.run_sync(
             importer.import_file,
             ImportRequest(
                 path=staged,
@@ -216,6 +221,7 @@ async def upload(
                 batch_id=batch_id,
                 original_mtime=mtime,
             ),
+            limiter=request.app.state.import_slots,
         )
     finally:
         await run_in_threadpool(staged.unlink, missing_ok=True)

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI
 
 from vault.api import health, imports, session
@@ -87,6 +88,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.engine = engine
     app.state.blobs = blobs
     app.state.importer = importer
+    app.state.import_slots = anyio.CapacityLimiter(imports.IMPORT_SLOTS)
     app.add_middleware(LocalSecurityMiddleware, token=token)
     # Added last, so it is outermost and its headers are on the refusals above as well.
     app.add_middleware(SecurityHeadersMiddleware)
