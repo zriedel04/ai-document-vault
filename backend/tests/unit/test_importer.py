@@ -21,7 +21,7 @@ from vault.ingest import importer as importer_module
 from vault.ingest.importer import FIRST_STAGE, Importer, ImportRequest, Outcome
 from vault.ingest.validate import Kind, Limits, Reason, Verdict
 from vault.jobs.queue import JobQueue
-from vault.storage.blobs import BlobStore
+from vault.storage.blobs import BlobIntegrityError, BlobStore
 
 NOW = datetime(2026, 10, 15, 12, 0, 0)
 TEXT = b"Course syllabus\nWeek 1: introduction\n"
@@ -325,6 +325,23 @@ def test_a_source_that_cannot_be_opened_or_read_is_refused_as_unreadable(
     assert (result.outcome, result.reason) == (Outcome.REFUSED, Reason.UNREADABLE)
     assert store.scan().blobs == ()
     assert rows(engine, blobs) == []
+
+
+def test_a_damaged_copy_of_the_same_bytes_is_an_error_and_records_nothing(
+    engine: Engine, importer: Importer, store: BlobStore, incoming: Path
+) -> None:
+    """Codex #31: a stored blob edited into other text of the same type must not be recorded as
+    the bytes of a new import of the original."""
+    first = importer.import_file(request(write(incoming, "a.txt", TEXT)))
+    (blob,) = rows(engine, blobs)
+    path = store.find(blob.sha256)
+    assert path is not None
+    path.chmod(0o644)
+    path.write_bytes(b"Other notes, still valid text.\n")
+    with pytest.raises(BlobIntegrityError):
+        importer.import_file(request(write(incoming, "b.txt", TEXT)))
+    assert len(rows(engine, import_sources)) == 1  # only the first import
+    assert [row.id for row in rows(engine, documents)] == [first.document_id]
 
 
 def test_a_store_that_cannot_write_is_an_error_not_a_refusal(
