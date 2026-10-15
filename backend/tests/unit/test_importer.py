@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 from sqlalchemy import Engine, inspect, select, update
@@ -16,8 +17,9 @@ from vault.db import ids
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
 from vault.db.schema import blobs, document_versions, documents, import_sources, jobs
+from vault.ingest import importer as importer_module
 from vault.ingest.importer import FIRST_STAGE, Importer, ImportRequest, Outcome
-from vault.ingest.validate import Limits, Reason
+from vault.ingest.validate import Kind, Limits, Reason, Verdict
 from vault.jobs.queue import JobQueue
 from vault.storage.blobs import BlobStore
 
@@ -253,24 +255,26 @@ def test_a_file_over_the_limit_is_refused(engine: Engine, store: BlobStore, inco
 
 class SwappingStore(BlobStore):
     """Replaces the source with other bytes just before copying it, as another program could
-    between the first check and the copy."""
+    between the first check and the copy. The importer has the file open by then; the rewrite
+    changes the bytes behind that handle."""
 
     def __init__(self, root: Path, replacement: bytes) -> None:
         super().__init__(root)
         self.replacement = replacement
+        self.source: Path | None = None
 
-    def put_file(
-        self, source: Path, extension: str | None = None, *, max_bytes: int | None = None
-    ) -> Any:
-        source.write_bytes(self.replacement)
-        return super().put_file(source, extension, max_bytes=max_bytes)
+    def put(self, stream: BinaryIO, extension: str = "", *, max_bytes: int | None = None) -> Any:
+        assert self.source is not None
+        self.source.write_bytes(self.replacement)
+        return super().put(stream, extension, max_bytes=max_bytes)
 
 
 def test_a_file_that_changes_after_the_check_is_judged_by_what_was_stored(
     engine: Engine, store: BlobStore, incoming: Path
 ) -> None:
     swapping = SwappingStore(store.root, BINARY)
-    result = Importer(engine, swapping).import_file(request(write(incoming, "a.txt", TEXT)))
+    swapping.source = write(incoming, "a.txt", TEXT)
+    result = Importer(engine, swapping).import_file(request(swapping.source))
     assert (result.outcome, result.reason) == (Outcome.REFUSED, Reason.CONTENT_MISMATCH)
     assert store.scan().blobs == ()  # the blob it created is gone again
     for table in (blobs, documents, import_sources, jobs):
@@ -282,9 +286,62 @@ def test_a_refused_blob_that_was_already_stored_is_left_alone(
 ) -> None:
     stored = store.put_file(write(incoming, "seed.txt", BINARY), "txt")
     swapping = SwappingStore(store.root, BINARY)
-    result = Importer(engine, swapping).import_file(request(write(incoming, "a.txt", TEXT)))
+    swapping.source = write(incoming, "a.txt", TEXT)
+    result = Importer(engine, swapping).import_file(request(swapping.source))
     assert result.outcome is Outcome.REFUSED
     assert store.exists(stored.sha256)
+
+
+class BrokenRead(io.BytesIO):
+    def read(self, size: int | None = -1) -> bytes:
+        raise OSError(5, "device error")
+
+
+@pytest.mark.parametrize("failure", ["open", "read"])
+def test_a_source_that_cannot_be_opened_or_read_is_refused_as_unreadable(
+    engine: Engine,
+    importer: Importer,
+    store: BlobStore,
+    incoming: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """The first check passed (a file another program locks right after it is the real case),
+    so the failure comes from the importer's own open or read of the source."""
+    path = write(incoming, "a.txt", TEXT)
+    real_open = Path.open
+
+    def open_source(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self != path:
+            return real_open(self, *args, **kwargs)
+        if failure == "open":
+            raise PermissionError(13, "held by another program")
+        return BrokenRead(TEXT)
+
+    accepted = Verdict(None, Kind.TEXT, "txt", "text/plain")
+    monkeypatch.setattr(importer_module, "validate_file", lambda *_args, **_kwargs: accepted)
+    monkeypatch.setattr(Path, "open", open_source)
+    result = importer.import_file(request(path))
+    assert (result.outcome, result.reason) == (Outcome.REFUSED, Reason.UNREADABLE)
+    assert store.scan().blobs == ()
+    assert rows(engine, blobs) == []
+
+
+def test_a_store_that_cannot_write_is_an_error_not_a_refusal(
+    engine: Engine, store: BlobStore, incoming: Path
+) -> None:
+    """Codex #31: a vault whose blob folder cannot be written must not refuse every document as
+    unreadable; the failure belongs to the vault and reaches the caller."""
+
+    class ReadOnlyStore(BlobStore):
+        def _temp_path(self) -> Path:
+            raise PermissionError(13, "the temporary folder cannot be written")
+
+    with pytest.raises(PermissionError):
+        Importer(engine, ReadOnlyStore(store.root)).import_file(
+            request(write(incoming, "a.txt", TEXT))
+        )
+    assert rows(engine, documents) == []
 
 
 # Each CHECK on import_sources that a request field reaches, with a request that breaks it. The
