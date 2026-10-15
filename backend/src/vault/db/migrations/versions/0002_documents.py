@@ -50,19 +50,28 @@ def upgrade() -> None:
         sa.Column("id", sa.String(), nullable=False),
         sa.Column("current_version_id", sa.String(), nullable=True),
         sa.Column("state", sa.String(), nullable=False),
+        sa.Column("state_before_trash", sa.String(), nullable=True),
         sa.Column("local_only", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("trashed_at", sa.DateTime(), nullable=True),
         sa.CheckConstraint(ULID_CHECK.format(c="id"), name="ck_documents_id_is_a_ulid"),
         sa.CheckConstraint(
-            "state IN ('processing', 'searchable', 'ready', 'failed')",
+            "state IN ('processing', 'searchable', 'ready', 'failed', 'trashed')",
             name="ck_documents_state_known",
         ),
+        sa.CheckConstraint(
+            "(state = 'trashed') = (trashed_at IS NOT NULL)"
+            " AND (state = 'trashed') = (state_before_trash IS NOT NULL)"
+            " AND (state_before_trash IS NULL"
+            " OR state_before_trash IN ('processing', 'searchable', 'ready', 'failed'))",
+            name="ck_documents_trash_consistent",
+        ),
         sa.CheckConstraint("local_only IN (0, 1)", name="ck_documents_local_only_flag"),
+        # The pair, so the current version must be one of this document's versions.
         sa.ForeignKeyConstraint(
-            ["current_version_id"],
-            ["document_versions.id"],
-            name="fk_documents_current_version_id_document_versions",
+            ["current_version_id", "id"],
+            ["document_versions.id", "document_versions.document_id"],
+            name="fk_documents_current_version_document_versions",
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id", name="pk_documents"),
@@ -96,6 +105,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_document_versions"),
         sa.UniqueConstraint("document_id", "version_no", name="uq_document_versions_number"),
+        sa.UniqueConstraint("id", "document_id", name="uq_document_versions_id_document"),
     )
     op.create_index("ix_document_versions_blob_sha256", "document_versions", ["blob_sha256"])
     op.create_table(
@@ -140,6 +150,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # A document points at its current version, so that link goes first: dropping a table deletes
+    # its rows, and the versions could not be deleted while a document still points at one.
+    op.execute("UPDATE documents SET current_version_id = NULL")
     op.drop_table("import_sources")
     op.drop_table("document_versions")
     op.drop_table("documents")
