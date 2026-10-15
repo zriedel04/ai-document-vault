@@ -27,6 +27,7 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    text,
 )
 
 from vault.db.ids import ulid_check
@@ -47,6 +48,9 @@ metadata = MetaData(naming_convention=NAMING)
 DOCUMENT_STATES: Final = ("processing", "searchable", "ready", "failed")
 VERSION_ORIGINS: Final = ("import", "user", "ai_copy")
 IMPORT_METHODS: Final = ("upload", "folder", "watch")
+# The processing stages of section 7 (Tier B and C), each a job of its own (ADR 0005).
+JOB_STAGES: Final = ("extract", "ocr", "metadata", "chunk", "embed", "enrich")
+JOB_STATUSES: Final = ("queued", "running", "done", "failed")
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:
@@ -155,4 +159,62 @@ import_sources = Table(
     CheckConstraint(_one_of("method", IMPORT_METHODS), name="method_known"),
     Index("ix_import_sources_document_id", "document_id"),
     Index("ix_import_sources_import_batch_id", "import_batch_id"),
+)
+
+# The persistent job queue (ADR 0005, vault.jobs.queue). A job is one stage for one document.
+# ``last_error`` is the name of the exception class that ended the last attempt, never its
+# message: a parser's message can quote the content it failed on.
+jobs = Table(
+    "jobs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("document_id", String, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
+    Column("stage", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("priority", Integer, nullable=False),
+    Column("attempts", Integer, nullable=False),
+    Column("max_attempts", Integer, nullable=False),
+    Column("last_error", String, nullable=True),
+    Column("run_after", DateTime, nullable=False),
+    # What the stage works from (a blob hash, plus tool versions later), so a changed input
+    # queues the stage again while the same input does not.
+    Column("input_hash", String, nullable=False),
+    Column("locked_by", String, nullable=True),
+    Column("locked_at", DateTime, nullable=True),
+    Column("created_at", DateTime, nullable=False),
+    Column("finished_at", DateTime, nullable=True),
+    CheckConstraint(ulid_check("id"), name="id_is_a_ulid"),
+    CheckConstraint(_one_of("stage", JOB_STAGES), name="stage_known"),
+    CheckConstraint(_one_of("status", JOB_STATUSES), name="status_known"),
+    CheckConstraint("attempts >= 0 AND attempts <= max_attempts", name="attempts_in_range"),
+    CheckConstraint("max_attempts >= 1", name="max_attempts_positive"),
+    CheckConstraint(
+        "length(input_hash) = 64 AND input_hash NOT GLOB '*[^0-9a-f]*'", name="input_is_a_hash"
+    ),
+    CheckConstraint(
+        "last_error IS NULL OR (length(last_error) BETWEEN 1 AND 100"
+        " AND last_error NOT GLOB '*[^A-Za-z0-9_]*')",
+        name="error_is_a_class_name",
+    ),
+    CheckConstraint(f"locked_by IS NULL OR ({ulid_check('locked_by')})", name="worker_is_a_ulid"),
+    # A running job has an owner; any other job has none.
+    CheckConstraint(
+        "(status = 'running') = (locked_by IS NOT NULL AND locked_at IS NOT NULL)",
+        name="lock_matches_status",
+    ),
+    CheckConstraint(
+        "(status IN ('done', 'failed')) = (finished_at IS NOT NULL)", name="finished_when_ended"
+    ),
+    Index("ix_jobs_claim", "status", "stage", "priority", "run_after"),
+    Index("ix_jobs_document_id", "document_id"),
+    # At most one unfinished job per document, stage and input: enqueueing the same work twice
+    # (a second import of the same bytes, a retry pressed twice) does not run it twice.
+    Index(
+        "uq_jobs_open_work",
+        "document_id",
+        "stage",
+        "input_hash",
+        unique=True,
+        sqlite_where=text("status IN ('queued', 'running')"),
+    ),
 )
