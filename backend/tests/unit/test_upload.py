@@ -378,7 +378,7 @@ def test_no_more_than_one_write_chunk_waits_in_memory(
     written: list[int] = []
     real_write = imports._write
 
-    def record(out: Any, data: bytes) -> None:
+    def record(out: Any, data: bytearray) -> None:
         written.append(len(data))
         real_write(out, data)
 
@@ -392,8 +392,34 @@ def test_no_more_than_one_write_chunk_waits_in_memory(
     target = tmp_path / "staged.txt"
     assert asyncio.run(imports._receive(Parts(), target, 100))  # type: ignore[arg-type]
     assert target.read_bytes() == TEXT
-    assert written == [20, 20, 8]  # four parts of 5 reach 20, then the rest
-    assert max(written) < 16 + 5  # never more than one chunk plus one part
+    assert written == [16, 16, 16]  # parts of 5 fill the buffer to exactly one chunk each time
+    assert sum(written) == len(TEXT)
+
+
+def test_a_part_larger_than_a_chunk_is_written_in_chunk_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex #32: one large part from the server must not be buffered (or copied) whole."""
+    monkeypatch.setattr(imports, "WRITE_CHUNK", 16)
+    written: list[int] = []
+    real_write = imports._write
+
+    def record(out: Any, data: bytearray) -> None:
+        written.append(len(data))
+        real_write(out, data)
+
+    monkeypatch.setattr(imports, "_write", record)
+    body = bytes(range(256)) * 2  # 512 bytes, 32 chunks
+
+    class Parts:
+        async def stream(self) -> Any:
+            yield body[:3]  # a small part first, so the large one does not start on a boundary
+            yield body[3:]
+
+    target = tmp_path / "staged.bin"
+    assert asyncio.run(imports._receive(Parts(), target, 1000))  # type: ignore[arg-type]
+    assert target.read_bytes() == body
+    assert written == [16] * 32
 
 
 def test_the_route_asks_for_the_current_user(

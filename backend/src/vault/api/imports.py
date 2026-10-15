@@ -132,7 +132,7 @@ def claimed_extension(name: str) -> str | None:
     return extension if extension in EXTENSIONS else None
 
 
-def _write(out: BinaryIO, data: bytes) -> None:
+def _write(out: BinaryIO, data: bytearray) -> None:
     out.write(data)
 
 
@@ -145,8 +145,10 @@ async def _receive(request: Request, target: Path, max_bytes: int) -> bool:
     """Write the body to ``target``; False if it grew past ``max_bytes`` (nothing more is kept).
 
     Every disk call runs in a worker thread, so a large upload or a slow disk never holds up the
-    event loop that answers the page's other requests. At most ``WRITE_CHUNK`` bytes wait in
-    memory: the next part of the body is read only after the last write finished.
+    event loop that answers the page's other requests. Besides the part the server handed over,
+    at most ``WRITE_CHUNK`` bytes wait in memory, however large that part is: it is cut into
+    slices that fill the buffer, the buffer is written as it is (no copy), and the next part of the
+    body is read only after the last write finished.
     """
     size = 0
     pending = bytearray()
@@ -156,12 +158,16 @@ async def _receive(request: Request, target: Path, max_bytes: int) -> bool:
             size += len(chunk)
             if size > max_bytes:
                 return False
-            pending += chunk
-            if len(pending) >= WRITE_CHUNK:
-                await run_in_threadpool(_write, out, bytes(pending))
-                pending.clear()
+            rest = memoryview(chunk)
+            while rest:
+                room = WRITE_CHUNK - len(pending)
+                pending += rest[:room]
+                rest = rest[room:]
+                if len(pending) == WRITE_CHUNK:
+                    await run_in_threadpool(_write, out, pending)
+                    pending.clear()
         if pending:
-            await run_in_threadpool(_write, out, bytes(pending))
+            await run_in_threadpool(_write, out, pending)
         await run_in_threadpool(_finish, out)
     finally:
         await run_in_threadpool(out.close)
