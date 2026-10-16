@@ -6,8 +6,11 @@ The notices cover the runtime packages only: the npm packages the built frontend
 installed in a runtime-only backend environment (`uv sync --no-dev`). Build, test and lint tools
 are not shipped and are covered by the licence audit (`docs/licence-audit.md`) instead.
 
-Each package gets its name, licence and the licence text it ships with. A package that ships no
-licence file is listed with a note saying so, never with a text the script made up.
+Each package gets its name, licence and the licence text it ships with. An npm package installed
+at more than one place gets an entry per place (`parent/node_modules/name`), since each copy is
+code that may be bundled. A package that ships no licence file must have a reviewed text in
+OVERRIDES, taken from its upstream source and stored in `scripts/notices/`; without one, `write`
+and `check` fail, and an override for a package that now ships its own file fails too.
 
 `write` needs both ecosystems in one place: run it from `backend/` with the runtime environment,
 after `npm ci` in `frontend/`:
@@ -47,6 +50,18 @@ NODE_MODULES = ROOT / "frontend"  # lockfile locations are relative to the front
 LICENCE_FILE = re.compile(r"(?i)(licen[cs]e|copying|notice|copyrightnotice)(-[a-z0-9]+)?(\.(md|txt|rst))?")
 ROW = re.compile(r"\| (npm|python) \| `([^`]+)` \| ([^|]+) \|")
 ECOSYSTEMS = ("npm", "python")
+OVERRIDE_FOLDER = Path(__file__).resolve().parent / "notices"
+
+# Reviewed licence texts for runtime packages that ship none. Key: "<ecosystem>:<name as listed>".
+# Value: the file in scripts/notices/ and where its text comes from.
+OVERRIDES: dict[str, tuple[str, str]] = {
+    "npm:react-remove-scroll-bar": (
+        "react-remove-scroll-bar.LICENSE",
+        "The package declares MIT but its tarball ships no licence file. This is the LICENSE its "
+        "author added to the upstream repository (github.com/theKashey/react-remove-scroll-bar, "
+        "commit 7301c16, 2025-05-21).",
+    ),
+}
 
 HEADER = """# Third-party notices
 
@@ -57,12 +72,17 @@ licence is in [LICENSE](LICENSE).
 """
 
 
+class NoticeError(Exception):
+    """A runtime package whose notice cannot be produced as the rules require."""
+
+
 @dataclass(frozen=True)
 class Notice:
     ecosystem: str
     name: str
     licence: str
     texts: tuple[tuple[str, str], ...]  # (file name, text)
+    source: str = ""  # where the texts come from, when not from the package itself
 
 
 def licence_files(folder: Path, names: Iterable[str]) -> tuple[tuple[str, str], ...]:
@@ -89,7 +109,7 @@ def npm_notices(lockfile: Path = LOCKFILE, base: Path = NODE_MODULES) -> list[No
         notices.append(
             Notice(
                 ecosystem="npm",
-                name=location.rsplit("node_modules/", 1)[-1],
+                name=location.removeprefix("node_modules/"),
                 licence=licence if isinstance(licence, str) else "no licence found",
                 texts=licence_files(folder, (p.name for p in folder.iterdir())),
             )
@@ -122,6 +142,42 @@ def python_notices(ignore: Iterable[str] = ()) -> list[Notice]:
     return notices
 
 
+def with_overrides(notices: Iterable[Notice], folder: Path = OVERRIDE_FOLDER) -> list[Notice]:
+    """Fill in the reviewed text of every package that ships none; fail on any gap or stale entry."""
+    result = []
+    used = set()
+    for notice in notices:
+        key = f"{notice.ecosystem}:{notice.name}"
+        override = OVERRIDES.get(key)
+        if override is None:
+            if not notice.texts:
+                msg = f"{key} ships no licence file and has no reviewed text in OVERRIDES"
+                raise NoticeError(msg)
+            result.append(notice)
+            continue
+        used.add(key)
+        if notice.texts:
+            msg = f"{key} now ships its own licence file: remove its entry from OVERRIDES"
+            raise NoticeError(msg)
+        file_name, source = override
+        path = folder / file_name
+        if not path.is_file():
+            msg = f"{key}: its reviewed text scripts/notices/{file_name} is missing"
+            raise NoticeError(msg)
+        text = path.read_text(encoding="utf-8")
+        result.append(
+            Notice(notice.ecosystem, notice.name, notice.licence, (("LICENSE", text),), source)
+        )
+    ecosystems = {notice.ecosystem for notice in result}
+    unused = sorted(
+        key for key in OVERRIDES if key not in used and key.split(":", 1)[0] in ecosystems
+    )
+    if unused:
+        msg = f"OVERRIDES names packages that are not runtime packages: {', '.join(unused)}"
+        raise NoticeError(msg)
+    return result
+
+
 def ordered(notices: Iterable[Notice]) -> list[Notice]:
     return sorted(notices, key=lambda n: (n.ecosystem, n.name.lower()))
 
@@ -132,8 +188,8 @@ def render(notices: Iterable[Notice]) -> str:
     lines += [f"| {n.ecosystem} | `{n.name}` | {n.licence} |" for n in items]
     for notice in items:
         lines += ["", f"## {notice.ecosystem}: {notice.name}", "", f"Licence: {notice.licence}"]
-        if not notice.texts:
-            lines += ["", "The package ships no licence file; its metadata names the licence above."]
+        if notice.source:
+            lines += ["", notice.source]
         for file_name, text in notice.texts:
             fence = "````" if "```" in text else "```"
             lines += ["", f"`{file_name}`:", "", f"{fence}text", text.rstrip(), fence]
@@ -176,11 +232,15 @@ def drift(committed: str, notices: Iterable[Notice], ecosystem: str) -> list[str
     reported = {name for name, _licence in current ^ listed}  # a changed licence says it already
     written = sections(committed, ecosystem)
     expected = sections(render(mine), ecosystem)
-    problems += [
-        f"~ {name}: licence text differs"
-        for name in sorted(expected)
-        if name not in reported and name in written and written[name] != expected[name]
-    ]
+    for name in sorted(expected.keys() | written.keys()):
+        if name in reported:
+            continue
+        if name not in written:
+            problems.append(f"~ {name}: notice section missing")
+        elif name not in expected:
+            problems.append(f"~ {name}: notice section for a package that is not listed")
+        elif written[name] != expected[name]:
+            problems.append(f"~ {name}: licence text differs")
     return problems
 
 
@@ -194,13 +254,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--ignore", action="append", default=[], metavar="NAME")
     args = parser.parse_args(argv)
 
+    try:
+        if args.command == "write":
+            notices = with_overrides(npm_notices() + python_notices(args.ignore))
+        elif args.ecosystem == "npm":
+            notices = with_overrides(npm_notices())
+        else:
+            notices = with_overrides(python_notices(args.ignore))
+    except NoticeError as error:
+        print(f"cannot produce the notices: {error}", file=sys.stderr)
+        return 1
+
     if args.command == "write":
-        notices = npm_notices() + python_notices(args.ignore)
         NOTICES.write_text(render(notices), encoding="utf-8", newline="\n")
         print(f"Wrote {NOTICES.name}: {len(notices)} packages.")
         return 0
 
-    notices = npm_notices() if args.ecosystem == "npm" else python_notices(args.ignore)
     if not notices:
         print(f"no {args.ecosystem} packages found", file=sys.stderr)
         return 2

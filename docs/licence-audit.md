@@ -35,7 +35,7 @@ These are what a user of the app runs. The full list with licence texts is in [T
 
 - **Python (20)**: alembic, annotated-doc, annotated-types, anyio, click, fastapi, h11, idna, Mako, MarkupSafe, opentelemetry-api, pydantic, pydantic-core, pydantic-settings, python-dotenv, SQLAlchemy, starlette, typing-extensions, typing-inspection, uvicorn. All MIT, BSD-3-Clause, Apache-2.0 (opentelemetry-api) or PSF-2.0 (typing-extensions).
 - **npm (39)**: React, Mantine, TanStack Router, Floating UI, Tabler icons, openapi-fetch and their dependencies. All MIT, except `tslib` (0BSD), `isbot` (Unlicense) and `type-fest` (MIT or CC0-1.0).
-- `react-remove-scroll-bar` declares MIT but ships no licence file; the notices say so rather than supplying a text.
+- `react-remove-scroll-bar` declares MIT but its package ships no licence file. The notices carry the MIT text its author later added to the upstream repository (`scripts/notices/`, commit 7301c16), and say where it comes from. A runtime package with no licence file and no such reviewed text fails the notices check.
 
 The built frontend bundles npm code into its own files. MIT and the other licences above ask for their notice to be kept with copies of the code, which `THIRD_PARTY_NOTICES.md` does for anyone redistributing a build. Python packages are not bundled: `uv` installs them from PyPI with their own licence files.
 

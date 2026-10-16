@@ -20,7 +20,7 @@ def sample() -> list[Notice]:
     return [
         Notice("python", "zeta", "BSD-3-Clause", (("LICENSE.txt", "BSD text"),)),
         Notice("npm", "@scope/alpha", "MIT", (("LICENSE", "MIT text"),)),
-        Notice("npm", "beta", "(MIT OR CC0-1.0)", ()),
+        Notice("npm", "beta", "(MIT OR CC0-1.0)", (("LICENSE", "upstream text"),), "From upstream."),
     ]
 
 
@@ -32,12 +32,13 @@ class RenderTest(unittest.TestCase):
         )
         self.assertEqual(notices.table(text, "python"), {("zeta", "BSD-3-Clause")})
 
-    def test_texts_are_included_and_a_missing_one_is_said_not_invented(self) -> None:
+    def test_texts_are_included_and_a_reviewed_text_says_where_it_comes_from(self) -> None:
         text = notices.render(sample())
         self.assertIn("MIT text", text)
         self.assertIn("BSD text", text)
         beta = text.split("## npm: beta", 1)[1].split("## ", 1)[0]
-        self.assertIn("ships no licence file", beta)
+        self.assertIn("From upstream.", beta)
+        self.assertIn("upstream text", beta)
 
     def test_a_row_inside_a_licence_text_is_not_read_as_a_package(self) -> None:
         text = notices.render([Notice("npm", "real", "MIT", (("LICENSE", "| npm | `fake` | MIT |"),))])
@@ -84,7 +85,7 @@ class DriftTest(unittest.TestCase):
 
     def test_a_licence_file_added_or_removed_is_drift(self) -> None:
         current = [
-            Notice(n.ecosystem, n.name, n.licence, (("LICENSE", "now has one"),))
+            Notice(n.ecosystem, n.name, n.licence, (("LICENSE", "a new text"),), n.source)
             if n.name == "beta"
             else Notice(n.ecosystem, n.name, n.licence, ())
             if n.name == "@scope/alpha"
@@ -108,6 +109,19 @@ class DriftTest(unittest.TestCase):
             notices.drift(self.committed, current, "python"), ["~ zeta: licence text differs"]
         )
 
+    def test_a_deleted_notice_section_is_drift(self) -> None:
+        """Codex #39: the table row alone is not the notice; its licence text must be there too."""
+        committed = self.committed.replace("\n## npm: beta\n", "\n## npm: removed-by-hand\n")
+        self.assertEqual(
+            notices.drift(committed, sample(), "npm"),
+            [
+                "~ beta: notice section missing",
+                "~ removed-by-hand: notice section for a package that is not listed",
+            ],
+        )
+        without = self.committed.split("\n## npm: beta\n", 1)[0] + "\n"
+        self.assertEqual(notices.drift(without, sample(), "npm"), ["~ beta: notice section missing"])
+
     def test_one_ecosystem_is_compared_without_the_other(self) -> None:
         only_npm = [n for n in sample() if n.ecosystem == "npm"]
         self.assertEqual(notices.drift(self.committed, only_npm, "npm"), [])
@@ -120,6 +134,7 @@ class NpmTest(unittest.TestCase):
                 "": {"name": "app"},
                 "node_modules/shipped": {"version": "1.0.0", "license": "MIT"},
                 "node_modules/@scope/pkg": {"version": "2.0.0", "license": "ISC"},
+                "node_modules/@scope/pkg/node_modules/shipped": {"version": "0.9.0", "license": "MIT"},
                 "node_modules/tool": {"version": "3.0.0", "license": "MIT", "dev": True},
             }
         }
@@ -129,15 +144,20 @@ class NpmTest(unittest.TestCase):
         (shipped / "LICENSE").write_text("shipped licence", encoding="utf-8")
         (shipped / "license.js").write_text("code, not a licence", encoding="utf-8")
         (shipped / "index.js").write_text("", encoding="utf-8")
-        (folder / "node_modules" / "@scope" / "pkg").mkdir(parents=True)
+        nested = folder / "node_modules" / "@scope" / "pkg" / "node_modules" / "shipped"
+        nested.mkdir(parents=True)
+        (nested / "LICENSE").write_text("older shipped licence", encoding="utf-8")
         return folder / "package-lock.json"
 
     def test_runtime_packages_with_their_licence_files_and_no_dev_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             found = {n.name: n for n in notices.npm_notices(self.build(folder), folder)}
-        self.assertEqual(set(found), {"shipped", "@scope/pkg"})
+        self.assertEqual(set(found), {"shipped", "@scope/pkg", "@scope/pkg/node_modules/shipped"})
         self.assertEqual(found["shipped"].texts, (("LICENSE", "shipped licence"),))
+        self.assertEqual(
+            found["@scope/pkg/node_modules/shipped"].texts, (("LICENSE", "older shipped licence"),)
+        )
         self.assertEqual(found["@scope/pkg"].texts, ())
         self.assertEqual(found["@scope/pkg"].licence, "ISC")
 
@@ -145,9 +165,66 @@ class NpmTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             lockfile = self.build(folder)
-            (folder / "node_modules" / "@scope" / "pkg").rmdir()
+            (folder / "node_modules" / "@scope" / "pkg" / "node_modules" / "shipped" / "LICENSE").unlink()
+            (folder / "node_modules" / "@scope" / "pkg" / "node_modules" / "shipped").rmdir()
             with self.assertRaises(FileNotFoundError):
                 notices.npm_notices(lockfile, folder)
+
+
+class OverrideTest(unittest.TestCase):
+    """Codex #39: a runtime package that ships no licence file still needs its text in the notices."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        (self.folder / "bare.LICENSE").write_text("reviewed text", encoding="utf-8")
+        self.saved = dict(notices.OVERRIDES)
+        notices.OVERRIDES.clear()
+        notices.OVERRIDES["npm:bare"] = ("bare.LICENSE", "From the upstream repository.")
+
+    def tearDown(self) -> None:
+        notices.OVERRIDES.clear()
+        notices.OVERRIDES.update(self.saved)
+        self.tmp.cleanup()
+
+    def test_the_reviewed_text_fills_the_gap(self) -> None:
+        found = notices.with_overrides(
+            [Notice("npm", "bare", "MIT", ()), Notice("npm", "full", "MIT", (("LICENSE", "x"),))],
+            self.folder,
+        )
+        self.assertEqual(
+            found[0], Notice("npm", "bare", "MIT", (("LICENSE", "reviewed text"),), "From the upstream repository.")
+        )
+        self.assertEqual(found[1], Notice("npm", "full", "MIT", (("LICENSE", "x"),)))
+
+    def test_a_package_with_no_text_and_no_override_fails(self) -> None:
+        with self.assertRaisesRegex(notices.NoticeError, "npm:other ships no licence file"):
+            notices.with_overrides(
+                [Notice("npm", "bare", "MIT", ()), Notice("npm", "other", "MIT", ())], self.folder
+            )
+        with self.assertRaisesRegex(notices.NoticeError, "python:zeta ships no licence file"):
+            notices.with_overrides([Notice("python", "zeta", "MIT", ())], self.folder)
+
+    def test_an_override_for_a_package_that_now_ships_a_file_fails(self) -> None:
+        with self.assertRaisesRegex(notices.NoticeError, "now ships its own licence file"):
+            notices.with_overrides([Notice("npm", "bare", "MIT", (("LICENSE", "x"),))], self.folder)
+
+    def test_an_override_for_a_package_that_is_gone_fails_only_for_its_ecosystem(self) -> None:
+        with self.assertRaisesRegex(notices.NoticeError, "not runtime packages: npm:bare"):
+            notices.with_overrides([Notice("npm", "full", "MIT", (("LICENSE", "x"),))], self.folder)
+        python_only = [Notice("python", "zeta", "MIT", (("LICENSE", "x"),))]
+        self.assertEqual(notices.with_overrides(python_only, self.folder), python_only)
+
+    def test_a_missing_reviewed_text_fails(self) -> None:
+        (self.folder / "bare.LICENSE").unlink()
+        with self.assertRaisesRegex(notices.NoticeError, "bare.LICENSE is missing"):
+            notices.with_overrides([Notice("npm", "bare", "MIT", ())], self.folder)
+
+    def test_every_committed_override_has_its_text(self) -> None:
+        for key, (file_name, source) in self.saved.items():
+            with self.subTest(key=key):
+                self.assertTrue((notices.OVERRIDE_FOLDER / file_name).is_file())
+                self.assertTrue(source.strip())
 
 
 class LicenceFileTest(unittest.TestCase):
@@ -176,7 +253,7 @@ class CommittedFileTest(unittest.TestCase):
         """The frontend lockfile is in the repository, so this check needs no installed packages."""
         lock = json.loads((ROOT / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
         runtime = {
-            (location.rsplit("node_modules/", 1)[-1], info.get("license"))
+            (location.removeprefix("node_modules/"), info.get("license"))
             for location, info in lock["packages"].items()
             if location and info.get("dev") is not True
         }
