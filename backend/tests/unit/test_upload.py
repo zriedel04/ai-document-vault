@@ -171,7 +171,6 @@ PRIVATE = "Diagnosis-Patient"
 @pytest.mark.parametrize(
     ("headers", "message"),
     [
-        ({}, "X-Vault-Filename is required"),
         ({"X-Vault-Filename": ""}, "X-Vault-Filename is required"),
         ({"X-Vault-Filename": f"{PRIVATE}%FF.txt"}, "not percent-encoded UTF-8"),
         ({"X-Vault-Filename": f"{PRIVATE}%ZZ.txt"}, "not percent-encoded UTF-8"),
@@ -206,6 +205,28 @@ def test_a_malformed_request_is_a_400_in_fixed_words(
     assert PRIVATE not in response.text
     assert rows(engine, blobs) == []
     assert staged(app) == []
+
+
+def test_a_missing_name_is_refused_before_anything_is_stored(
+    app: FastAPI, client: TestClient, engine: Engine
+) -> None:
+    """The header is required in the API schema, so a generated client cannot leave it out."""
+    response = send(client, TEXT, None)
+    assert response.status_code == 422
+    missing = {"type": "missing", "loc": ["header", "x-vault-filename"], "msg": "Field required"}
+    assert response.json()["detail"] == [missing | {"input": None}]
+    assert rows(engine, blobs) == []
+    assert staged(app) == []
+
+
+def test_the_name_header_is_required_in_the_api_schema(app: FastAPI) -> None:
+    operation = app.openapi()["paths"][URL]["post"]
+    required = {p["name"]: p.get("required", False) for p in operation["parameters"]}
+    assert required == {
+        "x-vault-filename": True,
+        "x-vault-batch": False,
+        "x-vault-last-modified": False,
+    }
 
 
 def test_digits_from_another_script_are_not_a_time() -> None:

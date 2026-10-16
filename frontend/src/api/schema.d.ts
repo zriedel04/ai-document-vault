@@ -157,8 +157,8 @@ export interface operations {
     upload_api_imports_upload_post: {
         parameters: {
             query?: never;
-            header?: {
-                "x-vault-filename"?: string | null;
+            header: {
+                "x-vault-filename": string;
                 "x-vault-batch"?: string | null;
                 "x-vault-last-modified"?: string | null;
             };

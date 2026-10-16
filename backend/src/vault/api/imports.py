@@ -74,9 +74,12 @@ def _bad_request(message: str) -> HTTPException:
     return HTTPException(status_code=400, detail=message)
 
 
-def parse_filename(header: str | None) -> str:
-    """The decoded file name, or a 400. A name is one name: no folders, no control characters."""
-    if header is None or not header:
+def parse_filename(header: str) -> str:
+    """The decoded file name, or a 400. A name is one name: no folders, no control characters.
+
+    A missing header never gets here: the route declares it required, so generated clients must
+    send it and FastAPI answers its absence with a 422 that names only the header."""
+    if not header:
         raise _bad_request("X-Vault-Filename is required")
     # unquote() leaves a broken escape (%ZZ, a lone %) as it is, and a header may carry Latin-1
     # bytes: only ASCII with complete escapes is what encodeURIComponent writes.
@@ -188,7 +191,7 @@ async def _receive(request: Request, target: Path, max_bytes: int) -> bool:
 async def upload(
     request: Request,
     _user: Annotated[LocalUser, Depends(current_user)],
-    x_vault_filename: Annotated[str | None, Header()] = None,
+    x_vault_filename: Annotated[str, Header()],
     x_vault_batch: Annotated[str | None, Header()] = None,
     x_vault_last_modified: Annotated[str | None, Header()] = None,
 ) -> UploadResult:

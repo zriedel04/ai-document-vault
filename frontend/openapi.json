@@ -203,17 +203,10 @@
           {
             "in": "header",
             "name": "x-vault-filename",
-            "required": false,
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Vault-Filename"
+              "title": "X-Vault-Filename",
+              "type": "string"
             }
           },
           {
