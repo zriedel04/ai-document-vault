@@ -70,9 +70,43 @@ class DriftTest(unittest.TestCase):
             ],
         )
 
-    def test_a_new_licence_text_alone_is_not_drift(self) -> None:
-        current = [Notice(n.ecosystem, n.name, n.licence, (("LICENSE", "new"),)) for n in sample()]
+    def test_a_changed_licence_text_is_drift(self) -> None:
+        """Codex #39: an update that keeps the licence but changes its notice needs regenerating."""
+        current = [
+            Notice(n.ecosystem, n.name, n.licence, (("LICENSE", "MIT text, 2027"),))
+            if n.name == "@scope/alpha"
+            else n
+            for n in sample()
+        ]
+        self.assertEqual(
+            notices.drift(self.committed, current, "npm"), ["~ @scope/alpha: licence text differs"]
+        )
+
+    def test_a_licence_file_added_or_removed_is_drift(self) -> None:
+        current = [
+            Notice(n.ecosystem, n.name, n.licence, (("LICENSE", "now has one"),))
+            if n.name == "beta"
+            else Notice(n.ecosystem, n.name, n.licence, ())
+            if n.name == "@scope/alpha"
+            else n
+            for n in sample()
+        ]
+        self.assertEqual(
+            notices.drift(self.committed, current, "npm"),
+            ["~ @scope/alpha: licence text differs", "~ beta: licence text differs"],
+        )
+
+    def test_a_text_change_in_the_other_ecosystem_is_not_reported(self) -> None:
+        current = [
+            Notice(n.ecosystem, n.name, n.licence, (("LICENSE.txt", "new BSD text"),))
+            if n.ecosystem == "python"
+            else n
+            for n in sample()
+        ]
         self.assertEqual(notices.drift(self.committed, current, "npm"), [])
+        self.assertEqual(
+            notices.drift(self.committed, current, "python"), ["~ zeta: licence text differs"]
+        )
 
     def test_one_ecosystem_is_compared_without_the_other(self) -> None:
         only_npm = [n for n in sample() if n.ecosystem == "npm"]

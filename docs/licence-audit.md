@@ -24,7 +24,7 @@ The plan asked for this audit, and for the generated [third-party notices](../TH
 
 - **Python**: `scripts/check_python_licenses.py` reads every installed package's licence metadata (the SPDX expression first, then classifiers, then a short `License` field) and fails on anything not allowed or not readable. CI runs it on the full backend environment, on the runtime-only environment with `--strict` (no reviewed exceptions), and on the demo generator's environment.
 - **npm**: `scripts/check_npm_licenses.py` reads the licence of every package in `frontend/package-lock.json`. CI runs it on everything and, with `--strict`, on the runtime packages (those not marked `dev`).
-- **Notices**: `scripts/third_party_notices.py write` produced [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) from the runtime packages' own licence files. CI checks that its package list still matches the lockfile and the runtime environment (`check npm`, `check python`).
+- **Notices**: `scripts/third_party_notices.py write` produced [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) from the runtime packages' own licence files. CI checks that its package list and each package's licence texts still match the lockfile and the runtime environment (`check npm`, `check python`). Versions are not compared, so an update that keeps the licence text needs no regeneration.
 - **Manual review**: the reviewed exceptions, the spike extras, models, external programs and the committed assets, which no script reads.
 
 The checks read package metadata. They do not open the source to look for files under a different licence than the package declares; that is the usual limit of an automated audit.
@@ -86,6 +86,6 @@ Apache-2.0 ([ADR 0017](decisions/0017-project-licence.md)). Every licence above 
 
 ## Keeping this current
 
-- A new runtime dependency fails CI until `THIRD_PARTY_NOTICES.md` is regenerated, and fails the licence checks if its licence is not allowed.
+- A new, removed or relicensed runtime dependency, or one whose licence text changed, fails CI until `THIRD_PARTY_NOTICES.md` is regenerated; a disallowed licence also fails the licence checks.
 - A new reviewed exception goes in the check script's `REVIEWED` table, with its reason, and in the table above.
 - Review this audit again before the first tagged release and whenever a spike result turns a candidate into a dependency.

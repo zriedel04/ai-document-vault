@@ -16,10 +16,11 @@ after `npm ci` in `frontend/`:
     uv run --no-sync python ../scripts/third_party_notices.py write --ignore vault
     uv sync --locked
 
-`check npm` and `check python` compare the committed file's package table for one ecosystem with
-what is installed now (name and licence, not version or text), so CI fails when a runtime
-dependency is added, removed or relicensed without the notices being regenerated. Version bumps
-do not fail it; the texts are refreshed whenever the file is regenerated.
+`check npm` and `check python` compare the committed file for one ecosystem with what is installed
+now: the package table (name and licence) and each package's licence texts. CI fails when a
+runtime dependency is added, removed, relicensed or ships a changed licence text (a new copyright
+line) without the notices being regenerated. The version is not compared, so a bump that keeps the
+licence text needs no regeneration.
 
 Standard library only.
 """
@@ -149,13 +150,38 @@ def table(text: str, ecosystem: str) -> set[tuple[str, str]]:
     }
 
 
+def sections(text: str, ecosystem: str) -> dict[str, str]:
+    """Each package's section (licence and texts) for one ecosystem, by package name."""
+    found = {}
+    for block in text.split("\n## ")[1:]:
+        heading, _, body = block.partition("\n")
+        prefix = f"{ecosystem}: "
+        if heading.startswith(prefix):
+            found[heading.removeprefix(prefix)] = body.strip()
+    return found
+
+
 def drift(committed: str, notices: Iterable[Notice], ecosystem: str) -> list[str]:
-    """What the committed table lacks (+) or has too many (-) for one ecosystem."""
-    current = {(n.name, n.licence) for n in notices if n.ecosystem == ecosystem}
+    """What the committed file lacks (+), has too many (-) or holds an old text for (~).
+
+    The version is not compared, so a version bump that keeps the licence and its text needs no
+    regeneration; a changed licence text (a new copyright line) does.
+    """
+    mine = [n for n in notices if n.ecosystem == ecosystem]
+    current = {(n.name, n.licence) for n in mine}
     listed = table(committed, ecosystem)
-    return [f"+ {name}: {licence}" for name, licence in sorted(current - listed)] + [
+    problems = [f"+ {name}: {licence}" for name, licence in sorted(current - listed)] + [
         f"- {name}: {licence}" for name, licence in sorted(listed - current)
     ]
+    reported = {name for name, _licence in current ^ listed}  # a changed licence says it already
+    written = sections(committed, ecosystem)
+    expected = sections(render(mine), ecosystem)
+    problems += [
+        f"~ {name}: licence text differs"
+        for name in sorted(expected)
+        if name not in reported and name in written and written[name] != expected[name]
+    ]
+    return problems
 
 
 def main(argv: Sequence[str] | None = None) -> int:
