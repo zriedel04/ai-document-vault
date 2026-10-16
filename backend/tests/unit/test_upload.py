@@ -425,10 +425,11 @@ def test_a_part_larger_than_a_chunk_is_written_in_chunk_slices(
     assert written == [16] * 32
 
 
-def test_no_more_imports_run_at_once_than_there_are_slots(
+def test_no_more_uploads_are_staged_or_imported_at_once_than_there_are_slots(
     app: FastAPI, token: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex #32: waiting imports must not fill the shared worker pool the other routes use."""
+    """Codex #32: waiting uploads must not fill the shared worker pool the other routes use, with
+    their imports or their staging writes, nor pile up staged files while imports run."""
     importer: Importer = app.state.importer
     real_import = importer.import_file
     lock = threading.Lock()
@@ -449,7 +450,7 @@ def test_no_more_imports_run_at_once_than_there_are_slots(
                 running -= 1
 
     monkeypatch.setattr(importer, "import_file", slow_import)
-    uploads = imports.IMPORT_SLOTS + 2
+    uploads = imports.UPLOAD_SLOTS + 2
     headers = {"Authorization": f"Bearer {token}", "Origin": LOCAL}
     with (
         TestClient(app, base_url=LOCAL, headers=headers) as shared,  # one event loop for all
@@ -460,15 +461,17 @@ def test_no_more_imports_run_at_once_than_there_are_slots(
             for n in range(uploads)
         ]
         deadline = time.monotonic() + 10
-        while running < imports.IMPORT_SLOTS and time.monotonic() < deadline:
+        while running < imports.UPLOAD_SLOTS and time.monotonic() < deadline:
             time.sleep(0.01)
         time.sleep(0.2)  # time for a third import to start, if nothing stopped it
-        assert running == imports.IMPORT_SLOTS
+        assert running == imports.UPLOAD_SLOTS
+        assert len(staged(app)) == imports.UPLOAD_SLOTS  # the others have not been read yet
         assert shared.get("/api/health").status_code == 200  # the page is still answered
         release.set()
         results = [future.result(timeout=10).json()["outcome"] for future in futures]
     assert results == ["imported"] * uploads
-    assert most == imports.IMPORT_SLOTS
+    assert most == imports.UPLOAD_SLOTS
+    assert staged(app) == []
 
 
 def test_the_route_asks_for_the_current_user(
