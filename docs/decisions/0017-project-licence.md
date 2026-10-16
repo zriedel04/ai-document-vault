@@ -11,7 +11,7 @@ ADR 0012 left the project's own licence open until publication, choosing between
 
 ## Decision
 
-The project is licensed under the Apache License, Version 2.0. The full text is in `LICENSE` at the repository root, and the backend, frontend and demo generator declare `Apache-2.0` in their package metadata.
+The project is licensed under the Apache License, Version 2.0. The full text is in `LICENSE` at the repository root, and the backend, frontend and demo generator declare `Apache-2.0` in their package metadata. The backend's wheel and sdist can only include files from its own folder, so `backend/LICENSE` is a copy of the root file, listed in `license-files`; `scripts/tests/test_project_licence.py` fails if any built package lacks the copy or it differs from the root.
 
 ## Alternatives considered
 
