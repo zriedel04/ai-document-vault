@@ -106,7 +106,10 @@ def test_start_up_recovers_the_blob_store_from_a_crash(vault_dir: Any) -> None:
     (vault_dir / "blobs" / ".tmp" / "half-copy").write_bytes(b"hel")
     (vault_dir / "blobs" / ".tmp" / "lock.lock").write_bytes(b"")
     app = create_app(vault_settings(vault_dir))
-    assert stat.S_IMODE(os.stat(blob).st_mode) & 0o222 == 0
+    # Sealed first, then moved aside: no row records it (blobs/orphans/, vault.ingest.orphans).
+    set_aside = vault_dir / "blobs" / "orphans" / blob.name
+    assert not blob.exists()
+    assert stat.S_IMODE(os.stat(set_aside).st_mode) & 0o222 == 0
     assert list((vault_dir / "blobs" / ".tmp").iterdir()) == []
     assert isinstance(app.state.blobs, BlobStore)
     assert app.state.blobs.root == vault_dir / "blobs"

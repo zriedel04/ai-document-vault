@@ -46,6 +46,8 @@ EXTENSION: Final = re.compile(r"[a-z0-9]{1,10}")
 BLOB_NAME: Final = re.compile(r"([0-9a-f]{64})(?:\.([a-z0-9]{1,10}))?")
 ALGORITHM: Final = "sha256"
 TEMP_FOLDER: Final = ".tmp"
+ORPHAN_FOLDER: Final = "orphans"  # blobs no database row uses, moved aside at start-up
+ORPHAN_NAME_TRIES: Final = 1000
 CHUNK_BYTES: Final = 1024 * 1024
 READ_ONLY: Final = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 WRITABLE: Final = stat.S_IWUSR
@@ -476,7 +478,7 @@ class BlobStore:
         The only folders that are part of the layout are ``aa`` and ``aa/bb`` (two hex digits each).
         Anything else is reported and not entered: a file out of place, a folder where a blob
         belongs (even one named like a blob), a folder with another name, and any link. The
-        temporary folder is not part of the store's content.
+        temporary folder and the orphan folder are not part of the store's content.
         """
         blobs: list[tuple[str, Path]] = []
         strays: list[Path] = []
@@ -520,6 +522,52 @@ class BlobStore:
 
     def iter_hashes(self) -> Iterator[str]:
         yield from (sha256 for sha256, _ in self.scan().blobs)
+
+    # --- Setting aside ---------------------------------------------------------------------
+
+    def _orphan_folder(self) -> Path:
+        """The folder for set-aside blobs, made if it is missing. Anything but a real folder (a
+        link, a junction, a file) is refused, so a blob is never moved out of the vault."""
+        folder = self.root / ORPHAN_FOLDER
+        if _lstat(folder) is None:
+            folder.mkdir(parents=True, exist_ok=True)
+        if not _is_real_dir(_lstat(folder)):
+            msg = "something that is not a folder is where the orphan folder belongs"
+            raise BlobIntegrityError(msg)
+        return folder
+
+    def set_aside(self, sha256: str) -> Path:
+        """Move the blob with this hash out of the store into ``orphans/``, unchanged and read-only,
+        and return where it went. Nothing is deleted: a wrong verdict is undone by moving the file
+        back. A name already taken in ``orphans/`` (the same blob set aside after an earlier crash)
+        is kept, and this one gets a numbered name beside it (``<hash>.<ext>.1``). The folder sits
+        in the store's own folder, on the same volume, so the move is a rename.
+
+        Raises ``BlobNotFoundError`` if there is no such blob and ``BlobIntegrityError`` if the
+        hash is stored under two names or the orphan folder is not a real folder.
+        """
+        with self._claim(sha256):
+            path = self.find(sha256)
+            if path is None:
+                msg = "no blob has this hash"
+                raise BlobNotFoundError(msg)
+            folder = self._orphan_folder()
+            for attempt in range(ORPHAN_NAME_TRIES):
+                target = folder / (path.name if attempt == 0 else f"{path.name}.{attempt}")
+                if _lstat(target) is None:
+                    break
+            else:
+                msg = "the orphan folder holds too many copies of this blob"
+                raise BlobIntegrityError(msg)
+            # Start-up only, before any import: nothing else can take the name in between. On
+            # Windows a rename onto an existing name fails rather than replace it.
+            os.rename(path, target)
+            for empty in (path.parent, path.parent.parent):
+                try:
+                    empty.rmdir()
+                except OSError:
+                    break  # not empty: other blobs share this prefix
+            return target
 
     # --- Deleting --------------------------------------------------------------------------
 
