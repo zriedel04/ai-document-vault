@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import URL, Engine, create_engine, event
+from sqlalchemy import URL, Connection, Engine, create_engine, event
 
 BUSY_TIMEOUT_MS = 5000
 
@@ -36,3 +38,19 @@ def create_vault_engine(db_file: Path) -> Engine:
     engine = create_engine(URL.create("sqlite+pysqlite", database=str(db_file)))
     event.listen(engine, "connect", _configure)
     return engine
+
+
+@contextmanager
+def read_snapshot(engine: Engine) -> Iterator[Connection]:
+    """A connection whose reads all see the database as it was at the first one.
+
+    The driver opens a transaction only before a write, so in ``engine.begin()`` two reads can see
+    a commit made between them. An explicit ``BEGIN`` makes SQLite keep one snapshot for the reads
+    until the block ends; nothing is written, and the transaction is rolled back at the end.
+    """
+    with engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN")
+        try:
+            yield connection
+        finally:
+            connection.rollback()

@@ -4,6 +4,72 @@
  */
 
 export interface paths {
+    "/api/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Documents
+         * @description One page of documents in use (or, with ``trash``, of the trash), sorted by when they were
+         *     added, their name or their size, newest first unless ``order`` says otherwise. ``total``
+         *     counts every document the list holds, so the page can show how many pages there are.
+         */
+        get: operations["read_documents_api_documents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Document
+         * @description One document, in use or in the trash: what the list shows, plus its hash, current version,
+         *     every import (oldest first; the first names the document) and its processing jobs (in the
+         *     order of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message
+         *     does not repeat it.
+         */
+        get: operations["read_document_api_documents__document_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Document
+         * @description The document's current bytes, exactly as imported, saved under the name of its first import.
+         *     Always an attachment, so the browser saves it and never shows it as a page of this origin.
+         */
+        get: operations["download_document_api_documents__document_id__file_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -69,6 +135,88 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** DocumentDetail */
+        DocumentDetail: {
+            /**
+             * Added At
+             * Format: date-time
+             */
+            added_at: string;
+            /** Extension */
+            extension: string;
+            /** Id */
+            id: string;
+            /** Import Sources */
+            import_sources: components["schemas"]["Source"][];
+            /** Jobs */
+            jobs: components["schemas"]["Job"][];
+            /** Local Only */
+            local_only: boolean;
+            /** Mime */
+            mime: string;
+            /** Name */
+            name: string | null;
+            /** Sha256 */
+            sha256: string;
+            /** Size */
+            size: number;
+            /** Sources */
+            sources: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "processing" | "searchable" | "ready" | "failed" | "trashed";
+            /** Trashed At */
+            trashed_at: string | null;
+            /** Version Id */
+            version_id: string;
+            /** Version No */
+            version_no: number;
+            /**
+             * Version Origin
+             * @enum {string}
+             */
+            version_origin: "import" | "user" | "ai_copy";
+        };
+        /** DocumentItem */
+        DocumentItem: {
+            /**
+             * Added At
+             * Format: date-time
+             */
+            added_at: string;
+            /** Extension */
+            extension: string;
+            /** Id */
+            id: string;
+            /** Mime */
+            mime: string;
+            /** Name */
+            name: string | null;
+            /** Size */
+            size: number;
+            /** Sources */
+            sources: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "processing" | "searchable" | "ready" | "failed" | "trashed";
+            /** Trashed At */
+            trashed_at: string | null;
+        };
+        /** DocumentList */
+        DocumentList: {
+            /** Items */
+            items: components["schemas"]["DocumentItem"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -86,6 +234,27 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** Job */
+        Job: {
+            /** Attempts */
+            attempts: number;
+            /** Finished At */
+            finished_at: string | null;
+            /** Last Error */
+            last_error: string | null;
+            /** Max Attempts */
+            max_attempts: number;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "extract" | "ocr" | "metadata" | "chunk" | "embed" | "enrich";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "done" | "failed";
+        };
         /** Me */
         Me: {
             /** Id */
@@ -93,6 +262,11 @@ export interface components {
             /** Name */
             name: string;
         };
+        /**
+         * Order
+         * @enum {string}
+         */
+        Order: "asc" | "desc";
         /**
          * Outcome
          * @enum {string}
@@ -103,6 +277,36 @@ export interface components {
          * @enum {string}
          */
         Reason: "not_a_file" | "unreadable" | "empty" | "too_large" | "unsupported_extension" | "content_mismatch" | "legacy_or_encrypted_office" | "unreadable_archive" | "encrypted_archive" | "unsafe_archive";
+        /**
+         * SortKey
+         * @enum {string}
+         */
+        SortKey: "added" | "name" | "size";
+        /** Source */
+        Source: {
+            /** Batch Id */
+            batch_id: string;
+            /** Filename */
+            filename: string;
+            /** Folders */
+            folders: string[];
+            /** Id */
+            id: string;
+            /**
+             * Imported At
+             * Format: date-time
+             */
+            imported_at: string;
+            /**
+             * Method
+             * @enum {string}
+             */
+            method: "upload" | "folder" | "watch";
+            /** Original Mtime */
+            original_mtime: string | null;
+            /** Original Path */
+            original_path: string | null;
+        };
         /** UploadResult */
         UploadResult: {
             /** Batch Id */
@@ -134,6 +338,124 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    read_documents_api_documents_get: {
+        parameters: {
+            query?: {
+                sort?: components["schemas"]["SortKey"];
+                order?: components["schemas"]["Order"];
+                limit?: number;
+                offset?: number;
+                trash?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_document_api_documents__document_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description No such document */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_document_api_documents__document_id__file_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The original file, as an attachment, with its own media type */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /** @description No such document */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The stored copy is missing, or two files claim its hash */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     health_api_health_get: {
         parameters: {
             query?: never;
