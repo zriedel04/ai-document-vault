@@ -1,5 +1,6 @@
 import { RouterProvider } from "@tanstack/react-router";
 
+import { ApiProvider } from "./api/api-context";
 import type { Api } from "./api/client";
 import { HealthProvider } from "./api/health-context";
 import { SessionProvider } from "./api/session-context";
@@ -11,10 +12,12 @@ export function App({ api, router }: { api: Api; router: AppRouter }) {
   const health = useHealth(api);
   const session = useSession(api);
   return (
-    <HealthProvider value={health}>
-      <SessionProvider value={session}>
-        <RouterProvider router={router} />
-      </SessionProvider>
-    </HealthProvider>
+    <ApiProvider value={api}>
+      <HealthProvider value={health}>
+        <SessionProvider value={session}>
+          <RouterProvider router={router} />
+        </SessionProvider>
+      </HealthProvider>
+    </ApiProvider>
   );
 }
