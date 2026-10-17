@@ -10,6 +10,7 @@ import {
   type SortKey,
   errorFor,
 } from "./documents";
+import { useSessionState } from "./session-context";
 
 export type Loaded<T> =
   { status: "loading" } | { status: "ok"; data: T } | { status: "error"; error: DocumentsError };
@@ -23,10 +24,14 @@ export interface Request<T> {
 /**
  * Run `load` whenever `key` changes, and report only the answer to the latest request: an answer
  * to an older key (the previous page, say) is never shown for the current one.
+ *
+ * A refused token (401) also asks the shared session again, so the token notice comes back: the
+ * token can stop working while the page is open (a new `local-token` after a restart).
  */
 function useRequest<T>(key: string, load: () => Promise<Loaded<T>>): Request<T> {
   const [answer, setAnswer] = useState<{ key: string; state: Loaded<T> } | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const { recheck } = useSessionState();
   const current = `${String(attempt)}:${key}`;
 
   useEffect(() => {
@@ -34,7 +39,9 @@ function useRequest<T>(key: string, load: () => Promise<Loaded<T>>): Request<T> 
     void load()
       .catch((): Loaded<T> => ({ status: "error", error: "unreachable" }))
       .then((state) => {
-        if (!cancelled) setAnswer({ key: current, state });
+        if (cancelled) return;
+        setAnswer({ key: current, state });
+        if (state.status === "error" && state.error === "needs-token") recheck();
       });
     return () => {
       cancelled = true;

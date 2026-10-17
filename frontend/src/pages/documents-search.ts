@@ -1,4 +1,4 @@
-import { ORDERS, type Order, SORT_KEYS, type SortKey } from "../api/documents";
+import { MAX_PAGE, ORDERS, type Order, SORT_KEYS, type SortKey } from "../api/documents";
 
 /** What the document list shows, kept in the address so a page can be bookmarked or shared. */
 export interface DocumentsSearch {
@@ -22,7 +22,8 @@ function oneOf<T extends string>(values: readonly T[], value: unknown, fallback:
 /**
  * Read the address's search part. Each value must be exactly one the list understands (a page is
  * a whole number from 1); anything else, typed by hand or left over from an old link, falls back
- * to the default instead of reaching the backend.
+ * to the default instead of reaching the backend. A page beyond the last one the backend can
+ * reach (`MAX_PAGE`) becomes that page, and the list then moves to its real last page.
  */
 export function parseDocumentsSearch(search: Record<string, unknown>): DocumentsSearch {
   const page = search.page;
@@ -31,7 +32,7 @@ export function parseDocumentsSearch(search: Record<string, unknown>): Documents
     order: oneOf(ORDERS, search.order, DEFAULT_SEARCH.order),
     page:
       typeof page === "number" && Number.isSafeInteger(page) && page >= 1
-        ? page
+        ? Math.min(page, MAX_PAGE)
         : DEFAULT_SEARCH.page,
     trash: search.trash === true,
   };

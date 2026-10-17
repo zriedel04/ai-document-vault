@@ -14,6 +14,10 @@ export const ORDERS = ["asc", "desc"] as const satisfies readonly Order[];
 
 /** Documents on one page of the list; the backend allows 1 to 100. */
 export const PAGE_SIZE = 50;
+/** The largest `offset` the backend's list accepts (`MAX_OFFSET` in `api/documents.py`). */
+export const MAX_OFFSET = 1_000_000_000;
+/** The last page whose offset the backend accepts. */
+export const MAX_PAGE = Math.floor(MAX_OFFSET / PAGE_SIZE) + 1;
 
 /** Why a request for documents gave no answer. */
 export type DocumentsError =

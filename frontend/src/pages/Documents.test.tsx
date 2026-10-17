@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type DocumentDetail,
   type DocumentItem,
+  MAX_OFFSET,
+  MAX_PAGE,
   ORDERS,
   PAGE_SIZE,
   SORT_KEYS,
@@ -96,6 +98,37 @@ function listOf(items: DocumentItem[], total = items.length): Handler {
           offset: Number(url.searchParams.get("offset")),
         })
       : undefined;
+}
+
+/**
+ * A backend whose token can change while the page is open, as when the server restarted with a
+ * new `local-token`: every protected path refuses any token but `accepted.token`.
+ */
+function restartingBackend(handler: Handler) {
+  const accepted = { token: TEST_TOKEN };
+  const spy = vi.fn<FetchFn>((input) => {
+    const request = input as Request;
+    const url = new URL(request.url);
+    const isProtected =
+      url.pathname === "/api/session" || url.pathname.startsWith("/api/documents");
+    if (isProtected && request.headers.get("authorization") !== `Bearer ${accepted.token}`) {
+      return Promise.resolve(jsonResponse({ detail: "request refused" }, 401));
+    }
+    if (url.pathname === "/api/session") {
+      return Promise.resolve(jsonResponse({ id: "local", name: "Local user" }));
+    }
+    const answer = isProtected ? handler(request, url) : undefined;
+    return answer === undefined ? healthyBackend(input) : Promise.resolve(answer);
+  });
+  return { spy, accepted };
+}
+
+const NEW_TOKEN = "n3w-token-after-restart_".repeat(2);
+
+async function pasteToken(token: string) {
+  expect(await screen.findByText("The access token was not accepted")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("Access token"), token);
+  await userEvent.click(screen.getByRole("button", { name: "Save token" }));
 }
 
 function listRequests(spy: ReturnType<typeof backend>): URLSearchParams[] {
@@ -201,6 +234,36 @@ describe("document list", () => {
       expect(listRequests(spy).at(-1)?.get("offset")).toBe(String(2 * PAGE_SIZE));
     });
     expect(await screen.findByRole("table")).toBeInTheDocument();
+  });
+
+  it("brings the token notice back when the backend stops accepting the token", async () => {
+    const { spy, accepted } = restartingBackend(listOf([item()], 120));
+    await renderApp({ route: "/documents", fetch: spy, token: TEST_TOKEN });
+    await screen.findByRole("table");
+    expect(screen.queryByText("Access token")).toBeNull();
+
+    accepted.token = NEW_TOKEN;
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await pasteToken(NEW_TOKEN);
+
+    expect(await screen.findByRole("table")).toBeInTheDocument();
+    const last = spy.mock.calls.map(([input]) => input as Request).at(-1);
+    expect(last?.headers.get("authorization")).toBe(`Bearer ${NEW_TOKEN}`);
+    expect(screen.queryByText("The access token was not accepted")).toBeNull();
+  });
+
+  it("never asks the backend for a page past the largest offset it accepts", async () => {
+    const spy = backend(listOf([item()], 120));
+    await renderApp({
+      route: `/documents?page=${String(MAX_PAGE + 1)}`,
+      fetch: spy,
+      token: TEST_TOKEN,
+    });
+    await screen.findByRole("table");
+
+    const offsets = listRequests(spy).map((query) => Number(query.get("offset")));
+    expect(offsets.length).toBeGreaterThan(0);
+    expect(Math.max(...offsets)).toBeLessThanOrEqual(MAX_OFFSET);
   });
 
   it("ignores search values it does not understand instead of sending them", async () => {
@@ -390,6 +453,22 @@ describe("download original", () => {
     expect(fileRequest?.headers.get("authorization")).toBe(`Bearer ${TEST_TOKEN}`);
   });
 
+  it("brings the token notice back when the download is refused", async () => {
+    const { saved } = captureSave();
+    const { spy, accepted } = restartingBackend((_request, url) =>
+      url.pathname === `/api/documents/${ID}` ? jsonResponse(detail()) : undefined,
+    );
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    const button = await screen.findByRole("button", { name: "Download original" });
+
+    accepted.token = NEW_TOKEN;
+    await userEvent.click(button);
+    await pasteToken(NEW_TOKEN);
+
+    expect(await screen.findByRole("button", { name: "Download original" })).toBeInTheDocument();
+    expect(saved).toEqual([]);
+  });
+
   it("says when the stored copy is unavailable and saves nothing", async () => {
     const { saved } = captureSave();
     const spy = backend((_request, url) => {
@@ -445,9 +524,26 @@ describe("helpers", () => {
     [{ page: 0 }, DEFAULT_SEARCH],
     [{ page: 1.5 }, DEFAULT_SEARCH],
     [{ page: Number.MAX_SAFE_INTEGER + 1 }, DEFAULT_SEARCH],
+    [{ page: MAX_PAGE }, { ...DEFAULT_SEARCH, page: MAX_PAGE }],
+    [{ page: MAX_PAGE + 1 }, { ...DEFAULT_SEARCH, page: MAX_PAGE }],
+    [{ page: Number.MAX_SAFE_INTEGER }, { ...DEFAULT_SEARCH, page: MAX_PAGE }],
     [{ trash: 1 }, DEFAULT_SEARCH],
   ])("reads the address %j", (search, expected) => {
     expect(parseDocumentsSearch(search)).toEqual(expected);
+  });
+
+  it("pages only as far as the backend's largest offset", () => {
+    const schema = JSON.parse(readFileSync("openapi.json", "utf8")) as {
+      paths: {
+        "/api/documents": { get: { parameters: { name: string; schema: { maximum?: number } }[] } };
+      };
+    };
+    const offset = schema.paths["/api/documents"].get.parameters.find(
+      (parameter) => parameter.name === "offset",
+    );
+    expect(offset?.schema.maximum).toBe(MAX_OFFSET);
+    expect((MAX_PAGE - 1) * PAGE_SIZE).toBeLessThanOrEqual(MAX_OFFSET);
+    expect(MAX_PAGE * PAGE_SIZE).toBeGreaterThan(MAX_OFFSET);
   });
 
   it("knows every sort and order the backend accepts, and no other", () => {

@@ -113,6 +113,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Details({ document }: { document: Detail }) {
   const api = useApi();
+  const { recheck } = useSessionState();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<DocumentsError | null>(null);
 
@@ -122,6 +123,7 @@ function Details({ document }: { document: Detail }) {
     void saveOriginal(api, document).then((error) => {
       setSaving(false);
       setSaveError(error);
+      if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
     });
   };
 
