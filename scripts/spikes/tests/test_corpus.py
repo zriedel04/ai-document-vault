@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -444,6 +445,19 @@ class ReadingTest(unittest.TestCase):
             self.skipTest("cannot create symbolic links here")
         with self.assertRaises(c.SpikeInputError):
             c.safe_file(self.root, "a/link.txt")
+
+    def test_a_hard_link_in_the_corpus_is_refused(self) -> None:
+        # A hard link has no target for resolve() to follow: its other name can be a private
+        # file anywhere on the drive, while the run is labelled by the corpus folder.
+        outside = self.root.parent / "outside3.txt"
+        outside.write_text("secret", encoding="utf-8")
+        self.addCleanup(outside.unlink)
+        try:
+            os.link(outside, self.root / "a" / "linked.txt")
+        except OSError:
+            self.skipTest("cannot create hard links here")
+        with self.assertRaisesRegex(c.SpikeInputError, "hard link"):
+            c.safe_file(self.root, "a/linked.txt")
 
     def docx_document(self, name: str) -> c.Document:
         return c.Document(f"a/{name}", "docx", None, False, None)

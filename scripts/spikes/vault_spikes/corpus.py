@@ -10,13 +10,15 @@ from __future__ import annotations
 import codecs
 import hashlib
 import json
+import os
 import posixpath
 import re
+import stat
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import yaml
 
@@ -113,6 +115,78 @@ def read_owner_text(path: Path, what: str) -> str:
         msg = f"{what} is not text this script can read; save it as UTF-8"
         raise SpikeInputError(msg)
     return text
+
+
+def files_below(root: Path, suffixes: frozenset[str]) -> list[Path]:
+    """Every file in ``root`` and its subfolders whose suffix (in any case) is in ``suffixes``,
+    sorted by path, so one run can take a folder tree such as ``demo/corpus/``.
+
+    A link anywhere in the tree stops the run (:func:`is_link`): a symbolic link to a folder or a
+    file, a Windows junction (which ``os.walk`` enters, since it is not a symbolic link) or another
+    reparse point. Followed, one could take the walk outside the tree, so a run on a folder inside
+    ``demo/corpus/`` would report someone's own files as public data, or round a loop; skipped,
+    its files would leave the measurement unseen. A folder that cannot be listed stops the run
+    too, for the same reason (``os.walk`` would skip it without a word).
+    """
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    found: list[Path] = []
+    for folder, subfolders, names in os.walk(root, onerror=fail):
+        for name in (*subfolders, *names):
+            if is_link(Path(folder) / name):
+                msg = "the folder holds a symbolic, junction or hard link; the spike follows none"
+                raise SpikeInputError(msg)
+        subfolders.sort()
+        found.extend(
+            path
+            for path in (Path(folder) / name for name in names)
+            if path.suffix.lower() in suffixes and path.is_file()
+        )
+    return sorted(found)
+
+
+_REPARSE_POINT: Final = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def is_link(path: Path) -> bool:
+    """Is ``path`` itself a link: a symbolic link, on Windows a junction or any other reparse
+    point (``os.lstat`` does not follow it), or a file with more than one hard link? Junctions
+    have the reparse attribute, not the symbolic-link mode, so ``Path.is_symlink`` misses them,
+    and a hard link is a regular file whose other name can sit anywhere on the same drive, so a
+    private file linked into ``demo/corpus`` would be read as public data."""
+    status = os.lstat(path)
+    attributes = getattr(status, "st_file_attributes", 0)
+    hard_linked = stat.S_ISREG(status.st_mode) and status.st_nlink > 1
+    return stat.S_ISLNK(status.st_mode) or bool(attributes & _REPARSE_POINT) or hard_linked
+
+
+def reference_folder(file: Path, root: Path, references: Path | None) -> Path:
+    """Where the reference files of ``file``, found by :func:`files_below` under ``root``, are:
+    next to it, or with ``references`` at the same path relative to that folder as ``file`` has
+    to ``root`` (``root/receipts/a.jpg`` has ``references/receipts/a.txt``).
+
+    A link below ``references`` stops the run, as one below ``root`` does in :func:`files_below`:
+    the references are a tree of their own that no walk checks, and a linked folder in it would
+    take the reference texts from outside while the run is labelled by the folder it names. Each
+    reference file is checked with :func:`not_a_link` before it is read.
+    """
+    if references is None:
+        return file.parent
+    folder = references
+    for part in file.parent.relative_to(root).parts:
+        folder = not_a_link(folder / part)
+    return folder
+
+
+def not_a_link(path: Path) -> Path:
+    """``path``, unless it is a link (:func:`is_link`), which stops the run. A path that does not
+    exist is returned as it is."""
+    if os.path.lexists(path) and is_link(path):
+        msg = "a reference path is a symbolic, junction or hard link; the spike follows none"
+        raise SpikeInputError(msg)
+    return path
 
 
 def _mapping(value: object, what: str) -> dict[str, Any]:
@@ -348,11 +422,18 @@ def canonical_paths(documents: list[Document]) -> dict[str, str]:
 
 
 def safe_file(folder: Path, relative: str) -> Path:
-    """``relative`` inside ``folder``, or SpikeInputError if it climbs out or is not a file."""
+    """``relative`` inside ``folder``, or SpikeInputError if it climbs out or is not a file.
+
+    ``resolve`` follows symbolic links and junctions, so one that leads out of the folder is
+    refused here; a hard link has no target to resolve and is refused by :func:`is_link`, since
+    its other name can be anywhere on the drive and the run is labelled by the folder."""
     root = folder.resolve()
     candidate = (root / relative).resolve()
     if not candidate.is_relative_to(root) or not candidate.is_file():
         msg = "a listed document is missing or outside the corpus folder"
+        raise SpikeInputError(msg)
+    if is_link(candidate):
+        msg = "a listed document is a hard link; the spike reads none"
         raise SpikeInputError(msg)
     return candidate
 

@@ -1,0 +1,18 @@
+CS 350: Operating Systems - Course Syllabus
+Lakeshore Institute of Technology, Department of Computer Science. Fall 2026.
+Course information
+The course meets on Mondays and Wednesdays from 11:00 AM to 12:15 PM. Instructor: Prof. Mei Tanaka, mei.tanaka@lit.example. Her office hours are on Tuesdays from 1:00 PM to 3:00 PM.
+Topics
+- Processes and threads
+- CPU scheduling
+- Memory management and virtual memory
+- File systems
+Grading
+- Programming projects: 40 percent
+- Two in-class quizzes: 10 percent each
+- Final exam: 40 percent
+Final exam
+The final exam is on Wednesday, December 9, 2026 at 1:00 PM.
+One sheet of handwritten notes is allowed.
+Projects
+There are four programming projects. Each is done individually and submitted through the course portal.
