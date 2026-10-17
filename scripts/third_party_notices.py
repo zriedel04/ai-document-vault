@@ -54,7 +54,32 @@ NOTICES = ROOT / "THIRD_PARTY_NOTICES.md"
 LOCKFILE = ROOT / "frontend" / "package-lock.json"
 NODE_MODULES = ROOT / "frontend"  # lockfile locations are relative to the frontend folder
 
-LICENCE_FILE = re.compile(r"(?i)(licen[cs]e|copying|notice|copyrightnotice)(-[a-z0-9]+)?(\.(md|txt|rst))?")
+# A file is notice material when its name says so (LICENSE, LICENCE.txt, LICENSE-MIT, LICENSE.BSD,
+# COPYING.LESSER, NOTICE, COPYRIGHT, UNLICENSE, THIRD-PARTY-NOTICES.md...) or when it sits in a
+# folder kept for licence texts (LICENSES/GPL-3.0.txt, and every file of a wheel's
+# .dist-info/licenses/, which PEP 639 lets have any name).
+LICENCE_NAME = re.compile(
+    r"(?i)(un)?(licen[cs]es?|copying|notices?|copyrights?|copyrightnotice"
+    r"|third[-_ ]?party[-_ ]?notices?)([-._ ][a-z0-9]+)*"
+)
+LICENCE_FOLDER = re.compile(
+    r"(?i)licen[cs]es?|notices?|copying|copyrights?|third[-_ ]?party[-_ ]?notices?"
+)
+# What the last dotted part of such a file's name says. A text extension or a licence name in
+# capitals (LICENSE.BSD, COPYING.LESSER, LICENSE.APACHE2) is a licence text; a known code, data or
+# image extension is not (license.svg, license-url.test.ts). Anything else stops the run, so a new
+# kind of file is classified by a person instead of being dropped from the notices unseen.
+TEXT_SUFFIXES = frozenset({"txt", "text", "md", "markdown", "rst", "html", "htm"})
+OTHER_SUFFIXES = frozenset(
+    {
+        *("js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "map", "css", "scss"),
+        *("json", "yaml", "yml", "toml", "xml"),
+        *("py", "pyi", "pyc", "pyd", "so", "dll", "dylib", "exe", "wasm"),
+        *("svg", "png", "jpg", "jpeg", "gif", "ico", "webp"),
+    }
+)
+
+
 ROW = re.compile(r"\| (npm|python) \| `([^`]+)` \| ([^|]+) \|")
 ECOSYSTEMS = ("npm", "python")
 OVERRIDE_FOLDER = Path(__file__).resolve().parent / "notices"
@@ -77,6 +102,24 @@ packages the AI Document Vault runs on, with the licence text each one ships. De
 that are not shipped are covered by the [licence audit](docs/licence-audit.md). The project's own
 licence is in [LICENSE](LICENSE).
 """
+
+
+def is_licence_file(path: str) -> bool:
+    """Is the file at ``path`` (``/``-separated, inside a package or its RECORD) notice material?
+
+    Raises ``NoticeError`` for a file that looks like one but whose kind is not classified above.
+    """
+    *folders, name = path.split("/")
+    in_folder = any(LICENCE_FOLDER.fullmatch(part) for part in folders)
+    if not (in_folder or LICENCE_NAME.fullmatch(name)):
+        return False
+    suffix = name.rpartition(".")[2] if "." in name.lstrip(".") else ""
+    if not suffix or suffix.lower() in TEXT_SUFFIXES or not any(c.islower() for c in suffix):
+        return True
+    if suffix.lower() in OTHER_SUFFIXES:
+        return False
+    msg = f"{path} looks like a licence file of an unknown kind: classify .{suffix} in this script"
+    raise NoticeError(msg)
 
 
 class NoticeError(Exception):
@@ -104,9 +147,9 @@ def licence_files(folder: Path) -> tuple[tuple[str, str], ...]:
     found = []
     for path in folder.rglob("*"):
         inside = path.relative_to(folder)
-        if "node_modules" in inside.parts[:-1] or not LICENCE_FILE.fullmatch(path.name):
+        if "node_modules" in inside.parts[:-1] or not path.is_file():
             continue
-        if path.is_file():
+        if is_licence_file(inside.as_posix()):
             found.append((inside.as_posix(), path.read_text(encoding="utf-8", errors="replace")))
     # Sorted by the label, not by Path: Windows compares paths without case, so sorting paths
     # would order the texts differently there and the file written on one platform would not
@@ -175,7 +218,7 @@ def python_notices(
         texts = tuple(
             (python_label(path), text)
             for path in sorted(str(f) for f in distribution.files or [])
-            if LICENCE_FILE.fullmatch(Path(path).name)
+            if is_licence_file(Path(path).as_posix())
             and (text := read_installed(distribution, path)) is not None
         )
         notices.append(Notice("python", name, python_licence(distribution), texts))

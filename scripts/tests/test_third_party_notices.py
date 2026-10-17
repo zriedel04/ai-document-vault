@@ -172,6 +172,12 @@ class NpmTest(unittest.TestCase):
         (shipped / "vendor" / "gyp").mkdir(parents=True)
         (shipped / "vendor" / "LICENSE").write_text("vendored licence", encoding="utf-8")
         (shipped / "vendor" / "gyp" / "NOTICE.md").write_text("gyp notice", encoding="utf-8")
+        # A licence folder and a copyright file count too; an icon named after a licence does not.
+        (shipped / "LICENSES").mkdir()
+        (shipped / "LICENSES" / "Zlib.txt").write_text("bundled zlib terms", encoding="utf-8")
+        (shipped / "COPYRIGHT").write_text("attribution", encoding="utf-8")
+        (shipped / "icons").mkdir()
+        (shipped / "icons" / "license.svg").write_text("<svg/>", encoding="utf-8")
         # A copy installed below the package is an entry of its own, never part of this one.
         stray = shipped / "vendor" / "node_modules" / "other"
         stray.mkdir(parents=True)
@@ -189,7 +195,9 @@ class NpmTest(unittest.TestCase):
         self.assertEqual(
             found["shipped"].texts,
             (
+                ("COPYRIGHT", "attribution"),
                 ("LICENSE", "shipped licence"),
+                ("LICENSES/Zlib.txt", "bundled zlib terms"),
                 ("vendor/LICENSE", "vendored licence"),
                 ("vendor/gyp/NOTICE.md", "gyp notice"),
             ),
@@ -227,6 +235,8 @@ class PythonTest(unittest.TestCase):
             )
             files = {
                 "pkg-1.2.3.dist-info/licenses/LICENSE": "pkg licence",
+                # PEP 639: every file in the licenses folder is a licence file, whatever its name.
+                "pkg-1.2.3.dist-info/licenses/AUTHORS.rst": "pkg authors",
                 "pkg/_vendor/lib/LICENSE.txt": "vendored licence",
                 "pkg/__init__.py": "",
                 "pkg/license.py": "code, not a licence",
@@ -240,7 +250,11 @@ class PythonTest(unittest.TestCase):
         self.assertEqual(found.licence, "MIT")
         self.assertEqual(
             found.texts,
-            (("licenses/LICENSE", "pkg licence"), ("pkg/_vendor/lib/LICENSE.txt", "vendored licence")),
+            (
+                ("licenses/AUTHORS.rst", "pkg authors"),
+                ("licenses/LICENSE", "pkg licence"),
+                ("pkg/_vendor/lib/LICENSE.txt", "vendored licence"),
+            ),
         )
 
 
@@ -324,23 +338,72 @@ class OverrideTest(unittest.TestCase):
 
 class LicenceFileTest(unittest.TestCase):
     def test_licence_file_names(self) -> None:
-        for name in (
+        for path in (
             "LICENSE",
             "LICENCE",
             "license",
             "LICENSE.md",
             "LICENSE.txt",
+            "LICENSE.html",
             "license-mit",
             "license-cc0",
+            "LICENSE-MIT.txt",
+            "LICENSE-2.0.txt",
+            "LICENSE.BSD",
+            "LICENSE.APACHE2",
+            "LICENSE.Apache-2.0",
+            "LICENSES",
             "COPYING",
+            "COPYING.LESSER",
             "NOTICE",
+            "NOTICE.txt",
+            "COPYRIGHT",
+            "Copyright.txt",
+            "UNLICENSE",
             "CopyrightNotice.txt",
+            "THIRD-PARTY-NOTICES.md",
+            "ThirdPartyNotices.txt",
+            "vendor/LICENSE",
         ):
-            with self.subTest(name=name):
-                self.assertIsNotNone(notices.LICENCE_FILE.fullmatch(name))
-        for name in ("license.js", "licenses.json", "LICENSE.html", "notice.ts", "AUTHORS"):
-            with self.subTest(name=name):
-                self.assertIsNone(notices.LICENCE_FILE.fullmatch(name))
+            with self.subTest(path=path):
+                self.assertTrue(notices.is_licence_file(path))
+
+    def test_every_file_in_a_licence_folder(self) -> None:
+        for path in (
+            "LICENSES/GPL-3.0.txt",
+            "licenses/Apache-2.0",
+            "pkg-1.0.dist-info/licenses/AUTHORS.rst",
+            "pkg-1.0.dist-info/licenses/vendor/zlib.txt",
+            "third_party/notices/README",
+            "copying/LGPL.md",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(notices.is_licence_file(path))
+
+    def test_code_data_and_images_are_not_licence_texts(self) -> None:
+        for path in (
+            "license.js",
+            "lib/licenses.json",
+            "notice.ts",
+            "license-url.test.ts",
+            "license.d.ts",
+            "icons/license.svg",
+            "icons/copyright-off.svg",
+            "licenses/__init__.py",
+            "LICENSES/index.json",
+            "AUTHORS",
+            "README.md",
+            "noticeboard.txt",
+            "mylicense.txt",
+            "licensed/README.md",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(notices.is_licence_file(path))
+
+    def test_a_licence_like_file_of_an_unknown_kind_stops_the_run(self) -> None:
+        for path in ("license.mit", "LICENSES/GPL.unknownext", "NOTICE.docx"):
+            with self.subTest(path=path), self.assertRaisesRegex(notices.NoticeError, "classify"):
+                notices.is_licence_file(path)
 
 
 class CommittedFileTest(unittest.TestCase):
