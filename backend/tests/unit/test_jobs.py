@@ -329,6 +329,35 @@ def test_only_the_worker_that_holds_a_job_can_end_it(engine: Engine, queue: JobQ
     assert status_of(engine, job_id) == "done"
 
 
+def test_release_gives_an_unstarted_job_back_with_its_attempt(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "extract", HASH)
+    job = queue.claim(WORKER, ["extract"])
+    assert job is not None
+    queue.release(job_id, WORKER)
+    row = row_of(engine, job_id)
+    assert (row.status, row.attempts, row.locked_by, row.locked_at) == ("queued", 0, None, None)
+    again = queue.claim(WORKER, ["extract"])  # ready at once, no back-off
+    assert again is not None
+    assert again.attempts == 1
+
+
+def test_only_the_worker_that_holds_a_job_can_release_it(engine: Engine, queue: JobQueue) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "extract", HASH)
+    with pytest.raises(JobLostError):
+        queue.release(job_id, WORKER)  # queued, not held
+    assert queue.claim(WORKER, ["extract"]) is not None
+    with pytest.raises(JobLostError):
+        queue.release(job_id, OTHER_WORKER)
+    queue.complete(job_id, WORKER)
+    with pytest.raises(JobLostError):
+        queue.release(job_id, WORKER)  # done
+    assert status_of(engine, job_id) == "done"
+
+
 def test_a_failed_attempt_waits_and_runs_again(
     engine: Engine, queue: JobQueue, clock: Clock
 ) -> None:
