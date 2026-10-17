@@ -98,16 +98,20 @@ def licence_files(folder: Path) -> tuple[tuple[str, str], ...]:
     A package can ship a second licence for code it bundles (``vendor/LICENSE``), so the whole
     folder is read, not only its top level. Nested ``node_modules`` folders are skipped: each
     package installed there has an entry of its own. Each text is labelled with its path inside
-    the package, so two files of the same name stay apart.
+    the package, so two files of the same name stay apart, and the order is the same on every
+    platform.
     """
     found = []
-    for path in sorted(folder.rglob("*")):
+    for path in folder.rglob("*"):
         inside = path.relative_to(folder)
         if "node_modules" in inside.parts[:-1] or not LICENCE_FILE.fullmatch(path.name):
             continue
         if path.is_file():
             found.append((inside.as_posix(), path.read_text(encoding="utf-8", errors="replace")))
-    return tuple(found)
+    # Sorted by the label, not by Path: Windows compares paths without case, so sorting paths
+    # would order the texts differently there and the file written on one platform would not
+    # match the check on the other.
+    return tuple(sorted(found))
 
 
 def npm_notices(lockfile: Path = LOCKFILE, base: Path = NODE_MODULES) -> list[Notice]:
