@@ -10,6 +10,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import json
+import os
 import posixpath
 import re
 import zipfile
@@ -113,6 +114,39 @@ def read_owner_text(path: Path, what: str) -> str:
         msg = f"{what} is not text this script can read; save it as UTF-8"
         raise SpikeInputError(msg)
     return text
+
+
+def files_below(root: Path, suffixes: frozenset[str]) -> list[Path]:
+    """Every file in ``root`` and its subfolders whose suffix (in any case) is in ``suffixes``,
+    sorted by path, so one run can take a folder tree such as ``demo/corpus/``.
+
+    A linked folder is not entered (``os.walk`` does not follow links), so a link cannot take the
+    walk outside the tree or round a loop; a linked file is taken like any other, as when the
+    spikes read one folder. A folder that cannot be listed stops the run (``os.walk`` would skip
+    it without a word, and its files would leave the measurement unseen).
+    """
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    found: list[Path] = []
+    for folder, subfolders, names in os.walk(root, onerror=fail):
+        subfolders.sort()
+        found.extend(
+            path
+            for path in (Path(folder) / name for name in names)
+            if path.suffix.lower() in suffixes and path.is_file()
+        )
+    return sorted(found)
+
+
+def reference_folder(file: Path, root: Path, references: Path | None) -> Path:
+    """Where the reference files of ``file``, found by :func:`files_below` under ``root``, are:
+    next to it, or with ``references`` at the same path relative to that folder as ``file`` has
+    to ``root`` (``root/receipts/a.jpg`` has ``references/receipts/a.txt``)."""
+    if references is None:
+        return file.parent
+    return references / file.parent.relative_to(root)
 
 
 def _mapping(value: object, what: str) -> dict[str, Any]:

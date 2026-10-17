@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from vault_spikes.corpus import read_owner_text
+from vault_spikes.corpus import files_below, read_owner_text, reference_folder
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     character_error_rate,
@@ -46,7 +46,8 @@ QUESTION = (
 )
 METHOD = (
     "`python -m vault_spikes ocr --engine NAME --images DIR`, one engine per process so the peak "
-    "memory is that engine's. Every image in DIR with a reference text file of the same name is "
+    "memory is that engine's. Every image in DIR or its subfolders with a reference text file of "
+    "the same name (next to it, or at the same relative path under `--references`) is "
     "recognised once. Character error rate is the edit distance between the recognised and the "
     "reference text (whitespace collapsed) divided by the reference length; time is wall-clock per "
     "image after one untimed warm-up image. RapidOCR downloads its model files the first time "
@@ -204,16 +205,14 @@ class LabelledImage:
 def find_labelled_images(
     images_dir: Path, references_dir: Path | None = None
 ) -> list[LabelledImage]:
-    """Images in ``images_dir`` that have a ``<name>.txt`` reference (in ``references_dir`` or next
-    to the image). Images without a reference are ignored; an unreadable reference is an error,
-    found here, before any image is read. A reference may be UTF-8 with or without a byte order
-    mark, or UTF-16 or UTF-32 with one (``corpus.decode_text``)."""
-    folder = references_dir or images_dir
+    """Images in ``images_dir`` and its subfolders that have a ``<name>.txt`` reference, next to
+    the image or in ``references_dir`` at the same relative path (``images/receipts/a.jpg`` has
+    ``references/receipts/a.txt``). Images without a reference are ignored; an unreadable
+    reference is an error, found here, before any image is read. A reference may be UTF-8 with or
+    without a byte order mark, or UTF-16 or UTF-32 with one (``corpus.decode_text``)."""
     found: list[LabelledImage] = []
-    for image in sorted(images_dir.iterdir()):
-        if image.suffix.lower() not in IMAGE_SUFFIXES or not image.is_file():
-            continue
-        reference_file = folder / f"{image.stem}.txt"
+    for image in files_below(images_dir, IMAGE_SUFFIXES):
+        reference_file = reference_folder(image, images_dir, references_dir) / f"{image.stem}.txt"
         if reference_file.is_file():
             reference = read_owner_text(reference_file, "a reference text file")
             found.append(LabelledImage(image, reference))

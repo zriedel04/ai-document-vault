@@ -26,8 +26,8 @@ uv run python -m vault_spikes check  # what is installed, and whether sqlite-vec
 | --- | --- | --- |
 | sqlite-vec | `uv run python -m vault_spikes vec` | ADR 0004 |
 | Embedding model | first `uv run python -m vault_spikes fetch-model --candidate qwen3-embedding-0.6b` (downloads the model once, not timed), then `uv run python -m vault_spikes embedding --candidate qwen3-embedding-0.6b --device cpu` (then `--device cuda`, and the same steps for `embeddinggemma-300m`) | ADR 0013 |
-| OCR | first `uv run python -m vault_spikes fetch-model --candidate rapidocr-ppocrv5` (downloads RapidOCR's model files once, not timed), then `uv run python -m vault_spikes ocr --engine rapidocr --images <folder>` (then `--engine tesseract`) | ADR 0014 |
-| PDF | `uv run python -m vault_spikes pdf --extractor pypdfium2 --pdfs <folder>` (then `pypdfium2+pdfplumber`) | ADR 0015 |
+| OCR | first `uv run python -m vault_spikes fetch-model --candidate rapidocr-ppocrv5` (downloads RapidOCR's model files once, not timed), then `uv run python -m vault_spikes ocr --engine rapidocr --images <folder>` (then `--engine tesseract`); on the public data `--images ..\..\demo\corpus --references ..\..\demo\corpus\references` | ADR 0014 |
+| PDF | `uv run python -m vault_spikes pdf --extractor pypdfium2 --pdfs <folder>` (then `pypdfium2+pdfplumber`); on the public data `--pdfs ..\..\demo\corpus --references ..\..\demo\corpus\references` | ADR 0015 |
 | Combine | `uv run python -m vault_spikes merge spike-results\embedding-*.json` | one table per spike |
 
 Each command measures one candidate in its own process, so memory numbers do not mix, and `merge` joins the reports of one spike. Reports are written to `spike-results/` (git-ignored) unless `--out` names another folder.
@@ -35,6 +35,7 @@ Each command measures one candidate in its own process, so memory numbers do not
 - **Before a run starts**, the command checks what would otherwise fail after the measurement: the report names must be free (a run never replaces a report that already exists, so move the old file or pass another `--out`), and the `--out` folder is made if it is missing and tried with a temporary file. Either failure stops the run in a second with fixed text that does not print a path, and so does a missing library, before anything is measured. An empty folder stays if the run then stops for another reason.
 - **The sqlite-vec spike** measures its sizes in one process, and `peak_memory_mib` is the process's high-water mark, which only grows, so `--sizes` must be listed from the smallest to the largest, each once. Anything else is refused before the run, so a 100,000-vector store cannot put its peak in the row of the 10,000-vector one. Each size is also from 1 to 999,999,999, the sizes a row name (`vectors-N`) can state.
 - **Size options** (`--batch-size`, `--vault-chunks`, `--sizes`, `--dim`, `--queries`) must be whole numbers from 1.
+- **Input folders.** The OCR and PDF spikes take every matching file in `--images` or `--pdfs` and in its subfolders, in path order. A linked folder (a symbolic link or junction to another folder) is not entered, so a link cannot take the run outside the folder or round a loop; a linked file is read like any other. A subfolder that cannot be listed stops the run with its error class, instead of being skipped with its files unseen.
 
 ## Public and private data
 
@@ -42,7 +43,8 @@ ADRs 0013, 0014 and 0015 each need every candidate measured on the repository's 
 
 - The embedding spike reads `demo/corpus/` and `eval/public/questions.yaml` unless `--corpus` and `--questions` point elsewhere. `public_dataset` is true only when both are exactly those files; a copy with the same names counts as private.
 - For OCR and PDF, `public_dataset` is true only when every folder the run read (the images or PDFs, and the reference texts, which default to the same folder) is inside `demo/corpus/`. A copy elsewhere, or references kept elsewhere, count as the owner's own data, which is the safe way to be wrong.
-- The public corpus has no reference texts yet. Without them the OCR spike stops ("no image has a reference text file") and the PDF spike reports speed and failures but no error rates, so public reference texts for the synthetic images and PDFs have to be added inside `demo/corpus/` first.
+- The public reference texts are in `demo/corpus/references/`, at the same path as the file each describes (`references/receipts/coffee-receipt.txt` for `receipts/coffee-receipt.jpg`, `references/courses/cse485/syllabus.txt` and `syllabus.headings.txt` for `courses/cse485/syllabus.pdf`). `demo/generate` writes them from the content it draws, so they always match the pictures and PDFs; [its README](../../demo/generate/README.md#reference-texts-for-the-spikes) says what each holds. Every screenshot and receipt has one, and every text PDF has both; the scanned PDFs have none (the OCR spike reads image files, and a scanned page is counted in `pages_without_text`). They are not documents: the manifest does not list them, so the embedding spike and the eval set never see them.
+- One run covers the whole public data set: `--images` or `--pdfs` `..\..\demo\corpus` with `--references ..\..\demo\corpus\references` (both inside `demo/corpus/`, so `public_dataset` is true). Without `--references` nothing is scored, because the references are not next to the files.
 - Private files stay outside the repository, and only numbers about them are reported.
 
 ## What each spike measures
@@ -71,7 +73,7 @@ The method of each spike is also written into its report, so a report explains i
 
 ### OCR
 
-- Character error rate against a reference text and time per image, for each image in the folder that has a reference text file of the same name (`scan1.png` and `scan1.txt`, in `--references` or next to the image). Images without one are ignored. The recognised and reference texts are compared in memory and discarded.
+- Character error rate against a reference text and time per image, for each image in the folder or its subfolders that has a reference text file of the same name (`scan1.png` and `scan1.txt`, next to the image, or in `--references` at the image's path relative to `--images`: `--images photos --references refs` pairs `photos/2024/scan1.png` with `refs/2024/scan1.txt`). Images without one are ignored. The recognised and reference texts are compared in memory and discarded.
 - Images per minute counts the time lost in failed calls as well (a timeout can take minutes), and `cer_mean_failures_as_errors` counts each failed image as a wrong one.
 - RapidOCR is configured explicitly with the PP-OCRv5 mobile detection and recognition models, because the package's own default is PP-OCRv4 before release 3.9 and PP-OCRv6 from 3.9 (checked in the packages' `config.yaml`); the extra requires `rapidocr>=3.4`, the oldest release checked with those settings. It downloads its model files the first time it is loaded, which is why `fetch-model` comes first: otherwise that run's `load_seconds` includes the download.
 - `peak_memory_mib` is reported only for RapidOCR, which runs inside the process. Tesseract runs as a separate program for each image, so this process's working set would be the wrapper's; read Tesseract's memory in Task Manager while it runs.
@@ -79,8 +81,8 @@ The method of each spike is also written into its report, so a report explains i
 
 ### PDF extraction
 
-- Pages per second, pages without text (scans), failures by kind (encrypted, corrupt, other) and heading candidates by font size, for every PDF in the folder.
-- A PDF may have a reference text, `name.txt`; the report then gives the word error rate. A reference with no words (an empty file, or only spaces and line breaks) has no error rate: it is counted in `references_unusable`, whatever its PDF's outcome, and its PDF is still measured, so a blank or mistyped file cannot take a sample out of the word error rates unseen.
+- Pages per second, pages without text (scans), failures by kind (encrypted, corrupt, other) and heading candidates by font size, for every PDF in the folder and its subfolders.
+- A PDF may have a reference text, `name.txt`, next to it or in `--references` at the PDF's path relative to `--pdfs` (as for OCR); the report then gives the word error rate. A reference with no words (an empty file, or only spaces and line breaks) has no error rate: it is counted in `references_unusable`, whatever its PDF's outcome, and its PDF is still measured, so a blank or mistyped file cannot take a sample out of the word error rates unseen.
 - A PDF may also have `name.headings.txt`, one expected heading per line. With `--extractor pypdfium2+pdfplumber` the report then gives heading precision, recall and F1; without such a file no heading accuracy is claimed, because a count of candidates alone cannot tell good detection from bad. An empty file says the PDF has no headings, so every heading found in it counts as a false one. Headings are counted once per occurrence: a running header found on 20 pages is 20 false positives, and a heading expected twice and found once is half found.
 - Every reference file is read before the first PDF is measured, so one that cannot be read stops the run before the measurement instead of halfway through it.
 

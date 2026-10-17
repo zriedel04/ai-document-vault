@@ -26,6 +26,7 @@ from vault_spikes.corpus import (
     SpikeInputError,
     build_corpus,
     check_sources_listed,
+    files_below,
     load_manifest,
     load_questions,
     overlap_for,
@@ -147,19 +148,26 @@ def parser() -> argparse.ArgumentParser:
     ocr = commands.add_parser("ocr", help="OCR accuracy and speed")
     common(ocr)
     ocr.add_argument("--engine", choices=["rapidocr", "tesseract"], required=True)
-    ocr.add_argument("--images", type=Path, required=True)
-    ocr.add_argument("--references", type=Path, help="folder of <image name>.txt (default: images)")
+    ocr.add_argument(
+        "--images", type=Path, required=True, help="folder of images, subfolders included"
+    )
+    ocr.add_argument(
+        "--references",
+        type=Path,
+        help="folder of <image name>.txt, at each image's path relative to --images "
+        "(default: next to each image)",
+    )
     ocr.add_argument("--tesseract-path")
 
     pdf = commands.add_parser("pdf", help="PDF extraction speed, accuracy and failure behaviour")
     common(pdf)
     pdf.add_argument("--extractor", choices=["pypdfium2", "pypdfium2+pdfplumber"], required=True)
-    pdf.add_argument("--pdfs", type=Path, required=True)
+    pdf.add_argument("--pdfs", type=Path, required=True, help="folder of PDFs, subfolders included")
     pdf.add_argument(
         "--references",
         type=Path,
         help="folder of <pdf name>.txt (text) and <pdf name>.headings.txt (headings, one per "
-        "line); default: the PDF folder",
+        "line), at each PDF's path relative to --pdfs; default: next to each PDF",
     )
 
     joined = commands.add_parser("merge", help="combine the reports of one spike into one")
@@ -331,9 +339,13 @@ def run(args: argparse.Namespace) -> int:
         public = is_public_folder(args.pdfs, args.references or args.pdfs)
         stem = f"pdf-{extractor.name.replace('+', '-')}-{'public' if public else 'private'}"
         require_free(args.out, stem)
-        pdfs = sorted(p for p in args.pdfs.iterdir() if p.suffix.lower() == ".pdf" and p.is_file())
+        pdfs = files_below(args.pdfs, frozenset({".pdf"}))
         report = run_pdf_spike(
-            extractor, pdfs, public_dataset=public, references_dir=args.references
+            extractor,
+            pdfs,
+            public_dataset=public,
+            references_dir=args.references,
+            pdfs_dir=args.pdfs,
         )
         show(report, report.write(args.out, stem=stem))
         return 0

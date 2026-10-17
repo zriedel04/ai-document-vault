@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import codecs
 import json
+import os
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Sequence
@@ -743,6 +744,89 @@ class OcrTest(unittest.TestCase):
         report = ocr.run_ocr_spike(engine, found, environment=ENV, clock=Clock())
         self.assertEqual(report.rows[0].metrics["cer_mean"], 0.0)
 
+    def test_images_in_subfolders_are_paired_with_references_at_the_same_path(self) -> None:
+        # The public corpus keeps its images in several folders, and the references in a folder
+        # of their own that mirrors them (demo/corpus/references/receipts/a.txt).
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("receipts/a.jpg", "screenshots/b.png", "screenshots/deep/c.png"):
+                (root / "images" / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / "images" / name).write_bytes(b"x")
+            references = root / "references"
+            for name, body in (
+                ("receipts/a.txt", "alpha"),
+                ("screenshots/deep/c.txt", "gamma"),
+                ("b.txt", "not at b's path"),  # flat: not where b's reference belongs
+            ):
+                (references / name).parent.mkdir(parents=True, exist_ok=True)
+                (references / name).write_text(body, encoding="utf-8")
+            apart = ocr.find_labelled_images(root / "images", references)
+            beside = ocr.find_labelled_images(references)  # no images there at all
+            (root / "images" / "screenshots" / "b.txt").write_text("beta", encoding="utf-8")
+            next_to = ocr.find_labelled_images(root / "images")
+        self.assertEqual(
+            [(s.image.relative_to(root).as_posix(), s.reference) for s in apart],
+            [("images/receipts/a.jpg", "alpha"), ("images/screenshots/deep/c.png", "gamma")],
+        )
+        self.assertEqual(beside, [])
+        self.assertEqual([(s.image.name, s.reference) for s in next_to], [("b.png", "beta")])
+
+
+class FolderWalkTest(unittest.TestCase):
+    """The OCR and PDF spikes read a folder and its subfolders (``corpus.files_below``)."""
+
+    def test_every_matching_file_below_the_folder_in_path_order(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("b/z.pdf", "a/y.PDF", "x.pdf", "a/notes.txt", "c/d/w.pdf"):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(b"x")
+            (root / "folder.pdf").mkdir()  # a folder with the suffix is not a file
+            found = c.files_below(root, frozenset({".pdf"}))
+        self.assertEqual(
+            [p.relative_to(root).as_posix() for p in found],
+            ["a/y.PDF", "b/z.pdf", "c/d/w.pdf", "x.pdf"],
+        )
+
+    def test_a_linked_folder_is_not_entered(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "outside").mkdir()
+            (root / "outside" / "private.pdf").write_bytes(b"x")
+            (root / "tree").mkdir()
+            (root / "tree" / "own.pdf").write_bytes(b"x")
+            try:
+                (root / "tree" / "link").symlink_to(root / "outside", target_is_directory=True)
+                (root / "tree" / "loop").symlink_to(root / "tree", target_is_directory=True)
+            except OSError:
+                self.skipTest("this system does not allow symbolic links")
+            found = c.files_below(root / "tree", frozenset({".pdf"}))
+        self.assertEqual([p.name for p in found], ["own.pdf"])
+
+    def test_a_subfolder_that_cannot_be_listed_stops_the_walk(self) -> None:
+        # os.walk skips it without a word unless told otherwise, and its files would leave the
+        # measurement unseen.
+        real_scandir = os.scandir
+
+        def refuse(path: str) -> object:
+            if Path(path).name == "locked":
+                raise PermissionError(13, "denied")
+            return real_scandir(path)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "locked").mkdir()
+            (root / "open.pdf").write_bytes(b"x")
+            with (
+                mock.patch.object(os, "scandir", side_effect=refuse),
+                self.assertRaises(PermissionError),
+            ):
+                c.files_below(root, frozenset({".pdf"}))
+
+    def test_a_missing_folder_is_an_error_not_an_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, self.assertRaises(FileNotFoundError):
+            c.files_below(Path(folder) / "missing", frozenset({".pdf"}))
+
 
 # --- pdf ------------------------------------------------------------------------------------
 
@@ -1038,6 +1122,45 @@ class PdfTest(unittest.TestCase):
     def test_no_pdfs_is_an_error(self) -> None:
         with self.assertRaises(ValueError):
             pdf.run_pdf_spike(FakePdf({}), [], environment=ENV)
+
+    def test_pdfs_in_subfolders_have_references_at_the_same_path(self) -> None:
+        # Three courses each have a syllabus.pdf: one flat folder of references could not tell
+        # them apart, so the references mirror the PDFs' folders.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for course, reference in (("a", "the text"), ("b", "a different one")):
+                (root / "pdfs" / course).mkdir(parents=True)
+                (root / "pdfs" / course / "syllabus.pdf").write_bytes(b"x")
+                (root / "references" / course).mkdir(parents=True)
+                (root / "references" / course / "syllabus.txt").write_text(reference, "utf-8")
+                (root / "references" / course / "syllabus.headings.txt").write_text(
+                    "The text\n", "utf-8"
+                )
+            (root / "pdfs" / "scan.pdf").write_bytes(b"x")  # no reference: measured, not scored
+            pdfs = c.files_below(root / "pdfs", frozenset({".pdf"}))
+            extractor = FakePdf(
+                {
+                    "syllabus.pdf": pdf.PdfText(["the text"], ["The text"]),
+                    "scan.pdf": pdf.PdfText([""], []),
+                }
+            )
+            report = pdf.run_pdf_spike(
+                extractor,
+                pdfs,
+                references_dir=root / "references",
+                pdfs_dir=root / "pdfs",
+                environment=ENV,
+                clock=Clock(),
+            )
+        metrics = report.rows[0].metrics
+        self.assertEqual(metrics["files"], 3)
+        self.assertEqual(metrics["pages_without_text"], 1)
+        self.assertEqual(metrics["references_used"], 2)
+        # a scores 0 against its own reference and b 1 against its own (every word of it
+        # differs or is missing): each PDF was scored against the file at its path.
+        self.assertEqual(metrics["wer_mean"], 0.5)
+        self.assertEqual(metrics["files_with_heading_reference"], 2)
+        self.assertEqual(metrics["heading_recall"], 1.0)
 
 
 if __name__ == "__main__":
