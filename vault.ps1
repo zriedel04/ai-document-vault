@@ -9,8 +9,12 @@
     .\vault.ps1 stop      Stop the server that "run" started.
     .\vault.ps1 dev       Start the server in the background and the Vite dev server in this
                           window; the server stops when the dev server does.
+    .\vault.ps1 backup -To <folder>
+                          Snapshot the database and copy the original files that are not yet
+                          in the backup folder. Safe while the app runs.
 
     -NoBrowser            Do not open the browser (run and dev).
+    -To <folder>          The backup folder (backup), outside the vault folder.
 
     The settings come from backend\config.toml (copy config.example.toml there and set the vault
     folder) or from the file named by the AIVAULT_CONFIG environment variable.
@@ -26,10 +30,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'run', 'stop', 'dev')]
+    [ValidateSet('install', 'run', 'stop', 'dev', 'backup')]
     [string]$Command,
 
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+
+    [string]$To
 )
 
 Set-StrictMode -Version 2.0
@@ -55,6 +61,9 @@ $script:TokenShape = '\A[A-Za-z0-9_-]{32,128}\z'
 # The environment variable that carries a start's launch id to the server and to Vite; see
 # backend/src/vault/api/health.py and frontend/vite.config.ts.
 $script:LaunchVariable = 'VAULT_LAUNCH_ID'
+# The environment variable that carries the backup folder to the backend; see
+# backend/src/vault/backup.py.
+$script:BackupVariable = 'VAULT_BACKUP_TO'
 
 
 function Test-TokenShape {
@@ -599,9 +608,48 @@ function Invoke-Dev {
     }
 }
 
+function Invoke-Backup {
+    <# Back up the vault into a folder (docs/launcher.md). The backend does the work and prints
+       only counts and the snapshot's name. The folder goes to it in an environment variable,
+       not on its command line: Windows PowerShell 5.1 quotes an argument that has a space but
+       does not escape a trailing backslash, so "E:\My Backups\" would reach Python with a stray
+       quote. A relative folder is taken from this window's location, not from the backend
+       folder Python runs in. -Python replaces the backend's interpreter, for the tests. #>
+    param([string]$Target, [object]$Python)
+    if (-not $Target) {
+        throw 'name the backup folder, for example: .\vault.ps1 backup -To E:\VaultBackups'
+    }
+    if ($null -eq $Python) { $Python = Get-BackendPython }
+    $folder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Target)
+    $previous = [Environment]::GetEnvironmentVariable($script:BackupVariable, 'Process')
+    [Environment]::SetEnvironmentVariable($script:BackupVariable, $folder, 'Process')
+    Push-Location -LiteralPath $script:BackendDir
+    try {
+        # Windows PowerShell 5.1 turns a native program's error output into an exception while
+        # the preference is Stop, so the backend's messages are passed on as plain lines.
+        $ErrorActionPreference = 'Continue'
+        & $Python -m vault.backup 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = 'Stop'
+        Pop-Location
+        # [NullString]: see Start-WithLaunchId.
+        if ($null -eq $previous) {
+            [Environment]::SetEnvironmentVariable($script:BackupVariable, [NullString]::Value, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($script:BackupVariable, $previous, 'Process')
+        }
+    }
+    if ($code -ne 0) {
+        throw "the backup did not complete (exit code $code); see the messages above"
+    }
+}
+
 function Main {
     if (-not $Command) {
-        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev> [-NoBrowser]   (Get-Help .\vault.ps1 for details)'
+        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|backup> [-NoBrowser] [-To <folder>]   (Get-Help .\vault.ps1 for details)'
         exit 2
     }
     try {
@@ -610,6 +658,7 @@ function Main {
             'run' { Invoke-Run }
             'stop' { Invoke-Stop }
             'dev' { Invoke-Dev }
+            'backup' { Invoke-Backup $To }
         }
     }
     catch {

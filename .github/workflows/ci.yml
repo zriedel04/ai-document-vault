@@ -327,6 +327,37 @@ jobs:
             $idle = & $edition -NoProfile -File .\vault.ps1 stop | Out-String
             if ($idle -notmatch 'not running') { throw 'stop did not say the server was not running' }
           }
+      - name: Backup while the server runs, in both PowerShell editions
+        shell: pwsh
+        run: |
+          # A space, an accented letter and a trailing backslash: the folder must reach the backend
+          # intact (it goes in an environment variable) and must never be printed.
+          $name = 'Backups Jos' + [char]0x00E9
+          $target = Join-Path $env:RUNNER_TEMP $name
+          & powershell -NoProfile -File .\vault.ps1 run -NoBrowser
+          if ($LASTEXITCODE -ne 0) { throw 'run failed' }
+          try {
+            foreach ($edition in 'powershell', 'pwsh') {
+              Write-Host "== $edition"
+              $text = & $edition -NoProfile -File .\vault.ps1 backup -To ($target + '\') 2>&1 | Out-String
+              Write-Host $text
+              if ($LASTEXITCODE -ne 0) { throw "backup failed in $edition" }
+              if ($text -notmatch 'Snapshot \d{4}-\d{2}-\d{2}T\d{6}Z written') { throw "backup in $edition did not report its snapshot" }
+              if ($text.Contains($name) -or $text.Contains('Backups Jos')) { throw "backup in $edition printed the folder" }
+              Start-Sleep -Seconds 2   # one snapshot per second at most
+            }
+            $snapshots = @(Get-ChildItem -LiteralPath (Join-Path $target 'snapshots') -Directory)
+            if ($snapshots.Count -ne 2) { throw "expected two snapshots, found $($snapshots.Count)" }
+            foreach ($snapshot in $snapshots) {
+              if (-not (Test-Path -LiteralPath (Join-Path $snapshot.FullName 'vault.db') -PathType Leaf)) { throw 'a snapshot has no vault.db' }
+            }
+            $vault = Join-Path $env:RUNNER_TEMP ('vault-Jos' + [char]0x00E9)
+            $inside = & pwsh -NoProfile -File .\vault.ps1 backup -To (Join-Path $vault 'backup') 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -or $inside -notmatch 'inside the vault folder') { throw "a backup into the vault folder was not refused: $inside" }
+          }
+          finally {
+            & powershell -NoProfile -File .\vault.ps1 stop
+          }
       - name: run refuses a port that something else holds
         shell: pwsh
         run: |
