@@ -275,9 +275,20 @@ def probe_extension_loading() -> dict[str, bool]:
     facts = {"can_load_extensions": hasattr(sqlite3.Connection, "enable_load_extension")}
     facts["vec_loads"] = False
     if facts["can_load_extensions"]:
+        # In memory, not through SqliteVecStore: a folder that cannot hold a WAL database is a
+        # failure of the setup, which stops the measured run, not a sign that sqlite-vec does
+        # not load, so nothing but the extension itself may decide this answer.
         try:
-            with tempfile.TemporaryDirectory() as folder:
-                SqliteVecStore(4, Path(folder)).close()
+            import sqlite_vec
+
+            db = sqlite3.connect(":memory:")
+            try:
+                db.enable_load_extension(True)
+                sqlite_vec.load(db)
+                db.enable_load_extension(False)
+                db.execute("CREATE VIRTUAL TABLE v USING vec0(embedding float[4])")
+            finally:
+                db.close()
             facts["vec_loads"] = True
         except Exception:
             facts["vec_loads"] = False

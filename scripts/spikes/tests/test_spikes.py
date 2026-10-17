@@ -349,6 +349,14 @@ class VecTest(unittest.TestCase):
         self.assertNotEqual(list(vec.random_vectors(3, 4, 1)), list(vec.random_vectors(3, 4, 2)))
         self.assertEqual({len(v) for v in vec.random_vectors(3, 4, 1)}, {16})
 
+    def test_the_probe_does_not_depend_on_the_folder_holding_wal(self) -> None:
+        # A WAL failure is the setup's, and must stop the measured run, not read as "sqlite-vec
+        # does not load": the probe never builds a file database.
+        with mock.patch.object(vec, "SqliteVecStore") as store:
+            facts = vec.probe_extension_loading()
+        store.assert_not_called()
+        self.assertEqual(set(facts), {"can_load_extensions", "vec_loads"})
+
     def test_probe_reports_facts_without_failing(self) -> None:
         facts = vec.probe_extension_loading()
         self.assertEqual(set(facts), {"can_load_extensions", "vec_loads"})
