@@ -6,6 +6,7 @@ import array
 import codecs
 import json
 import os
+import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Sequence
@@ -19,6 +20,7 @@ from vault_spikes import spike_ocr as ocr
 from vault_spikes import spike_pdf as pdf
 from vault_spikes import spike_vec as vec
 from vault_spikes.__main__ import KNOWN
+from vault_spikes.corpus import SpikeInputError
 from vault_spikes.errors import OwnValueError
 from vault_spikes.report import Environment, Report, in_domain
 
@@ -788,20 +790,64 @@ class FolderWalkTest(unittest.TestCase):
             ["a/y.PDF", "b/z.pdf", "c/d/w.pdf", "x.pdf"],
         )
 
-    def test_a_linked_folder_is_not_entered(self) -> None:
+    def test_a_link_in_the_tree_stops_the_walk(self) -> None:
+        # Followed, it could take the walk outside the tree (or round a loop); skipped, its files
+        # would leave the measurement unseen.
+        for kind in ("outside folder", "loop", "file"):
+            with self.subTest(kind), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "outside").mkdir()
+                (root / "outside" / "private.pdf").write_bytes(b"x")
+                (root / "tree" / "deeper").mkdir(parents=True)
+                (root / "tree" / "own.pdf").write_bytes(b"x")
+                link = root / "tree" / "deeper" / "link"
+                try:
+                    if kind == "outside folder":
+                        link.symlink_to(root / "outside", target_is_directory=True)
+                    elif kind == "loop":
+                        link.symlink_to(root / "tree", target_is_directory=True)
+                    else:
+                        link.with_suffix(".pdf").symlink_to(root / "outside" / "private.pdf")
+                except OSError:
+                    self.skipTest("this system does not allow symbolic links")
+                with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                    c.files_below(root / "tree", frozenset({".pdf"}))
+
+    def test_a_reparse_point_stops_the_walk(self) -> None:
+        # A Windows junction has the reparse attribute and not the symbolic-link mode, so
+        # os.walk enters it; the attribute is what is checked.
+        real_lstat = os.lstat
+
+        def lstat(path: object) -> object:
+            result = real_lstat(path)  # type: ignore[arg-type]
+            if Path(str(path)).name != "junction":
+                return result
+            return mock.Mock(st_file_attributes=0x400, st_mode=result.st_mode)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "junction").mkdir()
+            (root / "own.pdf").write_bytes(b"x")
+            with (
+                mock.patch.object(os, "lstat", side_effect=lstat),
+                self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"),
+            ):
+                c.files_below(root, frozenset({".pdf"}))
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions are a Windows feature")
+    def test_a_real_windows_junction_stops_the_walk(self) -> None:
+        import _winapi
+
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "outside").mkdir()
             (root / "outside" / "private.pdf").write_bytes(b"x")
             (root / "tree").mkdir()
-            (root / "tree" / "own.pdf").write_bytes(b"x")
-            try:
-                (root / "tree" / "link").symlink_to(root / "outside", target_is_directory=True)
-                (root / "tree" / "loop").symlink_to(root / "tree", target_is_directory=True)
-            except OSError:
-                self.skipTest("this system does not allow symbolic links")
-            found = c.files_below(root / "tree", frozenset({".pdf"}))
-        self.assertEqual([p.name for p in found], ["own.pdf"])
+            create_junction = getattr(_winapi, "CreateJunction")  # noqa: B009 - typed for Windows only
+            create_junction(str(root / "outside"), str(root / "tree" / "junction"))
+            self.assertFalse((root / "tree" / "junction").is_symlink())  # why the attribute
+            with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                c.files_below(root / "tree", frozenset({".pdf"}))
 
     def test_a_subfolder_that_cannot_be_listed_stops_the_walk(self) -> None:
         # os.walk skips it without a word unless told otherwise, and its files would leave the

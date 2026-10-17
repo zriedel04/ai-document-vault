@@ -17,7 +17,7 @@ import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import yaml
 
@@ -120,10 +120,12 @@ def files_below(root: Path, suffixes: frozenset[str]) -> list[Path]:
     """Every file in ``root`` and its subfolders whose suffix (in any case) is in ``suffixes``,
     sorted by path, so one run can take a folder tree such as ``demo/corpus/``.
 
-    A linked folder is not entered (``os.walk`` does not follow links), so a link cannot take the
-    walk outside the tree or round a loop; a linked file is taken like any other, as when the
-    spikes read one folder. A folder that cannot be listed stops the run (``os.walk`` would skip
-    it without a word, and its files would leave the measurement unseen).
+    A link anywhere in the tree stops the run (:func:`is_link`): a symbolic link to a folder or a
+    file, a Windows junction (which ``os.walk`` enters, since it is not a symbolic link) or another
+    reparse point. Followed, one could take the walk outside the tree, so a run on a folder inside
+    ``demo/corpus/`` would report someone's own files as public data, or round a loop; skipped,
+    its files would leave the measurement unseen. A folder that cannot be listed stops the run
+    too, for the same reason (``os.walk`` would skip it without a word).
     """
 
     def fail(error: OSError) -> None:
@@ -131,6 +133,10 @@ def files_below(root: Path, suffixes: frozenset[str]) -> list[Path]:
 
     found: list[Path] = []
     for folder, subfolders, names in os.walk(root, onerror=fail):
+        for name in (*subfolders, *names):
+            if is_link(Path(folder) / name):
+                msg = "the folder holds a symbolic link or junction; the spike follows none"
+                raise SpikeInputError(msg)
         subfolders.sort()
         found.extend(
             path
@@ -138,6 +144,17 @@ def files_below(root: Path, suffixes: frozenset[str]) -> list[Path]:
             if path.suffix.lower() in suffixes and path.is_file()
         )
     return sorted(found)
+
+
+_REPARSE_POINT: Final = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def is_link(path: Path) -> bool:
+    """Is ``path`` itself a link: a symbolic link, or on Windows a junction or any other reparse
+    point (``os.lstat`` does not follow it)? Junctions have the reparse attribute, not the
+    symbolic-link mode, so ``Path.is_symlink`` misses them."""
+    attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    return path.is_symlink() or bool(attributes & _REPARSE_POINT)
 
 
 def reference_folder(file: Path, root: Path, references: Path | None) -> Path:
