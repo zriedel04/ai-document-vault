@@ -236,3 +236,46 @@ jobs = Table(
         sqlite_where=text("status IN ('queued', 'running')"),
     ),
 )
+
+# The text of each page of a document version, as an extractor read it (section 6, step 7 of
+# section 7). Derived data: rebuilt from the blob whenever the extractor changes, and private like
+# the document itself, so it is never logged. ``extractor`` names the extractor and its version
+# (``text-1``) and ``encoding`` the character encoding the bytes were decoded with, when the format
+# has one. ``headings`` is a JSON array of ``[level, title, start, end]``, the offsets being
+# positions in ``text``; they are read with the page and never queried on their own, so they live
+# in the row. ``char_count`` is the plan's column, kept equal to the text's length by the database.
+# The plan's OCR columns (``ocr_used``, ``ocr_confidence``) and page size (``width``, ``height``)
+# arrive with the OCR and PDF extractors that fill them.
+pages = Table(
+    "pages",
+    metadata,
+    Column(
+        "version_id",
+        String,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("page_no", Integer, primary_key=True),
+    Column("text", String, nullable=False),
+    Column("char_count", Integer, nullable=False),
+    Column("headings", String, nullable=False),
+    Column("extractor", String, nullable=False),
+    Column("encoding", String, nullable=True),
+    CheckConstraint("page_no >= 1", name="page_no_positive"),
+    CheckConstraint("char_count = length(text)", name="char_count_is_the_length"),
+    CheckConstraint(
+        "json_valid(headings) AND json_type(headings) = 'array'", name="headings_are_a_list"
+    ),
+    # A looser net than vault.db.pages.EXTRACTOR, which is the rule the application applies.
+    CheckConstraint(
+        "length(extractor) BETWEEN 3 AND 40 AND extractor NOT GLOB '*[^a-z0-9-]*'"
+        " AND extractor GLOB '[a-z]*-[1-9]*' AND extractor GLOB '*[0-9]'"
+        " AND extractor NOT GLOB '*--*'",
+        name="extractor_is_a_name_and_version",
+    ),
+    CheckConstraint(
+        "encoding IS NULL OR (length(encoding) BETWEEN 1 AND 40"
+        " AND encoding GLOB '[a-z]*' AND encoding NOT GLOB '*[^a-z0-9_-]*')",
+        name="encoding_is_a_codec_name",
+    ),
+)
