@@ -408,18 +408,26 @@ class OutputTest(unittest.TestCase):
 
     def test_a_first_report_that_another_process_replaced_is_not_removed(self) -> None:
         # The .md name is refused, so the .json this call made is cleaned up; but another process
-        # has removed that .json meanwhile and written its own, which must stay.
+        # may have removed that .json meanwhile and written its own, which must stay. Windows
+        # refuses to remove the .json while this call holds it open, so there the other process
+        # only takes the .md name, and the cleanup removes this call's own .json.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             real_open = Path.open
 
+            def take(name: str) -> None:
+                with open(os.path.join(folder, name), "w", encoding="utf-8") as other:
+                    other.write("someone else's")
+
             def swapping_open(path: Path, mode: str = "r", **kwargs: Any) -> Any:
                 if path.name == "a.md":
-                    for name in ("a.json", "a.md"):
-                        with contextlib.suppress(FileNotFoundError):
-                            os.unlink(os.path.join(folder, name))
-                        with open(os.path.join(folder, name), "w", encoding="utf-8") as other:
-                            other.write("someone else's")
+                    if r.WINDOWS:
+                        with self.assertRaises(PermissionError):
+                            os.unlink(os.path.join(folder, "a.json"))
+                    else:
+                        os.unlink(os.path.join(folder, "a.json"))
+                        take("a.json")
+                    take("a.md")
                 return real_open(path, mode, **kwargs)
 
             with (
@@ -427,59 +435,74 @@ class OutputTest(unittest.TestCase):
                 self.assertRaises(OwnValueError),
             ):
                 make().write(root, stem="a")
-            self.assertEqual((root / "a.json").read_text(encoding="utf-8"), "someone else's")
             self.assertEqual((root / "a.md").read_text(encoding="utf-8"), "someone else's")
+            if r.WINDOWS:
+                self.assertFalse((root / "a.json").exists())
+            else:
+                self.assertEqual((root / "a.json").read_text(encoding="utf-8"), "someone else's")
 
     def test_remove_own_removes_only_the_file_open_on_the_handle(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             mine = root / "mine.txt"
+            other = root / "other.txt"
 
-            def create() -> int:
-                return os.open(mine, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            def create(path: Path) -> int:
+                return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
 
             def assert_closed(handle: int) -> None:
                 with self.assertRaises(OSError):
                     os.fstat(handle)
 
-            handle = create()
+            handle = create(mine)
             r.remove_own(mine, handle, lambda: os.close(handle))
             self.assertFalse(os.path.lexists(mine))
             assert_closed(handle)
 
-            handle = create()
-            mine.unlink()  # removed by another process: nothing to remove, still closed
+            # The name holds another file than the one open on the handle. Elsewhere than
+            # Windows the open file is moved away and the name taken; Windows cannot move an open
+            # file, so there the handle is opened on a different file from the start.
+            if r.WINDOWS:
+                handle = create(other)
+            else:
+                handle = create(mine)
+                mine.replace(other)
+            mine.write_text("someone else's", encoding="utf-8")
             r.remove_own(mine, handle, lambda: os.close(handle))
-            assert_closed(handle)
-
-            outside = root / "outside.txt"
-            outside.write_text("keep", encoding="utf-8")
-            handle = create()
-            try:
-                if os.name == "nt":  # an open file cannot be moved there; only the name is taken
-                    os.close(handle)
-                    handle = os.open(outside, os.O_RDONLY)
-                else:
-                    mine.replace(root / "moved.txt")  # moved, then the name is taken again
-                mine.symlink_to(outside)
-            except OSError:
-                os.close(handle)
-                self.skipTest("cannot create symbolic links here")
-            r.remove_own(mine, handle, lambda: os.close(handle))
-            self.assertTrue(mine.is_symlink())
-            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(mine.read_text(encoding="utf-8"), "someone else's")
+            self.assertTrue(other.exists())
             assert_closed(handle)
             mine.unlink()
 
-            if os.name != "nt":
-                handle = create()
-                mine.unlink()  # removed and made again at once: the same number on Linux
-                mine.write_text("someone else's", encoding="utf-8")
+            handle = create(root / "linked.txt") if r.WINDOWS else create(mine)
+            try:
+                if not r.WINDOWS:
+                    mine.replace(root / "linked.txt")
+                mine.symlink_to(other)  # a link to a file is not the file
+            except OSError:  # Windows without the privilege to make links
+                os.close(handle)
+            else:
                 r.remove_own(mine, handle, lambda: os.close(handle))
-                self.assertEqual(mine.read_text(encoding="utf-8"), "someone else's")
+                self.assertTrue(mine.is_symlink())
                 assert_closed(handle)
 
-    @unittest.skipIf(os.name == "nt", "Windows closes first, as it cannot remove an open file")
+    @unittest.skipIf(r.WINDOWS, "Windows does not let another process remove a file open here")
+    def test_remove_own_after_another_process_removed_the_open_file(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            mine = Path(folder) / "mine.txt"
+            handle = os.open(mine, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            mine.unlink()  # removed by another process: nothing to remove, still closed
+            r.remove_own(mine, handle, lambda: os.close(handle))
+            with self.assertRaises(OSError):
+                os.fstat(handle)
+
+            handle = os.open(mine, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            mine.unlink()  # removed and made again at once: the same number on Linux
+            mine.write_text("someone else's", encoding="utf-8")
+            r.remove_own(mine, handle, lambda: os.close(handle))
+            self.assertEqual(mine.read_text(encoding="utf-8"), "someone else's")
+
+    @unittest.skipIf(r.WINDOWS, "Windows closes first, as it cannot remove an open file")
     def test_remove_own_compares_before_the_file_number_can_be_reused(self) -> None:
         # Once the descriptor is closed, a removed file's number can go to the next new file (at
         # once on Linux), so a comparison made after closing would take that file for its own.

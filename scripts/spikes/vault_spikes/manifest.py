@@ -25,7 +25,7 @@ from typing import Any
 
 from vault_spikes.corpus import PdfPages, SpikeInputError, load_manifest, safe_file
 from vault_spikes.errors import OwnValueError
-from vault_spikes.report import remove_own, same_file
+from vault_spikes.report import WINDOWS, remove_own, same_file
 
 MANIFEST = "manifest.json"
 
@@ -271,7 +271,7 @@ def write_manifest(root: Path, manifest: dict[str, Any], *, force: bool) -> None
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        if os.name == "nt":  # Windows renames or links only a file that is not open here
+        if WINDOWS:  # Windows renames or links only a file that is not open here
             os.close(handle)
             is_open = False
         documents = load_manifest(Path(temporary))
@@ -296,6 +296,10 @@ def write_manifest(root: Path, manifest: dict[str, Any], *, force: bool) -> None
                 os.unlink(temporary)
 
 
+# Windows renames without replacing an existing name (MoveFileExW without
+# MOVEFILE_REPLACE_EXISTING); elsewhere a rename replaces, so the exclusive copy is used instead.
+RENAME_REFUSES_EXISTING = WINDOWS
+
 _APPEARED = "a manifest.json appeared in the --corpus folder during the run; not replaced"
 
 
@@ -316,7 +320,7 @@ def _publish_new(temporary: Path, target: Path) -> None:
         pass
     else:
         return
-    if os.name == "nt":
+    if RENAME_REFUSES_EXISTING:
         try:
             os.rename(temporary, target)  # MoveFileExW without MOVEFILE_REPLACE_EXISTING
         except FileExistsError:

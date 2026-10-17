@@ -20,6 +20,7 @@ from vault_spikes import __main__ as cli
 from vault_spikes import adapters, corpus, spike_ocr
 from vault_spikes import manifest as m
 from vault_spikes.errors import OwnValueError
+from vault_spikes.report import WINDOWS
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PUBLIC = REPO_ROOT / "demo" / "corpus"
@@ -360,7 +361,7 @@ class WriteManifestTest(Folder):
         with (
             self.appears_meanwhile(),
             mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
-            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(m, "RENAME_REFUSES_EXISTING", False),
             self.assertRaises(OwnValueError),
         ):
             m.write_manifest(self.root, manifest, force=False)
@@ -371,7 +372,7 @@ class WriteManifestTest(Folder):
         manifest, _ = self.build()
         with (
             mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
-            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(m, "RENAME_REFUSES_EXISTING", False),
         ):
             m.write_manifest(self.root, manifest, force=False)
         self.assertEqual(len(corpus.load_manifest(self.root / "manifest.json")), 1)
@@ -392,7 +393,7 @@ class WriteManifestTest(Folder):
         with (
             mock.patch("vault_spikes.manifest.load_manifest", side_effect=meanwhile),
             mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
-            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(m, "RENAME_REFUSES_EXISTING", False),
             self.assertRaises(OwnValueError),
         ):
             m.write_manifest(self.root, manifest, force=False)
@@ -403,7 +404,7 @@ class WriteManifestTest(Folder):
         manifest, _ = self.build()
         with (
             mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
-            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(m, "RENAME_REFUSES_EXISTING", False),
             mock.patch.object(os, "fsync", side_effect=[None, OSError("disk full")]),
             self.assertRaises(OSError),
         ):
@@ -427,7 +428,7 @@ class WriteManifestTest(Folder):
         self.assertEqual(len(taken), 1)
         self.assertEqual(taken[0].read_text(encoding="utf-8"), "someone else's")
 
-    @unittest.skipIf(os.name == "nt", "Windows does not let an open file be removed or moved")
+    @unittest.skipIf(WINDOWS, "Windows does not let an open file be removed or moved")
     def test_a_failed_copy_leaves_a_manifest_that_took_the_name_meanwhile(self) -> None:
         self.write("a.txt")
         manifest, _ = self.build()
@@ -445,14 +446,14 @@ class WriteManifestTest(Folder):
 
         with (
             mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
-            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(m, "RENAME_REFUSES_EXISTING", False),
             mock.patch.object(os, "fsync", side_effect=fsync),
             self.assertRaises(OSError),
         ):
             m.write_manifest(self.root, manifest, force=False)
         self.assertEqual(target.read_bytes(), b"written by someone else")
 
-    @unittest.skipUnless(os.name == "nt", "a rename that never replaces is Windows behaviour")
+    @unittest.skipUnless(WINDOWS, "a rename that never replaces is Windows behaviour")
     def test_the_windows_rename_never_replaces_a_manifest_that_appears(self) -> None:
         self.write("a.txt")
         manifest, _ = self.build()
@@ -469,7 +470,7 @@ class WriteManifestTest(Folder):
         # A check followed by a replace leaves a window in which another process's manifest is
         # overwritten, so no fallback may use one: ``os.replace`` never, and ``os.rename`` only
         # on Windows, where it refuses an existing name (elsewhere it replaces).
-        for name in ["posix"] + (["nt"] if os.name == "nt" else []):
+        for name in ["posix"] + (["nt"] if WINDOWS else []):
             with self.subTest(fallback=name):
                 for leftover in self.root.iterdir():
                     leftover.unlink()
@@ -481,7 +482,7 @@ class WriteManifestTest(Folder):
                 with (
                     mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
                     mock.patch.object(os, "replace", side_effect=AssertionError("replace used")),
-                    mock.patch.object(os, "name", name),
+                    mock.patch.object(m, "RENAME_REFUSES_EXISTING", name == "nt"),
                     replacing if name != "nt" else contextlib.nullcontext(),
                 ):
                     m.write_manifest(self.root, manifest, force=False)

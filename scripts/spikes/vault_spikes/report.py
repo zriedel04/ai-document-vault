@@ -19,6 +19,7 @@ import math
 import os
 import platform
 import re
+import sys
 import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
@@ -648,6 +649,12 @@ def _remove(opened: list[tuple[Path, TextIO]]) -> None:
         remove_own(path, stream.fileno(), stream.close)
 
 
+# Whether this process runs on Windows, where a file open here cannot be removed or renamed. It is
+# fixed at import and read from ``sys.platform``, so a test that switches another branch by
+# patching ``os.name`` cannot change how open files are handled.
+WINDOWS: Final = sys.platform == "win32"
+
+
 def same_file(path: Path, identity: os.stat_result) -> bool:
     """Whether ``path`` itself (a link is not followed) is the file ``identity`` describes, by
     device and file number."""
@@ -674,13 +681,13 @@ def remove_own(path: Path, handle: int, close: Callable[[], object]) -> None:
         own = same_file(path, os.fstat(handle))
     except OSError:
         own = False
-    if os.name == "nt":
+    if WINDOWS:
         with contextlib.suppress(OSError, ValueError):
             close()
     if own:
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
-    if os.name != "nt":
+    if not WINDOWS:
         with contextlib.suppress(OSError, ValueError):
             close()
 
