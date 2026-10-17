@@ -477,13 +477,30 @@ def test_an_empty_list_item_followed_by_a_blank_line_ends() -> None:
         ("[a]: /u\n'title on the next line'\nTitle\n---\n", "Title"),
         ("[a]:\n/destination-on-the-next-line\nTitle\n---\n", "Title"),
         ("[a]: /u 'not a title' trailing\n---\n", "[a]: /u 'not a title' trailing"),
-        ("[c]:\n===\n", "[c]:"),  # no destination: not a definition
         ("[ ]: /u\n---\n", "[ ]: /u"),  # a blank label is not one either
-        ("[ref]: /url\n-\n---\n", "-"),  # "-" continues the paragraph; "---" underlines it
     ],
 )
 def test_link_reference_definitions_are_not_part_of_a_setext_title(text: str, title: str) -> None:
     assert titles(text) == [(2 if text.rstrip().endswith("-") else 1, title)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # CommonMark: no destination, so "[c]:" is a paragraph and "===" underlines it (level 1).
+        # markdown-it-py reads "===" on the next line as the definition's destination.
+        "[c]:\n===\n",
+        # CommonMark: "-" continues the paragraph (an empty item cannot interrupt one), the
+        # definition is taken out when it closes, and "---" underlines "-" (level 2).
+        # markdown-it-py takes the definition out first, so "-" is an empty list item.
+        "[ref]: /url\n-\n---\n",
+    ],
+)
+def test_known_deviations_from_commonmark_on_link_reference_definitions(text: str) -> None:
+    # markdown-it-py departs from the specification here (ADR 0018); the reference implementation
+    # finds a heading in each. These tests record the library's behaviour, so an upgrade that
+    # changes it is noticed.
+    assert titles(text) == []
 
 
 @pytest.mark.parametrize(
@@ -515,6 +532,18 @@ def test_a_heading_after_definitions_starts_at_its_own_text() -> None:
 @pytest.mark.parametrize("text", ["[ref]: /url\n===\n", "[ref]: /url\n---\n"])
 def test_an_underline_under_definitions_alone_is_no_heading(text: str) -> None:
     assert titles(text) == []  # "===" is paragraph text; "---" a thematic break
+
+
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("> ~~~\n> code\nOutside\n---\n", "Outside"),  # fenced code in a quote takes no lazy line
+        ("> - a\n>   ```\n>   x\nOut\n---\n", "Out"),  # nor in a list item in a quote
+        ("- > ```\n  > x\nOut\n---\n", "Out"),  # nor in a quote in a list item
+    ],
+)
+def test_fenced_code_in_a_container_ends_with_it(text: str, title: str) -> None:
+    assert titles(text) == [(2, title)]
 
 
 def test_a_lazy_line_after_a_quote_is_no_setext_heading() -> None:
