@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import Engine
 
+from vault.core.logging import log_event
 from vault.core.security import LocalUser, current_user
 from vault.db.documents import (
     DEFAULT_PAGE,
@@ -18,9 +21,12 @@ from vault.db.documents import (
     Order,
     SortKey,
     get_document,
+    get_original,
     list_documents,
 )
+from vault.storage.blobs import BlobIntegrityError, BlobStore
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
 
 # Beyond any library; it keeps the number inside SQLite's integer range.
@@ -136,4 +142,54 @@ async def read_document(
         version_origin=detail.version_origin,
         import_sources=[Source.model_validate(s, from_attributes=True) for s in detail.sources],
         jobs=[Job.model_validate(job, from_attributes=True) for job in detail.jobs],
+    )
+
+
+@router.get(
+    "/documents/{document_id}/file",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "description": "The original file, as an attachment, with its own media type",
+            "content": {
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+            },
+        },
+        404: {"description": "No such document"},
+        500: {"description": "The stored copy is missing, or two files claim its hash"},
+    },
+)
+async def download_document(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+) -> FileResponse:
+    """The document's current bytes, exactly as imported, saved under the name of its first import.
+    Always an attachment, so the browser saves it and never shows it as a page of this origin."""
+    engine: Engine | None = request.app.state.engine
+    store: BlobStore | None = request.app.state.blobs
+    if engine is None or store is None:
+        raise HTTPException(status_code=503, detail="no vault is open")
+    original = await run_in_threadpool(get_original, engine, document_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail="no such document")
+    try:
+        path = await run_in_threadpool(store.find, original.sha256)
+    except BlobIntegrityError:
+        path = None
+    if path is None:
+        # The row names bytes the store cannot hand out: missing, or two files under one hash. The
+        # id came in the request, so it is not logged (identifier() is for ids the app made); the
+        # integrity scan finds which blob it is.
+        log_event(logger, "documents.blob_unavailable")
+        raise HTTPException(
+            status_code=500, detail="the stored copy of this document is unavailable"
+        )
+    return FileResponse(
+        path,
+        filename=original.filename,
+        content_disposition_type="attachment",
+        # A header, not media_type: Starlette adds "; charset=utf-8" to a text/ media type, and a
+        # text file may be UTF-16 or UTF-32 with a byte order mark (vault.ingest.validate).
+        headers={"Content-Type": original.mime},
     )
