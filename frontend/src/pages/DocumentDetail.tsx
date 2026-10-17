@@ -14,21 +14,26 @@ import {
   Title,
 } from "@mantine/core";
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { useApi } from "../api/api-context";
 import {
   type DocumentDetail as Detail,
   type DocumentsError,
   ERROR_TEXT,
+  MOVE_ERROR_TEXT,
+  MOVE_UNKNOWN_RELOAD_FAILED_TEXT,
+  MOVE_UNKNOWN_TEXT,
+  type MoveAction,
   STATE_LABEL,
   fileName,
   formatDate,
   formatSize,
+  moveDocument,
   saveOriginal,
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
-import { useDocument } from "../api/useDocuments";
+import { loadDocument, useDocument } from "../api/useDocuments";
 
 const METHOD_LABEL: Record<Detail["import_sources"][number]["method"], string> = {
   upload: "Upload",
@@ -95,7 +100,7 @@ function Loaded({ documentId }: { documentId: string }) {
       </Stack>
     );
   }
-  return <Details document={state.data} />;
+  return <Details document={state.data} reload={reload} />;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -111,11 +116,72 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Details({ document }: { document: Detail }) {
+const MOVED_TEXT: Record<MoveAction, { title: string; text: string }> = {
+  trash: {
+    title: "Moved to trash",
+    text: "The document is in the trash. Restore brings it back as it was.",
+  },
+  restore: { title: "Restored", text: "The document is back in the library." },
+};
+
+/** How the last move ended, as the page tells it. */
+type MoveOutcome =
+  | { kind: "done"; action: MoveAction }
+  | { kind: "refused"; action: MoveAction; error: DocumentsError }
+  | { kind: "unknown" }
+  | { kind: "unknown-reload-failed"; error: DocumentsError };
+
+const MOVE_FAILED_TITLE: Record<MoveAction, string> = {
+  trash: "Not moved to trash",
+  restore: "Not restored",
+};
+
+function Details({ document: loaded, reload }: { document: Detail; reload: () => void }) {
   const api = useApi();
   const { recheck } = useSessionState();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<DocumentsError | null>(null);
+  // The document as the last trash or restore returned it; it starts as the page loaded it.
+  const [document, setDocument] = useState(loaded);
+  const [moving, setMoving] = useState(false);
+  // Set at once on a click, before React re-renders the disabled button, so a second click that
+  // arrives in between sends nothing.
+  const movingNow = useRef(false);
+  const [outcome, setOutcome] = useState<MoveOutcome | null>(null);
+  const trashed = document.state === "trashed";
+
+  const move = (action: MoveAction) => {
+    if (movingNow.current) return;
+    movingNow.current = true;
+    setMoving(true);
+    setOutcome(null);
+    const settle = (next: MoveOutcome, error?: DocumentsError) => {
+      movingNow.current = false;
+      setMoving(false);
+      setOutcome(next);
+      if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
+    };
+    void moveDocument(api, document.id, action).then(async (result) => {
+      if (result.status === "ok") {
+        setDocument(result.document);
+        settle({ kind: "done", action });
+        return;
+      }
+      if (result.status === "error") {
+        settle({ kind: "refused", action, error: result.error }, result.error);
+        return;
+      }
+      // The move may have been made: show the document as the backend now has it. The button
+      // stays disabled until then. Trying again is safe either way, as both moves are idempotent.
+      const reloaded = await loadDocument(api, document.id);
+      if (reloaded.status === "ok") {
+        setDocument(reloaded.data);
+        settle({ kind: "unknown" });
+      } else {
+        settle({ kind: "unknown-reload-failed", error: reloaded.error }, reloaded.error);
+      }
+    });
+  };
 
   const download = () => {
     setSaving(true);
@@ -134,13 +200,63 @@ function Details({ document }: { document: Detail }) {
         <Title order={2} style={{ wordBreak: "break-word" }}>
           {fileName(document)}
         </Title>
-        <Button onClick={download} loading={saving}>
-          Download original
-        </Button>
+        <Group gap="sm">
+          {trashed ? (
+            <Button
+              variant="default"
+              onClick={() => {
+                move("restore");
+              }}
+              loading={moving}
+            >
+              Restore
+            </Button>
+          ) : (
+            <Button
+              variant="light"
+              color="red"
+              onClick={() => {
+                move("trash");
+              }}
+              loading={moving}
+            >
+              Move to trash
+            </Button>
+          )}
+          <Button onClick={download} loading={saving}>
+            Download original
+          </Button>
+        </Group>
       </Group>
       {saveError !== null && (
         <Alert color="red" title="Download failed">
           {ERROR_TEXT[saveError]}
+        </Alert>
+      )}
+      {outcome?.kind === "done" && (
+        <Alert color="green" title={MOVED_TEXT[outcome.action].title} role="status">
+          {MOVED_TEXT[outcome.action].text}
+        </Alert>
+      )}
+      {outcome?.kind === "refused" && (
+        <Alert color="red" title={MOVE_FAILED_TITLE[outcome.action]}>
+          {MOVE_ERROR_TEXT[outcome.error]}
+        </Alert>
+      )}
+      {outcome?.kind === "unknown" && (
+        <Alert color="yellow" title="Change not confirmed">
+          {MOVE_UNKNOWN_TEXT}
+        </Alert>
+      )}
+      {outcome?.kind === "unknown-reload-failed" && (
+        <Alert color="red" title="Change not confirmed">
+          <Stack gap="xs" align="flex-start">
+            <Text size="sm">{MOVE_UNKNOWN_RELOAD_FAILED_TEXT}</Text>
+            <Text size="sm">{ERROR_TEXT[outcome.error]}</Text>
+            <Button size="xs" variant="light" onClick={reload}>
+              Reload
+            </Button>
+          </Stack>
         </Alert>
       )}
       <Card withBorder>
