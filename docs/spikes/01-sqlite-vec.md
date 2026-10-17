@@ -24,7 +24,8 @@ As the report script recorded it:
 - Command, from `scripts\spikes`: `uv run python -m vault_spikes vec` (the report's Method line gives it as `python -m vault_spikes vec`). The rows match the command's defaults: sizes 10,000 and 100,000, 1,024 dimensions, 30 timed queries per size, 10 neighbours per query, a 500-vector correctness check with 5 probe queries.
 - Data set: synthetic only. Random float32 vectors from a seeded generator (values in [0, 1), not normalised), inserted into a `vec0` table (`embedding float[1024]`) in a temporary database file, 1,000 rows per transaction. Only the inserts are timed, not the generation of the numbers.
 - Latency: wall-clock time of each `WHERE embedding MATCH ? AND k = 10 ORDER BY distance` query (sqlite-vec's default L2 distance), 30 queries per size, reported as the median (p50) and 95th percentile (p95). The queries run straight after the inserts in the same process, so the file was recently written and the reads are warm; a first query after a restart is not measured.
-- Database size: the file size after a WAL checkpoint.
+- Journal mode: **this run used SQLite's default rollback journal (`synchronous=FULL`), not WAL.** The script opened its database without switching to WAL, so the figures were measured on a different write path from the one ADR 0004 and the application use (WAL with `synchronous=NORMAL`, `backend/src/vault/db/engine.py`). The script now switches to WAL and stops if it cannot (`SqliteVecStore._use_wal`). The insert rates below are therefore rollback-journal figures and are expected to be higher under WAL; the search latencies, the sizes and the correctness check read or measure data already written and are not expected to depend on the journal (inferred, not measured). A re-run on the same PC replaces the insert figures.
+- Database size: the file size after the checkpoint call (a no-op in this run, since the database was not in WAL mode).
 - Peak memory: the process's peak working set, a high-water mark over the whole run (sizes are run from smallest to largest so each row's peak is its own). It does not include the operating system's file cache.
 - Correctness: 5 random queries over a separate set of 500 vectors, each answer compared place by place with a plain-Python exact search (ties within float32 rounding may swap). `same_answer_as_python` is the share of the 5 that matched.
 - What it does not measure: filter columns or partitions (the planned `chunk_vectors_<model>` table has `document_id` and `local_only`, plan section 6), `k` above 10, other dimensions than 1,024, cosine distance, concurrent writes during search, or a cold start. See `scripts/spikes/README.md` for the full description of the script.
@@ -51,7 +52,7 @@ Computed from the table above:
 | Raw vector bytes | 39.1 MiB at 10k, 390.6 MiB at 100k | `vectors * 1024 * 4`; the files are 3.1% and 1.0% larger than their vectors |
 | Latency growth, 10k to 100k | 10.7x at p50, 9.8x at p95 | ratio of the two rows, for 10x the vectors: close to linear, as expected of a brute-force scan |
 | Cost per stored value | about 2.9 ns | 300.45 ms / (100,000 x 1,024) |
-| Time to insert 100k vectors | about 50 s | 100,000 / 1,997 per second (insert rate fell about 20% from 10k to 100k) |
+| Time to insert 100k vectors | about 50 s, rollback journal | 100,000 / 1,997 per second (insert rate fell about 20% from 10k to 100k); to be re-measured with WAL |
 | Memory | about 54 MiB peak at both sizes | the process did not hold the 394.6 MiB of vectors in its own memory |
 
 ### Comparison with the plan's targets and estimates
@@ -82,5 +83,7 @@ The plan's estimates (section 16) assume 20 chunks per document and 1,024-dimens
 - The vault growing past roughly 100k-150k chunks, or a measured end-to-end search target below what the extrapolation gives: then quantization (int8 or truncated dimensions) or an approximate index, as plan section 16 already lists, would be needed earlier than "past 300k chunks". ADR 0004 already allows for this; it would be recorded in the vector store module and, if the storage choice changes, in a new ADR.
 - sqlite-vec's ANN indexes leaving alpha, which would make an approximate index available without a second storage engine.
 - The Phase 4 measurements with real chunks, the chosen embedding model's dimensions, filter columns and the real `k`, which replace these synthetic figures.
+
+**Before confirming:** re-run `uv run python -m vault_spikes vec` on the same PC once this change is merged, so the insert rates are measured with WAL as the application uses it, and replace the Results table with the new report. The search figures the conclusion rests on are not expected to change.
 
 **Suggested follow-ups once confirmed** (not done in this change): update the 10,000- and 50,000-document latency estimates in `docs/architecture.md` section 16 with these measurements, and, if the owner wants the dimension assumption checked, run `uv run python -m vault_spikes vec --dim 768` (and `--dim 512`) on the same PC.

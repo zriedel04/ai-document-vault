@@ -41,7 +41,8 @@ PROBES = 5
 """How many queries the correctness check asks; ``same_answer_as_python`` is a share of them."""
 METHOD = (
     "`python -m vault_spikes vec`. Random unit-free float32 vectors from a seeded generator are "
-    "inserted into a `vec0` table; each size is queried with random vectors for the 10 nearest "
+    "inserted into a `vec0` table in a WAL-mode database with `synchronous=NORMAL`, as the "
+    "application opens its databases; each size is queried with random vectors for the 10 nearest "
     "neighbours (exact, brute force). Latency is wall-clock time per query. Correctness compares "
     f"the extension's answers to {PROBES} random queries with a plain-Python search over a "
     "separate, smaller set of vectors (the `vectors` of the `exact-search-check` row): the same "
@@ -222,8 +223,21 @@ class SqliteVecStore:
         os.close(handle)
         self.path = Path(name)
         self.db = sqlite3.connect(self.path)
+        self._use_wal()
         self._load_extension()
         self._create_table(dim)
+
+    def _use_wal(self) -> None:
+        """Measure the journal the application uses (ADR 0004, ``vault.db.engine``): WAL with
+        ``synchronous=NORMAL``. Without it inserts go through the rollback journal with
+        ``synchronous=FULL``, a different write path. A folder that cannot hold a WAL database
+        stops the run instead of measuring the other path."""
+        mode = self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if str(mode).lower() != "wal":
+            self.close()
+            msg = "SQLite could not switch the spike database to WAL mode"
+            raise OwnRuntimeError(msg)
+        self.db.execute("PRAGMA synchronous=NORMAL")
 
     def _load_extension(self) -> None:
         import sqlite_vec

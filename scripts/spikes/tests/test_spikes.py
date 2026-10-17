@@ -5,10 +5,12 @@ from __future__ import annotations
 import array
 import codecs
 import json
+import sqlite3
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from vault_spikes import adapters
@@ -18,7 +20,7 @@ from vault_spikes import spike_ocr as ocr
 from vault_spikes import spike_pdf as pdf
 from vault_spikes import spike_vec as vec
 from vault_spikes.__main__ import KNOWN
-from vault_spikes.errors import OwnValueError
+from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.report import Environment, Report, in_domain
 
 ENV = Environment("Windows-11", "3.12.1", "cpu", 8, 16.0, None, {})
@@ -114,6 +116,36 @@ class PlainTable(vec.SqliteVecStore):
 
 
 class VecTest(unittest.TestCase):
+    def test_the_store_measures_the_wal_journal_the_application_uses(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = PlainTable(4, Path(folder))
+            try:
+                mode = store.db.execute("PRAGMA journal_mode").fetchone()[0]
+                synchronous = store.db.execute("PRAGMA synchronous").fetchone()[0]
+            finally:
+                store.close()
+        self.assertEqual(mode, "wal")
+        self.assertEqual(synchronous, 1)  # NORMAL
+
+    def test_a_folder_that_cannot_hold_wal_stops_the_run(self) -> None:
+        # Some network and virtual file systems answer the pragma with the old mode.
+        class NoWal(sqlite3.Connection):
+            def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+                if sql == "PRAGMA journal_mode=WAL":
+                    return super().execute("PRAGMA journal_mode")
+                return super().execute(sql, *args)
+
+        real_connect = sqlite3.connect
+        with tempfile.TemporaryDirectory() as folder:
+            with (
+                mock.patch.object(
+                    sqlite3, "connect", lambda path: real_connect(path, factory=NoWal)
+                ),
+                self.assertRaisesRegex(OwnRuntimeError, "WAL mode"),
+            ):
+                PlainTable(4, Path(folder))
+            self.assertEqual(list(Path(folder).iterdir()), [])  # nothing left behind
+
     def test_the_spike_reports_each_size_and_a_correct_store(self) -> None:
         report = vec.run_vec_spike(
             lambda _dim: vec.PythonStore(),
