@@ -59,7 +59,7 @@ _THEMATIC_BREAK: Final = re.compile(r" {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*")
 # repeatedly over a paragraph's lines, so a definition's title may continue over lines.
 _DEFINITION: Final = re.compile(
     r" {0,3}\[(?=[^\]]*?[^\s\]])(?:[^\\\[\]]|\\.){1,999}\]:"
-    r"[ \t]*\n?[ \t]*(?:<(?:[^<>\n\\]|\\.)*>|[^<\s\x00-\x1f][^\s\x00-\x1f]*)"
+    r"[ \t]*\n?[ \t]*(?:<(?:[^<>\n\\]|\\.)*>|([^<\s\x00-\x1f][^\s\x00-\x1f]*))"
     r"(?:(?:[ \t]*\n[ \t]*|[ \t]+)"
     r"(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?"
     r"[ \t]*(?:\n|$)"
@@ -244,7 +244,12 @@ def _opens_paragraph(line: str) -> bool:
         return _opens_paragraph(inner[1:] if inner[:1] in (" ", "\t") else inner)
     item = _list_item(line)
     if item:
-        return bool(item.group(4)) and _opens_paragraph(line[item.start(4) :])
+        if not item.group(4):
+            return False
+        # Spaces past the content column are the content's own indent: "-     code" is one
+        # space of padding and indented code (list items rule 2), not a paragraph.
+        extra = _column(line[: item.end(3)]) - _content_column(line, item)
+        return _opens_paragraph(" " * extra + line[item.start(4) :])
     return not (_ATX.fullmatch(line) or _THEMATIC_BREAK.fullmatch(line) or _fence_open(line))
 
 
@@ -254,9 +259,27 @@ def _definition_lines(lines: list[str]) -> int:
         return 0
     text = "\n".join(lines)
     position = 0
-    while match := _DEFINITION.match(text, position):
+    while (match := _DEFINITION.match(text, position)) and _balanced(match.group(1) or ""):
         position = match.end()
     return text.count("\n", 0, position) + (position == len(text) and position > 0)
+
+
+def _balanced(destination: str) -> bool:
+    """Are the unescaped parentheses of a bare link destination balanced (CommonMark 6.3)?"""
+    depth = 0
+    escaped = False
+    for char in destination:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 
 
 def _quoted_indent(line: str) -> int:

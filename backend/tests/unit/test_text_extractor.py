@@ -473,6 +473,27 @@ def test_link_reference_definitions_are_not_part_of_a_setext_title(text: str, ti
     assert titles(text) == [(2 if text.rstrip().endswith("-") else 1, title)]
 
 
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("[ref]: </x y>\nTitle\n---\n", "Title"),  # a pointy destination may hold a space
+        ("[ref]: /a(b)\nTitle\n---\n", "Title"),
+        ("[ref]: /a\\(b\nTitle\n---\n", "Title"),  # an escaped parenthesis needs no partner
+        ("[ref]: /a(b\nTitle\n---\n", "[ref]: /a(b Title"),  # unbalanced: not a definition
+        ("[ref]: /a)b\nTitle\n---\n", "[ref]: /a)b Title"),
+    ],
+)
+def test_a_bare_destination_needs_balanced_parentheses(text: str, title: str) -> None:
+    assert titles(text) == [(2, title)]
+
+
+@pytest.mark.parametrize("marker", ["-", "*", "1.", "10)"])
+def test_a_list_item_that_opens_with_indented_code_takes_no_lazy_line(marker: str) -> None:
+    # Five spaces after the marker: one of padding, then four of code indent (list items rule 2).
+    assert titles(f"{marker}     code\nOutside\n---\n") == [(2, "Outside")]
+    assert titles(f"{marker}    text\nlazy\n---\n") == []  # four spaces: a paragraph
+
+
 def test_a_heading_after_definitions_starts_at_its_own_text() -> None:
     [heading] = markdown_headings("[ref]: /url\nTitle\n---\n")
     assert heading == Heading(2, "Title", 12, 21)
