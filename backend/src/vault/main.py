@@ -20,6 +20,7 @@ from vault.db.migrate import upgrade_to_latest
 from vault.ingest.importer import Importer
 from vault.ingest.orphans import sweep_orphans
 from vault.jobs.queue import JobQueue
+from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
 from vault.web import INDEX, find_file, install_frontend
@@ -27,6 +28,8 @@ from vault.web import INDEX, find_file, install_frontend
 logger = logging.getLogger(__name__)
 
 # backend/src/vault/main.py -> the repository root, where frontend/dist is built.
+# How long shutdown waits for running jobs; one still running is queued again at the next start.
+WORKER_STOP_SECONDS = 10.0
 DEFAULT_FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
@@ -37,8 +40,9 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
     every blob is made read-only again), the database is migrated, blobs that no database row uses
     are moved to ``blobs/orphans/`` and jobs that a killed process left running are queued again,
-    all before the first request. A bad vault folder (inside a Git
-    repository, say) or a damaged blob store (the temporary folder is a link) stops the start-up.
+    all before the first request. The worker pool (``vault.jobs.worker``) starts with the server
+    and is stopped when it shuts down. A bad vault folder (inside a Git repository, say) or a
+    damaged blob store (the temporary folder is a link) stops the start-up.
     Without a vault (demo mode, tests) there is no database and the token is random for this
     process only, so only the open endpoints work.
 
@@ -51,6 +55,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     engine = None
     blobs = None
     importer = None
+    workers = None
     if settings.vault.path is not None:
         paths = ensure_vault(settings.vault.path)
         token = load_or_create_token(paths.token_file)
@@ -78,14 +83,23 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             strays=metric(orphans.strays),
         )
         importer = Importer(engine, blobs)
+        # No stage has a handler yet (extraction arrives next), so the pool starts no threads.
+        workers = WorkerPool(JobQueue(engine), handlers={}, limits=settings.workers.limits())
     else:
         token = new_token()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        yield
-        if engine is not None:
-            engine.dispose()
+        # Recovery above ran before this: the pool must never start while jobs are left running.
+        if workers is not None:
+            workers.start()
+        try:
+            yield
+        finally:
+            if workers is not None:
+                await anyio.to_thread.run_sync(workers.stop, WORKER_STOP_SECONDS)
+            if engine is not None:
+                engine.dispose()
 
     app = FastAPI(
         title="AI Document Vault",
@@ -99,6 +113,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.engine = engine
     app.state.blobs = blobs
     app.state.importer = importer
+    app.state.workers = workers
     app.state.upload_slots = anyio.Semaphore(imports.UPLOAD_SLOTS)
     app.add_middleware(LocalSecurityMiddleware, token=token)
     # Added last, so it is outermost and its headers are on the refusals above as well.

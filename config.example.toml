@@ -20,5 +20,14 @@ port = 8765
 # Japanese, and the other Windows code pages listed in the error if you mistype one.
 text_fallback_encoding = "cp1252"
 
+[workers]
+# How many jobs of each processing stage may run at once (1 to 16).
+extract = 2
+ocr = 1
+metadata = 1
+chunk = 1
+embed = 1
+enrich = 2
+
 [logging]
 level = "INFO"
