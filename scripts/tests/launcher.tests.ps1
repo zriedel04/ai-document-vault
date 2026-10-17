@@ -412,6 +412,39 @@ try {
     $message = Get-ThrownMessage { Read-Token $vault }
     Assert-That 'a token file that holds something else is refused' ($null -ne $message)
     Assert-That 'and what it held is never echoed' (($null -ne $message) -and (-not $message.Contains($secret)))
+
+    # --- backup: the folder reaches the backend in the environment, never on its command line --
+    $message = Get-ThrownMessage { Invoke-Backup '' }
+    Assert-That 'backup without a folder says how to name one' (($null -ne $message) -and ($message -match '-To'))
+    # A stand-in for the backend's Python that shows what it received and exits with a set code.
+    $stub = Join-Path $work 'python-stub.cmd'
+    Write-TextFile $stub ("@echo off`r`necho target=[%VAULT_BACKUP_TO%]`r`necho args=[%*]`r`nexit /b %STUB_EXIT%`r`n")
+    function Get-BackendPython { return $stub }
+    [Environment]::SetEnvironmentVariable('STUB_EXIT', '0', 'Process')
+    Push-Location -LiteralPath $work
+    try {
+        $lines = @(Invoke-Backup 'my backups' 6>&1 | ForEach-Object { [string]$_ })
+    }
+    finally {
+        Pop-Location
+    }
+    Assert-That 'a relative backup folder is taken from the current location' `
+        ($lines -contains "target=[$(Join-Path $work 'my backups')]")
+    Assert-That 'the folder is not on the backend command line' ($lines -contains 'args=[-m vault.backup]')
+    $spaced = Join-Path $work 'My Backups'
+    $lines = @(Invoke-Backup ($spaced + '\') 6>&1 | ForEach-Object { [string]$_ })
+    $shape = '\Atarget=\[' + [regex]::Escape($spaced) + '\\?\]\z'
+    Assert-That 'a folder with a space and a trailing backslash arrives intact' `
+        (@($lines | Where-Object { $_ -match $shape }).Count -eq 1)
+    Assert-That 'the folder is taken out of the environment afterwards' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_BACKUP_TO', 'Process'))
+    [Environment]::SetEnvironmentVariable('STUB_EXIT', '1', 'Process')
+    $message = Get-ThrownMessage { Invoke-Backup (Join-Path $work 'VaultBackups') 6>&1 }
+    Assert-That 'a backup that fails stops with its exit code' (($null -ne $message) -and ($message -match 'exit code 1'))
+    Assert-That 'and does not repeat the folder' (($null -ne $message) -and (-not $message.Contains('VaultBackups')))
+    Assert-That 'and takes the folder out of the environment too' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_BACKUP_TO', 'Process'))
+    [Environment]::SetEnvironmentVariable('STUB_EXIT', [NullString]::Value, 'Process')
 }
 finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
@@ -428,6 +461,11 @@ $null = & $shell -NoProfile -File $launcher 'bogus' 2>&1
 $bogusExit = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 Assert-That 'an unknown command is refused' ($bogusExit -ne 0)
+$ErrorActionPreference = 'Continue'
+$null = & $shell -NoProfile -File $launcher 'backup' 2>&1
+$backupExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Assert-That 'backup without -To is refused' ($backupExit -eq 1)
 
 # --- the token is never printed -----------------------------------------------------------------
 $printing = Select-String -LiteralPath $launcher -Pattern '^\s*(Write-Host|Write-Output|Write-Warning|Write-Verbose|Write-Information|\[Console\])' |

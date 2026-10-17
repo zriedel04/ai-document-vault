@@ -8,6 +8,7 @@ One PowerShell script at the repository root installs, starts and stops the app 
 | `.\vault.ps1 run` | Starts the server hidden in the background, waits until `/api/health` answers with the launch id it was started with (below), reads the token from the vault folder and opens the browser at `http://127.0.0.1:8765/#token=<token>` (ADR 0016). Run again while the server is up, it only opens the browser, at the address and with the token of the server that is up (the settings it was started with are in the record in `.run/`), and says so if `config.toml` has changed since. `-NoBrowser` skips that. |
 | `.\vault.ps1 stop` | Stops the server that `run` started. |
 | `.\vault.ps1 dev` | Starts the server like `run` and the Vite dev server (`http://127.0.0.1:5173/`) in the window, and opens the browser once Vite answers with its own launch id; Ctrl+C stops both. Refuses to start if something already answers on port 5173. |
+| `.\vault.ps1 backup -To <folder>` | Snapshots `vault.db` and copies the original files that are not yet in the folder (below). Safe while the app runs; it does not start or stop the server. |
 
 ## Settings
 
@@ -29,6 +30,23 @@ That check alone cannot keep the token from another program: one can take the po
 
 If start-up does not complete for any reason (the record cannot be written, the server exits or does not answer within 20 minutes, Ctrl+C), the launcher ends the server it started, so no server runs that `stop` cannot find. The wait is long because the first start of an existing vault checks the access list of every file below it, which the backend allows 15 minutes; after ten seconds the launcher says that it is still starting. A server that exits is noticed at once. A record is removed only if it still names the process that was ended (its id and start time): `stop` can end the server of a `dev` that is still open, `run` can then start another one, and `dev` closing later must not forget that one. `dev` ends its server under the lock, like every other change to the record. `stop` removes the record only once the process has actually exited: if Windows refuses to end it, or it is still there after ten seconds, `stop` says so, exits with an error and keeps the record so that it can be run again.
 
+## Backup
+
+`backup -To <folder>` runs `python -m vault.backup` in `backend/` with the backend's own settings, so it backs up the vault the server uses. The folder is resolved against the current PowerShell location (a relative `-To` means the folder you are in, not `backend/`) and goes to Python in the environment variable `VAULT_BACKUP_TO`, never on its command line: Windows PowerShell 5.1 does not escape a trailing backslash inside the quotes it adds around a path with a space, so `"E:\My Backups\"` would reach Python with a stray quote. The backend's lines are passed on as they are, and the launcher stops with the exit code if the backup does not complete.
+
+What ends up in the folder:
+
+```
+<folder>\
+  backup.lock                          held while a backup runs
+  blobs\sha256\aa\bb\<hash>.<ext>        every original file, copied once, read-only
+  snapshots\2026-10-17T143005Z\         one folder per backup, named by the UTC time
+    vault.db                           consistent copy of the database, read-only
+    config.toml                        the settings file, read-only
+```
+
+The database snapshot is SQLite's `VACUUM INTO`, consistent while the app writes. Only original files the snapshot lists and the folder does not hold yet are copied, each to a temporary name, checked against its hash and then given its name, so an interrupted backup or a full disk never leaves a partial file under a final name. `index.db`, `derived\`, `logs\` and `local-token` are left out (rebuildable, or a credential the server makes again). The command prints counts and the snapshot's name only, never a file name or the folder. It refuses a folder inside the vault, inside a Git repository or reached through a link or junction, and never overwrites a snapshot; on Windows it makes a new folder private to your account and warns if the folder stays readable by other accounts (use a BitLocker-encrypted drive). Old snapshots are not deleted yet (the plan's 14 daily and 12 monthly): delete them by hand. A snapshot folder without `vault.db` is a backup that was interrupted and can be deleted. Details: `backend/README.md`, section Backup.
+
 ## The token
 
 The token is never printed. It is in the address handed to the browser, which makes it visible to other local programs for a moment as part of the browser's command line; ADR 0016 accepts that limit and describes the alternative.
@@ -39,8 +57,9 @@ The token is never printed. It is in the address handed to the browser, which ma
 - `install` does not download the embedding and OCR models. Which models are used depends on the spikes that are still to be run (ADRs 0013 to 0015).
 - `stop` ends the process. It is not yet graceful, because there are no background jobs to pause; a shutdown request with the token comes with the job queue.
 - `dev` does not reload the backend: stop and start it after a backend change. It needs the server on `127.0.0.1:8765`, the address the Vite proxy in `frontend/vite.config.ts` is fixed to, and refuses any other host or port (`localhost` can resolve to `::1`).
-- `configure`, `update`, `backup` and `demo` arrive with the features they serve.
+- `configure`, `update` and `demo` arrive with the features they serve.
+- `backup` keeps every snapshot; the plan's retention (14 daily and 12 monthly) and the scheduled daily run are not part of it yet.
 
 ## Tests
 
-`scripts/tests/launcher.tests.ps1` checks the token shape (including a trailing newline, as lesson 4 in `CLAUDE.md` asks), the address, the process record (including a folder name with letters outside ASCII), the port check, the lock, `stop` when the server cannot be ended, a start-up that fails after the server has started, a record that names another process, the launch id (an answer with the same id, another one, none, or not JSON, a process that exits, one that never answers), the token file and how the script is called, in both PowerShell editions. The `Launcher (Windows)` CI job also runs `install`, `run`, a second `run`, `stop` and a refused start without a vault folder, a refused start on a port something else holds, two `run` commands started together, `dev` with a taken Vite port, `dev` ending its server when Vite ends, and `dev` leaving alone a server that `run` started after `stop` had ended dev's own, against a real server (in a vault folder with an accented letter in its name, so the record is read back by the other edition as well), in both editions, using a throwaway vault in the runner's temporary folder. Opening the browser is the one step CI cannot show.
+`scripts/tests/launcher.tests.ps1` checks the token shape (including a trailing newline, as lesson 4 in `CLAUDE.md` asks), the address, the process record (including a folder name with letters outside ASCII), the port check, the lock, `stop` when the server cannot be ended, a start-up that fails after the server has started, a record that names another process, the launch id (an answer with the same id, another one, none, or not JSON, a process that exits, one that never answers), the token file, `backup` (no folder, a relative folder, a folder with a space and a trailing backslash, the folder kept off the backend's command line and out of the environment afterwards, a backend that fails) and how the script is called, in both PowerShell editions. The `Launcher (Windows)` CI job also runs `install`, `run`, a second `run`, `stop` and a refused start without a vault folder, a refused start on a port something else holds, two `run` commands started together, `dev` with a taken Vite port, `dev` ending its server when Vite ends, and `dev` leaving alone a server that `run` started after `stop` had ended dev's own, against a real server (in a vault folder with an accented letter in its name, so the record is read back by the other edition as well), in both editions, using a throwaway vault in the runner's temporary folder. The same job runs `backup` in both editions while the server runs, into a folder with a space, an accented letter and a trailing backslash, checks that two snapshots exist and that the folder is never printed, and checks that a folder inside the vault is refused. Opening the browser is the one step CI cannot show.
