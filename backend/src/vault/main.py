@@ -18,6 +18,7 @@ from vault.core.security import LocalSecurityMiddleware, load_or_create_token, n
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
 from vault.ingest.importer import Importer
+from vault.ingest.orphans import sweep_orphans
 from vault.jobs.queue import JobQueue
 from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobStore
@@ -37,11 +38,11 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
 
     With ``vault.path`` set, the vault folder is validated and created, the install's token is read
     (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
-    every blob is made read-only again), the database is migrated and jobs that a killed process
-    left running are queued again, all before the first request. The worker pool
-    (``vault.jobs.worker``) starts with the server and is stopped when it shuts down. A bad vault
-    folder (inside a Git repository, say) or a damaged blob store (the temporary folder is a link)
-    stops the start-up.
+    every blob is made read-only again), the database is migrated, blobs that no database row uses
+    are moved to ``blobs/orphans/`` and jobs that a killed process left running are queued again,
+    all before the first request. The worker pool (``vault.jobs.worker``) starts with the server
+    and is stopped when it shuts down. A bad vault folder (inside a Git repository, say) or a
+    damaged blob store (the temporary folder is a link) stops the start-up.
     Without a vault (demo mode, tests) there is no database and the token is random for this
     process only, so only the open endpoints work.
 
@@ -71,6 +72,15 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             "jobs.recovered",
             requeued=metric(recovery.requeued),
             failed=metric(recovery.failed),
+        )
+        # Before any import can run: blobs a crash left without a row are moved aside, not deleted.
+        orphans = sweep_orphans(engine, blobs)
+        log_event(
+            logger,
+            "blobs.orphans",
+            moved=metric(orphans.moved),
+            failed=metric(orphans.failed),
+            strays=metric(orphans.strays),
         )
         importer = Importer(engine, blobs)
         # No stage has a handler yet (extraction arrives next), so the pool starts no threads.
