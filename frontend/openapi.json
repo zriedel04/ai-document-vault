@@ -627,6 +627,56 @@
         ]
       }
     },
+    "/api/documents/{document_id}/file": {
+      "get": {
+        "description": "The document's current bytes, exactly as imported, saved under the name of its first import.\nAlways an attachment, so the browser saves it and never shows it as a page of this origin.",
+        "operationId": "download_document_api_documents__document_id__file_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The original file, as an attachment, with its own media type"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "500": {
+            "description": "The stored copy is missing, or two files claim its hash"
+          }
+        },
+        "summary": "Download Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Report that the server is up. Reads nothing from the vault or the database.",

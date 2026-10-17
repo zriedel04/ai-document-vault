@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Download of a document's original `GET /api/documents/{id}/file`: the current bytes as an attachment, under the first import's name, with the validator's media type.
 - Document details `GET /api/documents/{id}`: hash, current version, every import source and the processing jobs, read from one snapshot (`vault.db.engine.read_snapshot`).
 - Document list `GET /api/documents`: one page of the documents in use or in the trash, sorted on the server by time added, name or size, with the name of the first import, the size and type of the current version, and the total.
 - Project licence: Apache-2.0 (`LICENSE`, ADR 0017), declared in the backend, frontend and demo generator package metadata; the backend's wheel and sdist include the licence text.

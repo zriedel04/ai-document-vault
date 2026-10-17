@@ -307,3 +307,46 @@ def _source(row: Row[Any]) -> SourceDetail:
         batch_id=row.import_batch_id,
         imported_at=_utc(row.imported_at),
     )
+
+
+@dataclass(frozen=True)
+class Original:
+    """What a download of a document's current bytes needs."""
+
+    sha256: str
+    extension: str
+    mime: str
+    filename: str  # the first import's name, or ``<id>.<extension>`` when it has none
+
+
+def get_original(engine: Engine, document_id: str) -> Original | None:
+    """The current version's blob and the name to save it under, or None for an unknown id."""
+    if not ids.is_ulid(document_id):
+        return None
+    first_name = (
+        select(import_sources.c.original_filename)
+        .where(import_sources.c.document_id == documents.c.id)
+        .order_by(import_sources.c.imported_at, import_sources.c.id)
+        .limit(1)
+        .scalar_subquery()
+    )
+    with engine.connect() as connection:  # one statement, so one snapshot
+        row = connection.execute(
+            select(blobs.c.sha256, blobs.c.ext, blobs.c.mime, first_name.label("name"))
+            .select_from(documents)
+            .join(
+                document_versions,
+                (document_versions.c.id == documents.c.current_version_id)
+                & (document_versions.c.document_id == documents.c.id),
+            )
+            .join(blobs, blobs.c.sha256 == document_versions.c.blob_sha256)
+            .where(documents.c.id == document_id)
+        ).one_or_none()
+    if row is None:
+        return None
+    return Original(
+        sha256=row.sha256,
+        extension=row.ext,
+        mime=row.mime,
+        filename=row.name if row.name is not None else f"{document_id}.{row.ext}",
+    )
