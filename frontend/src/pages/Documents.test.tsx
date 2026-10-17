@@ -484,6 +484,155 @@ describe("download original", () => {
   });
 });
 
+describe("trash and restore", () => {
+  const TRASHED_AT = "2026-10-05T09:30:00Z";
+  const inUse = detail({ state: "ready" });
+  const inTrash = detail({ state: "trashed", trashed_at: TRASHED_AT });
+
+  /** A backend that holds one document and moves it as the real endpoints do. */
+  function movingBackend(start: DocumentDetail) {
+    let current = start;
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}` && request.method === "GET") {
+        return jsonResponse(current);
+      }
+      if (request.method !== "POST") return undefined;
+      if (url.pathname === `/api/documents/${ID}/trash`) current = inTrash;
+      else if (url.pathname === `/api/documents/${ID}/restore`) current = inUse;
+      else return undefined;
+      return jsonResponse(current);
+    });
+    return spy;
+  }
+
+  function posts(spy: ReturnType<typeof backend>): Request[] {
+    return spy.mock.calls.map(([input]) => input as Request).filter((r) => r.method === "POST");
+  }
+
+  it("moves a document in use to the trash and shows its new state", async () => {
+    const spy = movingBackend(inUse);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Move to trash" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Moved to trash");
+    expect(screen.getByText("In trash")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Move to trash" })).toBeNull();
+    const [request] = posts(spy);
+    expect(new URL(request?.url ?? "").pathname).toBe(`/api/documents/${ID}/trash`);
+    expect(request?.headers.get("authorization")).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(posts(spy)).toHaveLength(1);
+  });
+
+  it("restores a trashed document and shows its new state", async () => {
+    const spy = movingBackend(inTrash);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    expect(await screen.findByText("In trash")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Restored");
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByText("In trash")).toBeNull();
+    expect(screen.getByRole("button", { name: "Move to trash" })).toBeEnabled();
+    expect(posts(spy).map((request) => new URL(request.url).pathname)).toEqual([
+      `/api/documents/${ID}/restore`,
+    ]);
+  });
+
+  const SERVER_TEXT = "Lease agreement.pdf: private server detail";
+
+  it.each([
+    ["a 500", () => jsonResponse({ detail: SERVER_TEXT }, 500), /The change was not saved/],
+    ["a 422", () => jsonResponse({ detail: [{ msg: SERVER_TEXT }] }, 422), /not saved/],
+    ["a 503", () => jsonResponse({ detail: SERVER_TEXT }, 503), /No vault is open/],
+    ["a 404", () => jsonResponse({ detail: SERVER_TEXT }, 404), /There is no such document/],
+    ["another document", () => jsonResponse(detail({ id: "C".repeat(26) })), /not saved/],
+    [
+      "a lost connection",
+      () => {
+        throw new TypeError(SERVER_TEXT);
+      },
+      /not saved/,
+    ],
+  ])("says the move failed after %s, with a fixed text", async (_case, answer, text) => {
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/trash`) return answer();
+      return request.method === "GET" && url.pathname === `/api/documents/${ID}`
+        ? jsonResponse(inUse)
+        : undefined;
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: "Move to trash" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Not moved to trash");
+    expect(alert).toHaveTextContent(text);
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    // The page still shows the document as it was, and the button can be used again.
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Move to trash" })).toBeEnabled();
+  });
+
+  it("brings the token notice back when the move is refused", async () => {
+    let current = inUse;
+    const { spy, accepted } = restartingBackend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/trash` && request.method === "POST") {
+        current = inTrash;
+        return jsonResponse(current);
+      }
+      return url.pathname === `/api/documents/${ID}` ? jsonResponse(current) : undefined;
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    const button = await screen.findByRole("button", { name: "Move to trash" });
+
+    accepted.token = NEW_TOKEN;
+    await userEvent.click(button);
+    await pasteToken(NEW_TOKEN);
+
+    // The refused request changed nothing; the page reloads the document with the new token.
+    expect(await screen.findByRole("button", { name: "Move to trash" })).toBeEnabled();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(current).toBe(inUse);
+    const refused = spy.mock.calls
+      .map(([input]) => input as Request)
+      .filter((request) => request.method === "POST");
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.headers.get("authorization")).toBe(`Bearer ${TEST_TOKEN}`);
+  });
+
+  it("sends one request however often the button is clicked while it runs", async () => {
+    const answers: ((response: Response) => void)[] = [];
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/trash`) {
+        return new Promise<Response>((resolve) => answers.push(resolve));
+      }
+      return request.method === "GET" && url.pathname === `/api/documents/${ID}`
+        ? jsonResponse(inUse)
+        : undefined;
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    const button = await screen.findByRole("button", { name: "Move to trash" });
+
+    await userEvent.dblClick(button);
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(answers).toHaveLength(1);
+    });
+    expect(button).toBeDisabled();
+    expect(posts(spy)).toHaveLength(1);
+
+    answers[0]?.(jsonResponse(inTrash));
+    expect(await screen.findByRole("status")).toHaveTextContent("Moved to trash");
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(posts(spy)).toHaveLength(1);
+  });
+});
+
 describe("helpers", () => {
   it.each([
     [0, "0 bytes"],

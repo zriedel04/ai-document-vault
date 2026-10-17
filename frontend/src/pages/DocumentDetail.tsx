@@ -14,17 +14,20 @@ import {
   Title,
 } from "@mantine/core";
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { useApi } from "../api/api-context";
 import {
   type DocumentDetail as Detail,
   type DocumentsError,
   ERROR_TEXT,
+  MOVE_ERROR_TEXT,
+  type MoveAction,
   STATE_LABEL,
   fileName,
   formatDate,
   formatSize,
+  moveDocument,
   saveOriginal,
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
@@ -111,11 +114,54 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Details({ document }: { document: Detail }) {
+const MOVED_TEXT: Record<MoveAction, { title: string; text: string }> = {
+  trash: {
+    title: "Moved to trash",
+    text: "The document is in the trash. Restore brings it back as it was.",
+  },
+  restore: { title: "Restored", text: "The document is back in the library." },
+};
+
+const MOVE_FAILED_TITLE: Record<MoveAction, string> = {
+  trash: "Not moved to trash",
+  restore: "Not restored",
+};
+
+function Details({ document: loaded }: { document: Detail }) {
   const api = useApi();
   const { recheck } = useSessionState();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<DocumentsError | null>(null);
+  // The document as the last trash or restore returned it; it starts as the page loaded it.
+  const [document, setDocument] = useState(loaded);
+  const [moving, setMoving] = useState(false);
+  // Set at once on a click, before React re-renders the disabled button, so a second click that
+  // arrives in between sends nothing.
+  const movingNow = useRef(false);
+  const [moved, setMoved] = useState<MoveAction | null>(null);
+  const [moveError, setMoveError] = useState<{ action: MoveAction; error: DocumentsError } | null>(
+    null,
+  );
+  const trashed = document.state === "trashed";
+
+  const move = (action: MoveAction) => {
+    if (movingNow.current) return;
+    movingNow.current = true;
+    setMoving(true);
+    setMoved(null);
+    setMoveError(null);
+    void moveDocument(api, document.id, action).then((result) => {
+      movingNow.current = false;
+      setMoving(false);
+      if (result.status === "ok") {
+        setDocument(result.document);
+        setMoved(action);
+        return;
+      }
+      setMoveError({ action, error: result.error });
+      if (result.error === "needs-token") recheck(); // bring the token notice back (see useRequest)
+    });
+  };
 
   const download = () => {
     setSaving(true);
@@ -134,13 +180,47 @@ function Details({ document }: { document: Detail }) {
         <Title order={2} style={{ wordBreak: "break-word" }}>
           {fileName(document)}
         </Title>
-        <Button onClick={download} loading={saving}>
-          Download original
-        </Button>
+        <Group gap="sm">
+          {trashed ? (
+            <Button
+              variant="default"
+              onClick={() => {
+                move("restore");
+              }}
+              loading={moving}
+            >
+              Restore
+            </Button>
+          ) : (
+            <Button
+              variant="light"
+              color="red"
+              onClick={() => {
+                move("trash");
+              }}
+              loading={moving}
+            >
+              Move to trash
+            </Button>
+          )}
+          <Button onClick={download} loading={saving}>
+            Download original
+          </Button>
+        </Group>
       </Group>
       {saveError !== null && (
         <Alert color="red" title="Download failed">
           {ERROR_TEXT[saveError]}
+        </Alert>
+      )}
+      {moved !== null && (
+        <Alert color="green" title={MOVED_TEXT[moved].title} role="status">
+          {MOVED_TEXT[moved].text}
+        </Alert>
+      )}
+      {moveError !== null && (
+        <Alert color="red" title={MOVE_FAILED_TITLE[moveError.action]}>
+          {MOVE_ERROR_TEXT[moveError.error]}
         </Alert>
       )}
       <Card withBorder>

@@ -114,3 +114,39 @@ export async function saveOriginal(
   }, 60_000);
   return null;
 }
+
+/** Moving a document to the trash, or bringing it back. */
+export type MoveAction = "trash" | "restore";
+
+export type MoveResult =
+  { status: "ok"; document: DocumentDetail } | { status: "error"; error: DocumentsError };
+
+/**
+ * Move a document to the trash or restore it, and return it as the backend now has it. Only the
+ * status code decides the error, so nothing the server wrote reaches the page or a log.
+ */
+export async function moveDocument(
+  api: Api,
+  documentId: string,
+  action: MoveAction,
+): Promise<MoveResult> {
+  const options = { params: { path: { document_id: documentId } } };
+  try {
+    const { data, response } =
+      action === "trash"
+        ? await api.POST("/api/documents/{document_id}/trash", options)
+        : await api.POST("/api/documents/{document_id}/restore", options);
+    if (!response.ok) return { status: "error", error: errorFor(response.status) };
+    // The answer must be the document that was asked for, not just any document.
+    if (data?.id !== documentId) return { status: "error", error: "unreachable" };
+    return { status: "ok", document: data };
+  } catch {
+    return { status: "error", error: "unreachable" };
+  }
+}
+
+/** What a failed move says: the same texts as a failed load, except that nothing was saved. */
+export const MOVE_ERROR_TEXT: Record<DocumentsError, string> = {
+  ...ERROR_TEXT,
+  unreachable: "The change was not saved. Check that the backend is running.",
+};
