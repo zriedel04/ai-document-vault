@@ -98,7 +98,7 @@ def _is_git_dir(folder: Path) -> bool:
     )
 
 
-def _git_root_containing(path: Path) -> Path | None:
+def git_root_containing(path: Path) -> Path | None:
     """The nearest folder at or above ``path`` that is a Git working tree or repository."""
     for folder in (path, *path.parents):
         # ``.git`` is a folder, or a file in a worktree or submodule; ``lexists`` also counts a
@@ -119,7 +119,7 @@ def validate_vault_root(path: Path) -> Path:
     if root.exists() and not root.is_dir():
         msg = "the vault path exists and is not a folder"
         raise VaultPathError(msg)
-    if _git_root_containing(root) is not None:
+    if git_root_containing(root) is not None:
         msg = (
             "the vault folder is inside a Git repository; choose a folder outside every "
             "repository, for example C:\\AIVault"

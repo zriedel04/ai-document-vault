@@ -263,10 +263,17 @@ class SwappingStore(BlobStore):
         self.replacement = replacement
         self.source: Path | None = None
 
-    def put(self, stream: BinaryIO, extension: str = "", *, max_bytes: int | None = None) -> Any:
+    def put(
+        self,
+        stream: BinaryIO,
+        extension: str = "",
+        *,
+        max_bytes: int | None = None,
+        expected_sha256: str | None = None,
+    ) -> Any:
         assert self.source is not None
         self.source.write_bytes(self.replacement)
-        return super().put(stream, extension, max_bytes=max_bytes)
+        return super().put(stream, extension, max_bytes=max_bytes, expected_sha256=expected_sha256)
 
 
 def test_a_file_that_changes_after_the_check_is_judged_by_what_was_stored(
