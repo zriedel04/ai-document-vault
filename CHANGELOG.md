@@ -7,6 +7,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 ### Added
 
 - Upload endpoint `POST /api/imports/upload`: one file as the request body, its name, batch and modification time in headers (never in the address), streamed to a staging file under the size limit and handed to the importer.
+- Project licence: Apache-2.0 (`LICENSE`, ADR 0017), declared in the backend, frontend and demo generator package metadata; the backend's wheel and sdist include the licence text.
 - Import of one file (`vault.ingest.importer`): validate, store the blob, validate the stored copy, then record a new document with its version, source and `extract` job, or a new source for the document that already holds the same bytes. Concurrent imports of the same bytes make one document.
 - Persistent job queue (`vault.jobs.queue`, `jobs` table, migration `0003`, ADR 0005): enqueue without duplicates, an atomic claim, back-off and a failed state after the last attempt, retry, and recovery at start-up of jobs a killed process left running. Error messages are never stored, only the exception's class name.
 - Document tables (`blobs`, `documents`, `document_versions`, `import_sources`, migration `0002`) with ULID ids (`vault.db.ids`) and CHECK constraints on every value the application writes, a current version that must belong to its document, and the `trashed` state of ADR 0005 with the state to restore; the first part of Phase 1. Nothing writes them yet.
@@ -26,4 +27,5 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Changed
 
+- `@types/node` is pinned to the oldest Node.js release the frontend supports (22.13, was 22.20), and Dependabot no longer proposes its major or minor updates; a test in `scripts/tests/test_node_types.py` checks that `engines.node`, CI and the types agree.
 - Dependabot no longer proposes a TypeScript major version (TypeScript 7 does not install next to `openapi-typescript` and `typescript-eslint`, so the npm group failed to resolve) or a `uv-build` bump (the build backend is pinned to the tested minor series and is bumped by hand).

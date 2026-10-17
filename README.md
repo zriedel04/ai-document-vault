@@ -30,3 +30,7 @@ No personal documents, extracted text, databases, keys, logs or local configurat
 ## AI assistance
 
 This project is developed with AI coding tools, openly. Every change goes through a pull request, tests and human review.
+
+## Licence
+
+[Apache License 2.0](LICENSE). Why this licence: [ADR 0017](docs/decisions/0017-project-licence.md).

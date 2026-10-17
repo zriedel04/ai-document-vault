@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "AI Document Vault backend: a local-first document library with cited answers."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     "alembic>=1.14",
     "anyio>=4.6",
