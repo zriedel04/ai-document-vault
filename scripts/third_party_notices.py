@@ -25,6 +25,11 @@ runtime dependency is added, removed, relicensed or ships a changed licence text
 line) without the notices being regenerated. The version is not compared, so a bump that keeps the
 licence text needs no regeneration.
 
+`check python` runs on Linux and on Windows, where the app runs, because a dependency can pull in
+a package on one platform only (a `sys_platform == 'win32'` marker) or ship other licence files in
+its Windows wheel. None does today. If one ever does, one of the two checks fails, and the notices
+must then list the union of both platforms, which `write` does not build yet.
+
 Standard library only.
 """
 

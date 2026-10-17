@@ -122,6 +122,15 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
+      # The app runs on Windows, so its runtime packages are checked there too: a dependency
+      # can pull in a package only on win32, or ship different licence files in its Windows wheel.
+      - name: Licence check and third-party notices (Windows runtime only)
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-runtime
+        run: |
+          uv sync --locked --no-dev
+          uv run --no-sync python ../scripts/check_python_licenses.py --strict --ignore vault
+          uv run --no-sync python ../scripts/third_party_notices.py check python --ignore vault
 
   frontend:
     name: Frontend (Linux)
