@@ -168,6 +168,14 @@ class NpmTest(unittest.TestCase):
         (shipped / "LICENSE").write_text("shipped licence", encoding="utf-8")
         (shipped / "license.js").write_text("code, not a licence", encoding="utf-8")
         (shipped / "index.js").write_text("", encoding="utf-8")
+        # Code the package bundles under its own licence, at any depth (Codex #39).
+        (shipped / "vendor" / "gyp").mkdir(parents=True)
+        (shipped / "vendor" / "LICENSE").write_text("vendored licence", encoding="utf-8")
+        (shipped / "vendor" / "gyp" / "NOTICE.md").write_text("gyp notice", encoding="utf-8")
+        # A copy installed below the package is an entry of its own, never part of this one.
+        stray = shipped / "vendor" / "node_modules" / "other"
+        stray.mkdir(parents=True)
+        (stray / "LICENSE").write_text("another package's licence", encoding="utf-8")
         nested = folder / "node_modules" / "@scope" / "pkg" / "node_modules" / "shipped"
         nested.mkdir(parents=True)
         (nested / "LICENSE").write_text("older shipped licence", encoding="utf-8")
@@ -178,7 +186,14 @@ class NpmTest(unittest.TestCase):
             folder = Path(tmp)
             found = {n.name: n for n in notices.npm_notices(self.build(folder), folder)}
         self.assertEqual(set(found), {"shipped", "@scope/pkg", "@scope/pkg/node_modules/shipped"})
-        self.assertEqual(found["shipped"].texts, (("LICENSE", "shipped licence"),))
+        self.assertEqual(
+            found["shipped"].texts,
+            (
+                ("LICENSE", "shipped licence"),
+                ("vendor/LICENSE", "vendored licence"),
+                ("vendor/gyp/NOTICE.md", "gyp notice"),
+            ),
+        )
         self.assertEqual(
             found["@scope/pkg/node_modules/shipped"].texts, (("LICENSE", "older shipped licence"),)
         )
@@ -193,6 +208,40 @@ class NpmTest(unittest.TestCase):
             (folder / "node_modules" / "@scope" / "pkg" / "node_modules" / "shipped").rmdir()
             with self.assertRaises(FileNotFoundError):
                 notices.npm_notices(lockfile, folder)
+
+
+class PythonTest(unittest.TestCase):
+    """Codex #39: a wheel can install a vendored library's licence outside its metadata folder."""
+
+    def test_every_licence_file_in_the_record_with_a_label_that_has_no_version(self) -> None:
+        from importlib.metadata import PathDistribution
+
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            meta = site / "pkg-1.2.3.dist-info"
+            (meta / "licenses").mkdir(parents=True)
+            (site / "pkg" / "_vendor" / "lib").mkdir(parents=True)
+            (meta / "METADATA").write_text(
+                "Metadata-Version: 2.4\nName: pkg\nVersion: 1.2.3\nLicense-Expression: MIT\n",
+                encoding="utf-8",
+            )
+            files = {
+                "pkg-1.2.3.dist-info/licenses/LICENSE": "pkg licence",
+                "pkg/_vendor/lib/LICENSE.txt": "vendored licence",
+                "pkg/__init__.py": "",
+                "pkg/license.py": "code, not a licence",
+            }
+            for path, text in files.items():
+                (site / path).write_text(text, encoding="utf-8")
+            record = [*files, "pkg-1.2.3.dist-info/METADATA", "pkg-1.2.3.dist-info/RECORD"]
+            (meta / "RECORD").write_text("".join(f"{p},,\n" for p in record), encoding="utf-8")
+
+            [found] = notices.python_notices(installed=[PathDistribution(meta)])
+        self.assertEqual(found.licence, "MIT")
+        self.assertEqual(
+            found.texts,
+            (("licenses/LICENSE", "pkg licence"), ("pkg/_vendor/lib/LICENSE.txt", "vendored licence")),
+        )
 
 
 class OverrideTest(unittest.TestCase):

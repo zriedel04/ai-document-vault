@@ -27,8 +27,10 @@ licence text needs no regeneration.
 
 `check python` runs on Linux and on Windows, where the app runs, because a dependency can pull in
 a package on one platform only (a `sys_platform == 'win32'` marker) or ship other licence files in
-its Windows wheel. None does today. If one ever does, one of the two checks fails, and the notices
-must then list the union of both platforms, which `write` does not build yet.
+its Windows wheel. None does today. If one ever does, no single file can pass both checks, since
+each compares the exact set of packages it sees: CI then stays red until this script learns
+platform-specific entries (a platform column that each check filters on, and a `write` that merges
+the two lists). That change belongs in the same PR as the dependency that needs it.
 
 Standard library only.
 """
@@ -90,13 +92,21 @@ class Notice:
     source: str = ""  # where the texts come from, when not from the package itself
 
 
-def licence_files(folder: Path, names: Iterable[str]) -> tuple[tuple[str, str], ...]:
-    """The licence and notice files among ``names`` in ``folder``, sorted by name."""
+def licence_files(folder: Path) -> tuple[tuple[str, str], ...]:
+    """Every licence and notice file in a package ``folder``, at any depth, sorted by path.
+
+    A package can ship a second licence for code it bundles (``vendor/LICENSE``), so the whole
+    folder is read, not only its top level. Nested ``node_modules`` folders are skipped: each
+    package installed there has an entry of its own. Each text is labelled with its path inside
+    the package, so two files of the same name stay apart.
+    """
     found = []
-    for name in sorted(names):
-        path = folder / name
-        if LICENCE_FILE.fullmatch(Path(name).name) and path.is_file():
-            found.append((Path(name).name, path.read_text(encoding="utf-8", errors="replace")))
+    for path in sorted(folder.rglob("*")):
+        inside = path.relative_to(folder)
+        if "node_modules" in inside.parts[:-1] or not LICENCE_FILE.fullmatch(path.name):
+            continue
+        if path.is_file():
+            found.append((inside.as_posix(), path.read_text(encoding="utf-8", errors="replace")))
     return tuple(found)
 
 
@@ -116,7 +126,7 @@ def npm_notices(lockfile: Path = LOCKFILE, base: Path = NODE_MODULES) -> list[No
                 ecosystem="npm",
                 name=location.removeprefix("node_modules/"),
                 licence=licence if isinstance(licence, str) else "no licence found",
-                texts=licence_files(folder, (p.name for p in folder.iterdir())),
+                texts=licence_files(folder),
             )
         )
     return notices
@@ -129,19 +139,40 @@ def python_licence(distribution: Distribution) -> str:
     return " AND ".join(licence_source(package)) or "no licence found"
 
 
-def python_notices(ignore: Iterable[str] = ()) -> list[Notice]:
+def python_label(path: str) -> str:
+    """A licence file's label: its path inside the metadata folder (``licenses/LICENSE``), or,
+    for a file the package installs elsewhere (a vendored library's ``pkg/_vendor/LICENSE``), its
+    installed path. The metadata folder's own name holds the version, which would make every
+    version bump look like a changed notice."""
+    if ".dist-info/" in path:
+        return path.split(".dist-info/", 1)[1]
+    return path
+
+
+def read_installed(distribution: Distribution, path: str) -> str | None:
+    """The text of an installed file listed in the distribution's RECORD."""
+    located = Path(str(distribution.locate_file(path)))
+    if not located.is_file():
+        return None
+    return located.read_text(encoding="utf-8", errors="replace")
+
+
+def python_notices(
+    ignore: Iterable[str] = (), installed: Iterable[Distribution] | None = None
+) -> list[Notice]:
+    """Each installed distribution (``installed`` in tests) with every licence file its RECORD
+    lists, in its metadata folder or anywhere else it installs files."""
     skipped = {normalise(name) for name in ignore}
     notices = []
-    for distribution in distributions():
+    for distribution in distributions() if installed is None else installed:
         name = distribution.metadata["Name"] or "(unnamed)"
         if normalise(name) in skipped:
             continue
-        files = [str(f) for f in distribution.files or [] if ".dist-info/" in str(f)]
         texts = tuple(
-            (Path(f).name, text)
-            for f in sorted(files)
-            if LICENCE_FILE.fullmatch(Path(f).name)
-            and (text := distribution.read_text(f.split(".dist-info/", 1)[1])) is not None
+            (python_label(path), text)
+            for path in sorted(str(f) for f in distribution.files or [])
+            if LICENCE_FILE.fullmatch(Path(path).name)
+            and (text := read_installed(distribution, path)) is not None
         )
         notices.append(Notice("python", name, python_licence(distribution), texts))
     return notices

@@ -1320,7 +1320,7 @@ SOFTWARE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 Copyright 2009-2026 Michael Bayer.
@@ -1348,7 +1348,7 @@ SOFTWARE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1378,7 +1378,7 @@ THE SOFTWARE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1408,7 +1408,7 @@ SOFTWARE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1437,7 +1437,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Licence: BSD-3-Clause
 
-`LICENSE.txt`:
+`licenses/LICENSE.txt`:
 
 ```text
 Copyright 2014 Pallets
@@ -1474,7 +1474,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1504,7 +1504,7 @@ THE SOFTWARE.
 
 Licence: MIT License
 
-`LICENSE.txt`:
+`licenses/LICENSE.txt`:
 
 ```text
 The MIT License (MIT)
@@ -1535,7 +1535,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Licence: BSD-3-Clause
 
-`LICENSE.md`:
+`licenses/LICENSE.md`:
 
 ```text
 BSD 3-Clause License
@@ -1575,7 +1575,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 Copyright 2006-2026 the Mako authors and contributors <see AUTHORS file>.
@@ -1603,7 +1603,7 @@ SOFTWARE.
 
 Licence: BSD-3-Clause
 
-`LICENSE.txt`:
+`licenses/LICENSE.txt`:
 
 ```text
 Copyright 2010 Pallets
@@ -1640,7 +1640,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Licence: Apache-2.0
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
                                  Apache License
@@ -1850,7 +1850,7 @@ Licence: Apache-2.0
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1880,7 +1880,7 @@ SOFTWARE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1910,7 +1910,7 @@ SOFTWARE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 The MIT License (MIT)
@@ -1940,7 +1940,7 @@ SOFTWARE.
 
 Licence: BSD-3-Clause
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 Copyright (c) 2014, Saurabh Kumar (python-dotenv), 2013, Ted Tieken (django-dotenv-rw), 2013, Jacob Kaplan-Moss (django-dotenv)
@@ -1976,7 +1976,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 Copyright 2005-2026 SQLAlchemy authors and contributors <see AUTHORS file>.
@@ -2004,7 +2004,7 @@ SOFTWARE.
 
 Licence: BSD-3-Clause
 
-`LICENSE.md`:
+`licenses/LICENSE.md`:
 
 ```text
 Copyright © 2018, [Encode OSS Ltd](https://www.encode.io/).
@@ -2040,7 +2040,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Licence: MIT
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 MIT License
@@ -2070,7 +2070,7 @@ SOFTWARE.
 
 Licence: PSF-2.0
 
-`LICENSE`:
+`licenses/LICENSE`:
 
 ```text
 A. HISTORY OF THE SOFTWARE
@@ -2358,7 +2358,7 @@ PERFORMANCE OF THIS SOFTWARE.
 
 Licence: BSD-3-Clause
 
-`LICENSE.md`:
+`licenses/LICENSE.md`:
 
 ```text
 Copyright © 2017-present, [Encode OSS Ltd](https://www.encode.io/).
