@@ -345,6 +345,75 @@ def test_pause_lets_running_jobs_finish_and_claims_nothing_new_until_resume(
     until(lambda: statuses(engine)[second] == "done")
 
 
+class HeldClaimQueue(JobQueue):
+    """A queue whose claims wait until ``proceed`` is set, as a claim waits on SQLite's busy
+    timeout outside the pool's lock."""
+
+    def __init__(self, engine: Engine) -> None:
+        super().__init__(engine)
+        self.entered = threading.Event()
+        self.proceed = threading.Event()
+
+    def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
+        self.entered.set()
+        assert self.proceed.wait(10)
+        return super().claim(worker_id, stages)
+
+
+def attempts(engine: Engine, job_id: str) -> int:
+    with engine.connect() as connection:
+        value: int = connection.execute(
+            select(jobs.c.attempts).where(jobs.c.id == job_id)
+        ).scalar_one()
+    return value
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_pause_waits_for_a_claim_in_progress_and_the_claimed_job_goes_back(
+    engine: Engine, pools: list[WorkerPool], attempt: int
+) -> None:
+    held = HeldClaimQueue(engine)
+    [job_id] = enqueue(engine, held, 1)
+    ran: list[str] = []
+    pool = start(
+        pools, WorkerPool(held, {"extract": lambda job: ran.append(job.id)}, {"extract": 1})
+    )
+    assert held.entered.wait(5)  # the thread is inside claim()
+
+    pausing = threading.Thread(target=pool.pause)
+    pausing.start()
+    pausing.join(0.2)
+    assert pausing.is_alive()  # pause() waits for the claim
+    held.proceed.set()
+    pausing.join(5)
+    assert not pausing.is_alive()
+
+    time.sleep(0.2)
+    assert ran == []  # nothing started after pause() returned
+    assert statuses(engine)[job_id] == "queued"
+    assert attempts(engine, job_id) == 0  # the given-back claim used no attempt
+
+    pool.resume()
+    until(lambda: statuses(engine)[job_id] == "done")
+    assert ran == [job_id]
+
+
+def test_a_claim_that_returns_after_stop_gives_its_job_back(engine: Engine) -> None:
+    held = HeldClaimQueue(engine)
+    [job_id] = enqueue(engine, held, 1)
+    ran: list[str] = []
+    pool = WorkerPool(held, {"extract": lambda job: ran.append(job.id)}, {"extract": 1})
+    pool.start()
+    assert held.entered.wait(5)
+
+    assert not pool.stop(0.1)  # the thread is still inside claim()
+    held.proceed.set()
+    until(lambda: not any(thread.is_alive() for thread in pool.threads))
+    assert ran == []
+    assert statuses(engine)[job_id] == "queued"
+    assert attempts(engine, job_id) == 0
+
+
 def test_stop_ends_every_thread(engine: Engine, queue: JobQueue) -> None:
     pool = WorkerPool(queue, {"extract": lambda _job: None, "ocr": lambda _job: None})
     pool.start()

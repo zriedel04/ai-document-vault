@@ -20,7 +20,12 @@ or until ``idle_seconds`` have passed, which is how a job whose back-off has end
 never spins on the database.
 
 ``pause()`` stops threads from claiming new jobs; jobs already running finish. ``resume()``
-undoes it. ``stop()`` asks every thread to end after its current job and waits for them. A job
+undoes it. ``stop()`` asks every thread to end after its current job and waits for them. A claim
+can be on its way when either is called (it waits on SQLite's busy timeout, outside the lock), so
+claims are counted: ``pause()`` returns only once none is in progress, and a claim that comes back
+after a pause or stop began gives its job back unstarted (``JobQueue.release``), with the attempt
+it counted. So once ``pause()`` returns, every job is either one that was already running or
+back in the queue, and no claim made after ``stop()`` was called runs. A job
 still running when the process exits stays ``running`` in the database and start-up recovery
 (``JobQueue.recover``, called by ``create_app`` before the pool starts) queues it again.
 
@@ -104,10 +109,14 @@ class WorkerPool:
         self._handlers = dict(handlers)
         self._limits = {stage: limits[stage] for stage in handlers}
         self._idle_seconds = idle_seconds
-        self._condition = threading.Condition()
+        lock = threading.Lock()
+        self._condition = threading.Condition(lock)
+        # The same lock; notified when a claim ends, so pause() waits without waking idle threads.
+        self._claim_ended = threading.Condition(lock)
         self._signal = 0  # raised by wake(), so a sleeping thread knows something changed
         self._paused = False
         self._stopping = False
+        self._claiming = 0  # claims in progress, which pause() waits for
         self._threads: list[threading.Thread] = []
         self._started = False
 
@@ -142,9 +151,12 @@ class WorkerPool:
             self._condition.notify_all()
 
     def pause(self) -> None:
-        """Claim no new jobs until ``resume()``. Jobs already running finish."""
+        """Claim no new jobs until ``resume()``. Jobs already running finish; no job starts after
+        this returns. Waits for claims in progress, which give their job back."""
         with self._condition:
             self._paused = True
+            while self._claiming:
+                self._claim_ended.wait()
         log_event(logger, "workers.paused")
 
     def resume(self) -> None:
@@ -179,16 +191,44 @@ class WorkerPool:
                 if self._stopping:
                     return
                 signal = self._signal
-            try:
-                job = self._queue.claim(worker_id, (stage,))
-            except Exception:  # the database is busy or gone: try again after a pause
-                log_event(logger, "workers.claim_failed", level=logging.WARNING, stage=Stage(stage))
-                job = None
+                self._claiming += 1
+            job = self._claim(stage, worker_id)
             if job is None:
                 self._sleep(signal)
                 continue
             outcome = self._work(handler, job, worker_id)
             log_event(logger, "workers.job_ended", stage=Stage(stage), outcome=outcome)
+
+    def _claim(self, stage: str, worker_id: str) -> Job | None:
+        """Claim a job, counted in ``_claiming`` until it is kept or given back. Keeping it is
+        decided under the lock in the same step that ends the count, so ``pause()`` cannot return
+        between the decision and the count; a job claimed after a pause or stop began goes back."""
+        job: Job | None = None
+        kept = False
+        try:
+            try:
+                job = self._queue.claim(worker_id, (stage,))
+            except Exception:  # the database is busy or gone: try again after a pause
+                log_event(logger, "workers.claim_failed", level=logging.WARNING, stage=Stage(stage))
+                return None
+            with self._condition:
+                if job is None or not (self._paused or self._stopping):
+                    kept = True
+                    self._claiming -= 1
+                    self._claim_ended.notify_all()
+                    return job
+            try:
+                self._queue.release(job.id, worker_id)
+            except Exception:  # it stays running; start-up recovery queues it again
+                log_event(
+                    logger, "workers.release_failed", level=logging.WARNING, stage=Stage(stage)
+                )
+            return None
+        finally:
+            if not kept:
+                with self._condition:
+                    self._claiming -= 1
+                    self._claim_ended.notify_all()
 
     def _sleep(self, signal: int) -> None:
         """Wait until ``wake()``, ``resume()``, ``stop()`` or ``idle_seconds``, whichever comes
