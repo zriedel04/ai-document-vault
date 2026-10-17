@@ -1,0 +1,5 @@
+Lecture 5 Slide Notes: Design and Reviews
+Slide 1: From requirements to design
+Slide 2: Layers
+Slide 3: Interfaces first
+Slide 4: Running a design review
