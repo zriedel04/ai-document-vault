@@ -813,6 +813,76 @@ class FolderWalkTest(unittest.TestCase):
                 with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
                     c.files_below(root / "tree", frozenset({".pdf"}))
 
+    def test_a_link_in_the_reference_tree_stops_the_run(self) -> None:
+        # The references are a tree of their own that files_below never walks: a linked folder
+        # or file there would take reference texts from outside while the run is labelled by
+        # the folder it names (demo/corpus/references counts as public data).
+        cases = ("folder", "deeper folder", "reference file", "dangling file", "headings file")
+        for kind in cases:
+            with self.subTest(kind), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "outside").mkdir()
+                (root / "outside" / "a.txt").write_text("private", encoding="utf-8")
+                (root / "images" / "receipts" / "deep").mkdir(parents=True)
+                (root / "images" / "receipts" / "deep" / "a.png").write_bytes(b"x")
+                (root / "images" / "receipts" / "deep" / "a.pdf").write_bytes(b"x")
+                references = root / "references"
+                (references / "receipts" / "deep").mkdir(parents=True)
+                try:
+                    if kind == "folder":
+                        (references / "receipts").rename(root / "moved")
+                        (references / "receipts").symlink_to(root / "moved", True)
+                    elif kind == "deeper folder":
+                        (references / "receipts" / "deep").rmdir()
+                        (references / "receipts" / "deep").symlink_to(root / "outside", True)
+                    elif kind == "reference file":
+                        (references / "receipts" / "deep" / "a.txt").symlink_to(
+                            root / "outside" / "a.txt"
+                        )
+                    elif kind == "dangling file":
+                        (references / "receipts" / "deep" / "a.txt").symlink_to(root / "gone")
+                    else:
+                        (references / "receipts" / "deep" / "a.headings.txt").symlink_to(
+                            root / "outside" / "a.txt"
+                        )
+                except OSError:
+                    self.skipTest("this system does not allow symbolic links")
+                images = root / "images"
+                pdfs = c.files_below(images, frozenset({".pdf"}))
+                with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                    pdf.run_pdf_spike(
+                        FakePdf({"a.pdf": pdf.PdfText(["text"], ["Text"])}),
+                        pdfs,
+                        references_dir=references,
+                        pdfs_dir=images,
+                        environment=ENV,
+                        clock=Clock(),
+                    )
+                if kind != "headings file":  # the OCR spike reads no headings file
+                    with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                        ocr.find_labelled_images(images, references)
+
+    def test_a_reparse_point_in_the_reference_tree_stops_the_run(self) -> None:
+        real_lstat = os.lstat
+
+        def lstat(path: object) -> object:
+            result = real_lstat(path)  # type: ignore[arg-type]
+            if Path(str(path)).name != "receipts" or "references" not in Path(str(path)).parts:
+                return result
+            return mock.Mock(st_file_attributes=0x400, st_mode=result.st_mode)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "images" / "receipts").mkdir(parents=True)
+            (root / "images" / "receipts" / "a.png").write_bytes(b"x")
+            (root / "references" / "receipts").mkdir(parents=True)
+            (root / "references" / "receipts" / "a.txt").write_text("alpha", encoding="utf-8")
+            with (
+                mock.patch.object(os, "lstat", side_effect=lstat),
+                self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"),
+            ):
+                ocr.find_labelled_images(root / "images", root / "references")
+
     def test_a_reparse_point_stops_the_walk(self) -> None:
         # A Windows junction has the reparse attribute and not the symbolic-link mode, so
         # os.walk enters it; the attribute is what is checked.
@@ -848,6 +918,14 @@ class FolderWalkTest(unittest.TestCase):
             self.assertFalse((root / "tree" / "junction").is_symlink())  # why the attribute
             with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
                 c.files_below(root / "tree", frozenset({".pdf"}))
+            # The same junction in the reference tree, which no walk lists.
+            (root / "images" / "junction").mkdir(parents=True)
+            (root / "images" / "junction" / "private.png").write_bytes(b"x")
+            (root / "outside" / "private.txt").write_text("private", encoding="utf-8")
+            (root / "references").mkdir()
+            create_junction(str(root / "outside"), str(root / "references" / "junction"))
+            with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                ocr.find_labelled_images(root / "images", root / "references")
 
     def test_a_subfolder_that_cannot_be_listed_stops_the_walk(self) -> None:
         # os.walk skips it without a word unless told otherwise, and its files would leave the

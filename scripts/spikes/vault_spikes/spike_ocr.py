@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from vault_spikes.corpus import files_below, read_owner_text, reference_folder
+from vault_spikes.corpus import files_below, not_a_link, read_owner_text, reference_folder
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     character_error_rate,
@@ -212,7 +212,9 @@ def find_labelled_images(
     without a byte order mark, or UTF-16 or UTF-32 with one (``corpus.decode_text``)."""
     found: list[LabelledImage] = []
     for image in files_below(images_dir, IMAGE_SUFFIXES):
-        reference_file = reference_folder(image, images_dir, references_dir) / f"{image.stem}.txt"
+        reference_file = not_a_link(
+            reference_folder(image, images_dir, references_dir) / f"{image.stem}.txt"
+        )
         if reference_file.is_file():
             reference = read_owner_text(reference_file, "a reference text file")
             found.append(LabelledImage(image, reference))

@@ -160,10 +160,28 @@ def is_link(path: Path) -> bool:
 def reference_folder(file: Path, root: Path, references: Path | None) -> Path:
     """Where the reference files of ``file``, found by :func:`files_below` under ``root``, are:
     next to it, or with ``references`` at the same path relative to that folder as ``file`` has
-    to ``root`` (``root/receipts/a.jpg`` has ``references/receipts/a.txt``)."""
+    to ``root`` (``root/receipts/a.jpg`` has ``references/receipts/a.txt``).
+
+    A link below ``references`` stops the run, as one below ``root`` does in :func:`files_below`:
+    the references are a tree of their own that no walk checks, and a linked folder in it would
+    take the reference texts from outside while the run is labelled by the folder it names. Each
+    reference file is checked with :func:`not_a_link` before it is read.
+    """
     if references is None:
         return file.parent
-    return references / file.parent.relative_to(root)
+    folder = references
+    for part in file.parent.relative_to(root).parts:
+        folder = not_a_link(folder / part)
+    return folder
+
+
+def not_a_link(path: Path) -> Path:
+    """``path``, unless it is a link (:func:`is_link`), which stops the run. A path that does not
+    exist is returned as it is."""
+    if os.path.lexists(path) and is_link(path):
+        msg = "a reference path is a symbolic link or junction; the spike follows none"
+        raise SpikeInputError(msg)
+    return path
 
 
 def _mapping(value: object, what: str) -> dict[str, Any]:

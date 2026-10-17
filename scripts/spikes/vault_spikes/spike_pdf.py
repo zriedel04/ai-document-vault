@@ -18,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from vault_spikes.corpus import read_owner_text, reference_folder
+from vault_spikes.corpus import not_a_link, read_owner_text, reference_folder
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     has_text,
@@ -275,8 +275,8 @@ def read_labels(pdf: Path, folder: Path, *, headings: bool) -> Labels:
     through it. A file may be UTF-8 with or without a byte order mark, or UTF-16 or UTF-32 with
     one (``corpus.decode_text``); the headings file is read only for an extractor that finds
     headings."""
-    text_file = folder / f"{pdf.stem}.txt"
-    heading_file = folder / f"{pdf.stem}{HEADINGS_SUFFIX}"
+    text_file = not_a_link(folder / f"{pdf.stem}.txt")
+    heading_file = not_a_link(folder / f"{pdf.stem}{HEADINGS_SUFFIX}")
     return Labels(
         read_owner_text(text_file, "a reference text file") if text_file.is_file() else None,
         heading_counts(read_owner_text(heading_file, "a headings file"))
