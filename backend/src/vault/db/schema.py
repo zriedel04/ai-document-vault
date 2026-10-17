@@ -279,3 +279,90 @@ pages = Table(
         name="encoding_is_a_codec_name",
     ),
 )
+
+# The retrieval chunks of each document version (section 6, step 10 of section 7), written by a
+# chunker from the version's pages (vault.ingest.chunking). Derived and private like the pages.
+# ``id`` is an integer that is never reused (AUTOINCREMENT): it is the full-text index's rowid,
+# the key of the vectors to come, and what a stored citation names, so a deleted chunk's id must
+# never come back as another chunk. ``char_start`` is an offset into the text of ``page_start`` and
+# ``char_end`` into the text of ``page_end``; ``text`` is that span of the page. ``section_path`` is
+# a JSON array of heading titles, outermost first. The pair (version, document) must be a real
+# version of that document, and each page must exist, so re-extracting a version's pages deletes
+# its chunks (they would point at text that is gone). The keyword index ``chunks_fts`` is an FTS5
+# table that the migration creates with triggers that keep it in step with this table (see
+# ``FTS_TABLES``); SQLAlchemy does not describe virtual tables or triggers, so it is not here.
+chunks = Table(
+    "chunks",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("version_id", String, nullable=False),
+    Column("document_id", String, nullable=False),
+    Column("chunk_index", Integer, nullable=False),
+    Column("page_start", Integer, nullable=False),
+    Column("page_end", Integer, nullable=False),
+    Column("section_path", String, nullable=False),
+    Column("char_start", Integer, nullable=False),
+    Column("char_end", Integer, nullable=False),
+    Column("text", String, nullable=False),
+    Column("token_count", Integer, nullable=False),
+    Column("chunker_version", String, nullable=False),
+    CheckConstraint("chunk_index >= 0", name="chunk_index_not_negative"),
+    CheckConstraint("page_start >= 1 AND page_end >= page_start", name="pages_in_order"),
+    # Within one page the span is not empty and the text is exactly as long as the span.
+    CheckConstraint(
+        "char_start >= 0 AND char_end >= 0 AND (page_end > page_start"
+        " OR (char_end > char_start AND length(text) = char_end - char_start))",
+        name="span_matches_the_text",
+    ),
+    CheckConstraint("length(text) > 0", name="text_not_empty"),
+    CheckConstraint("token_count >= 1", name="token_count_positive"),
+    CheckConstraint(
+        "json_valid(section_path) AND json_type(section_path) = 'array'",
+        name="section_path_is_a_list",
+    ),
+    # A looser net than the application's rule (vault.db.chunks), as for the pages' extractor.
+    CheckConstraint(
+        "length(chunker_version) BETWEEN 3 AND 40"
+        " AND chunker_version NOT GLOB '*[^a-z0-9-]*'"
+        " AND chunker_version GLOB '[a-z]*-[1-9]*' AND chunker_version GLOB '*[0-9]'"
+        " AND chunker_version NOT GLOB '*--*'",
+        name="chunker_version_is_a_name_and_version",
+    ),
+    ForeignKeyConstraint(
+        ["version_id", "document_id"],
+        ["document_versions.id", "document_versions.document_id"],
+        name="fk_chunks_version_document_versions",
+        ondelete="CASCADE",
+    ),
+    ForeignKeyConstraint(
+        ["version_id", "page_start"],
+        ["pages.version_id", "pages.page_no"],
+        name="fk_chunks_page_start_pages",
+        ondelete="CASCADE",
+    ),
+    ForeignKeyConstraint(
+        ["version_id", "page_end"],
+        ["pages.version_id", "pages.page_no"],
+        name="fk_chunks_page_end_pages",
+        ondelete="CASCADE",
+    ),
+    UniqueConstraint("version_id", "chunk_index", name="uq_chunks_version_index"),
+    Index("ix_chunks_document_id", "document_id"),
+    sqlite_autoincrement=True,
+)
+
+# The FTS5 table over chunks and the shadow tables FTS5 keeps for it. The migration ``0005`` creates
+# them; the migration comparison (``include_name``) leaves exactly these names out, because
+# SQLAlchemy cannot describe a virtual table, and a test checks that the database holds exactly
+# these and that the triggers keep them in step.
+FTS_TABLES: Final = frozenset(
+    {
+        "chunks_fts",
+        *(f"chunks_fts_{part}" for part in ("config", "content", "data", "docsize", "idx")),
+    }
+)
+
+
+def include_name(name: str | None, type_: str, _parent_names: object) -> bool:
+    """Alembic's filter for comparing the database with ``metadata``: everything but FTS5."""
+    return not (type_ == "table" and name in FTS_TABLES)
