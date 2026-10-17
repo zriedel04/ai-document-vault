@@ -452,6 +452,19 @@ def test_a_lazy_line_keeps_the_list_item_open() -> None:
     assert titles("- a\ntext\n  ```\n# H\n") == [(1, "H")]
 
 
+def test_fenced_code_in_a_nested_item_ends_when_a_line_backs_out_of_that_item() -> None:
+    # "paragraph" is in the outer item, so the fence of the nested item has ended and
+    # "outside" is the outer item's lazy line, which an underline cannot close (CommonMark).
+    assert titles("- outer\n  - nested\n    ```\n    code\n  paragraph\noutside\n---\n") == []
+    assert titles("- outer\n  - nested\n    ```\n  # Outer item\n# Top\n") == [(1, "Top")]
+
+
+def test_a_lazy_line_left_of_a_nested_item_keeps_every_item_open() -> None:
+    # "para" continues the nested item's paragraph, so the fence that follows opens in that
+    # item (two spaces past its content column) and ends with it at "outside".
+    assert titles("- a\n  - b\n  para\n      ```\noutside\n---\n") == [(2, "outside")]
+
+
 def test_an_empty_list_item_followed_by_a_blank_line_ends() -> None:
     assert titles("-\n\n  ```\n# in code\n```\n# After\n") == [(1, "After")]
 

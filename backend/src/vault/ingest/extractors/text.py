@@ -131,6 +131,7 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
     paragraph: int | None = None  # index of the first line of the open top-level paragraph
     items: list[int] = []  # content columns of the open list items, outermost first
     item_fence: tuple[str, int] | None = None  # fenced code open inside the list items
+    fence_depth = 0  # how many items are open around that fence: it ends with the innermost
     empty_item = False  # the innermost list item opened empty and has no line yet
     lazy = False  # the previous line continues a paragraph inside a quote or a list item
     quoted = False  # that paragraph is in a quote
@@ -148,15 +149,21 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
             if empty_item:  # an empty item followed by a blank line ends (CommonMark)
                 items.pop()
                 empty_item = False
-                if not items:
+                if len(items) < fence_depth:
                     item_fence = None
             continue
         indent = _indent(line)
         if items and indent >= items[0]:
             # Inside a list item: judge the line by its indent within the innermost item it
             # reaches, not by its column on the page.
-            while indent < items[-1]:
-                items.pop()
+            depth = len(items)
+            while indent < items[depth - 1]:
+                depth -= 1
+            if depth < len(items) and lazy and _continues(_dedent(line, items[depth - 1])):
+                continue  # a lazy line of the inner item's paragraph: every item stays open
+            del items[depth:]
+            if len(items) < fence_depth:
+                item_fence = None  # the item that held the fenced code has closed, and it with it
             empty_item = quoted = False
             inner = _dedent(line, items[-1])
             if item_fence is not None:
@@ -165,7 +172,7 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
                 continue
             if lazy and _indent(inner) >= 4:
                 continue  # indented code cannot interrupt a paragraph: this line continues it
-            item_fence = _fence_open(inner)
+            item_fence, fence_depth = _fence_open(inner), len(items)
             if item_fence is not None:
                 lazy = False
                 continue
