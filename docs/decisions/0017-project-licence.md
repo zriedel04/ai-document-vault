@@ -22,4 +22,4 @@ The project is licensed under the Apache License, Version 2.0. The full text is 
 
 - Contributions are accepted under Apache-2.0 (its section 5), so no separate contributor agreement is needed.
 - Every dependency licence that ADR 0012 allows is compatible with distributing the project under Apache-2.0.
-- Anyone redistributing the project keeps the licence text and states their changes. A `NOTICE` file is optional and not added; the generated third-party notices that the plan lists remain to be done with the licence audit.
+- Anyone redistributing the project keeps the licence text and states their changes. A `NOTICE` file is optional and not added. The licence audit (`docs/licence-audit.md`) and the generated `THIRD_PARTY_NOTICES.md` cover the dependencies.
