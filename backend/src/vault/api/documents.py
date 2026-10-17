@@ -1,5 +1,5 @@
 """The document list (one page at a time, sorted on the server), one document's details, its
-original file, and moving it to the trash and back."""
+original file, moving it to the trash and back, and deleting it for good from the trash."""
 
 from __future__ import annotations
 
@@ -7,17 +7,18 @@ import logging
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import Engine
 
-from vault.core.logging import log_event
+from vault.core.logging import log_event, metric
 from vault.core.security import LocalUser, current_user
 from vault.db.documents import (
     DEFAULT_PAGE,
     MAX_PAGE,
+    DeleteRefusal,
     ListQuery,
     Order,
     SortKey,
@@ -29,6 +30,7 @@ from vault.db.documents import (
 )
 from vault.jobs.queue import utc_now
 from vault.storage.blobs import BlobIntegrityError, BlobStore
+from vault.storage.purge import purge_document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
@@ -186,6 +188,46 @@ async def restore_document(
     if not await run_in_threadpool(restore, engine, document_id):
         raise HTTPException(status_code=404, detail="no such document")
     return await _detail(engine, document_id)
+
+
+@router.delete(
+    "/documents/{document_id}",
+    status_code=204,
+    responses={
+        404: {"description": "No such document"},
+        409: {"description": "The document is not in the trash"},
+    },
+)
+async def delete_document(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+) -> Response:
+    """Delete a document in the trash for good: its versions, imports, pages and jobs, and each
+    stored file that no other document uses. It cannot be undone. A document in use is refused
+    (409) and left as it is; it must be moved to the trash first. An unknown id is a 404, also when
+    the document was deleted by an earlier request.
+
+    The answer is 204 once the rows are gone, even if a file could not be removed now: the start-up
+    sweep moves such a file to ``blobs/orphans/`` (``vault.storage.purge``)."""
+    engine: Engine | None = request.app.state.engine
+    store: BlobStore | None = request.app.state.blobs
+    if engine is None or store is None:
+        raise HTTPException(status_code=503, detail="no vault is open")
+    result = await run_in_threadpool(purge_document, engine, store, document_id)
+    if isinstance(result, DeleteRefusal):
+        if result is DeleteRefusal.NOT_IN_TRASH:
+            raise HTTPException(status_code=409, detail="the document is not in the trash")
+        raise HTTPException(status_code=404, detail="no such document")
+    # Counts only: the id came in the request, and the name and hash are the owner's.
+    log_event(
+        logger,
+        "documents.deleted",
+        blobs_removed=metric(result.blobs_removed),
+        blobs_kept=metric(result.blobs_kept),
+        blobs_left=metric(result.blobs_left),
+    )
+    return Response(status_code=204)
 
 
 @router.get(
