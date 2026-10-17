@@ -45,6 +45,21 @@ ADRs 0013, 0014 and 0015 each need every candidate measured on the repository's 
 - The public corpus has no reference texts yet. Without them the OCR spike stops ("no image has a reference text file") and the PDF spike reports speed and failures but no error rates, so public reference texts for the synthetic images and PDFs have to be added inside `demo/corpus/` first.
 - Private files stay outside the repository, and only numbers about them are reported.
 
+## Running on your own files
+
+The embedding spike reads a corpus through its `manifest.json`, so the private run needs one for your folder (for example `C:\AIVault-samples`) and an eval file. Keep both outside the repository.
+
+1. **Write the manifest.** `uv run python -m vault_spikes make-manifest --corpus C:\AIVault-samples` lists the folder and its subfolders into `C:\AIVault-samples\manifest.json`, in the format of `demo/corpus/manifest.json`: for each file its path (relative, with `/`), kind, size, SHA-256, the page count of a PDF, whether it needs OCR, and `exact_duplicate_of` for a byte-for-byte copy (by SHA-256; the first of the copies in path order is the original). It refuses to replace an existing `manifest.json` unless you pass `--force`, writes a temporary file first, reads it back with the spike's own loader and only then puts it in place.
+2. **Write the questions** in the format of [eval/README.md](../../eval/README.md), for example `C:\AIVault-samples\questions.yaml`, citing each document by the path the manifest gives it, spelled exactly the same.
+3. **Run the spike**: `uv run python -m vault_spikes embedding --candidate qwen3-embedding-0.6b --device cpu --corpus C:\AIVault-samples --questions C:\AIVault-samples\questions.yaml`. The report is named `-private`.
+
+What `make-manifest` lists and skips:
+
+- **Kinds.** `.txt`, `.md`, `.csv` and `.docx`, which the corpus reader reads; `.pdf`, as `pdf_text` when some page has text and as `pdf_scan` (needs OCR) when none has, which pypdfium2 decides, so the command stops before it reads the folder if pypdfium2 is not installed; and the images the OCR spike reads (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff`, `.webp`), which need OCR. A PDF with both kinds of page is `pdf_text`, and its pages without text add nothing to the corpus.
+- **Skipped and counted**, never named: files of any other kind; files that cannot be read (held by another program, no permission, an encrypted or corrupt PDF); links, junctions and other Windows reparse points, files and folders alike, so the walk never leaves the folder or goes round a loop (a OneDrive file that is only online is a reparse point too, so copy the files to a plain folder first); hidden or system files and folders (a name starting with `.`, an Office lock file `~$...`, or the Windows hidden or system attribute); subfolders that cannot be listed; and names the manifest cannot hold so that the loader reads them back as the same file (two names that differ only in case keep the first, and on Linux a name with a backslash, a control character or bytes that are not UTF-8).
+- **Output.** Only counts are printed (documents listed, per kind, duplicates marked, and each reason for a skip), with fixed text; never a file name, a path or the `--corpus` folder. The manifest itself does hold your file names, which is why it stays in your folder.
+- A run that is killed may leave a hidden `.manifest-*.tmp` file in the folder; delete it. It is never listed.
+
 ## What each spike measures
 
 The method of each spike is also written into its report, so a report explains itself.
@@ -124,6 +139,7 @@ Metrics only: counts, rates, timings and scores. A report cannot hold document t
 - **Libraries' messages.** No log record and no warning of a library is shown while a command runs. pdfminer, which pdfplumber runs, logs the tokens of a malformed page, the words on it among them; RapidOCR logs the paths of its model files; huggingface_hub warns with the path of its cache. Output that native code writes itself (onnxruntime, torch) and the download progress bars do not go through Python's logging and still appear; they name models and devices, not documents.
 - **Errors.** The command line prints a failure in full only when it is one of this package's own errors (`OwnValueError`, `OwnTypeError`, `OwnRuntimeError`, `SpikeInputError`, `MissingDependencyError`), whose messages name no file and quote no document; a test fails if any module raises a plain `ValueError`, `TypeError` or `RuntimeError`. Any other exception, such as a missing or unreadable input folder or a library's own error, is reported as one line with its class name only and exit code 1, because Python's message and traceback would carry the path of a private folder or file or a piece of a document. To investigate one, rerun on the public data set or in the unit tests.
 - **Command-line mistakes.** `argparse` quotes the token it rejects (a stray folder name, a path given where a number belongs), so the parser prints its usage line and says only that the command line is not valid.
+- **The manifest.** `make-manifest` is the one command that writes file names: it writes them into `manifest.json` in the `--corpus` folder itself, where the files already are, and prints only counts (see [Running on your own files](#running-on-your-own-files)).
 
 ## From a report to a spike file
 
