@@ -456,6 +456,39 @@ def test_an_empty_list_item_followed_by_a_blank_line_ends() -> None:
     assert titles("-\n\n  ```\n# in code\n```\n# After\n") == [(1, "After")]
 
 
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("[ref]: /url\nTitle\n---\n", "Title"),
+        ("[a]: /u 'title'\n[b]: </x y>\nTitle\n===\n", "Title"),
+        ("[a]: /u\n'title on the next line'\nTitle\n---\n", "Title"),
+        ("[a]:\n/destination-on-the-next-line\nTitle\n---\n", "Title"),
+        ("[a]: /u 'not a title' trailing\n---\n", "[a]: /u 'not a title' trailing"),
+        ("[c]:\n===\n", "[c]:"),  # no destination: not a definition
+        ("[ ]: /u\n---\n", "[ ]: /u"),  # a blank label is not one either
+        ("[ref]: /url\n-\n---\n", "-"),  # "-" continues the paragraph; "---" underlines it
+    ],
+)
+def test_link_reference_definitions_are_not_part_of_a_setext_title(text: str, title: str) -> None:
+    assert titles(text) == [(2 if text.rstrip().endswith("-") else 1, title)]
+
+
+def test_a_heading_after_definitions_starts_at_its_own_text() -> None:
+    [heading] = markdown_headings("[ref]: /url\nTitle\n---\n")
+    assert heading == Heading(2, "Title", 12, 21)
+
+
+@pytest.mark.parametrize("text", ["[ref]: /url\n===\n", "[ref]: /url\n---\n"])
+def test_an_underline_under_definitions_alone_is_no_heading(text: str) -> None:
+    assert titles(text) == []  # "===" is paragraph text; "---" a thematic break
+
+
+def test_a_lazy_line_after_a_quote_is_no_setext_heading() -> None:
+    # CommonMark: "Outside" continues the quote's paragraph lazily, and "---" cannot, so it is a
+    # thematic break (the reference implementation agrees).
+    assert titles("> quoted\nOutside\n---\n") == []
+
+
 def test_every_text_and_markdown_file_of_the_demo_corpus_extracts() -> None:
     corpus = Path(__file__).resolve().parents[3] / "demo" / "corpus"
     files = sorted(p for p in corpus.rglob("*") if p.suffix in {".txt", ".md"})

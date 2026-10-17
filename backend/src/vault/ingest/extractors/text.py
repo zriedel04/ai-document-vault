@@ -53,6 +53,17 @@ _ATX: Final = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*")
 _ATX_CLOSING: Final = re.compile(r"(?:^|[ \t]+)#+$")
 _SETEXT: Final = re.compile(r" {0,3}(=+|-+)[ \t]*")
 _THEMATIC_BREAK: Final = re.compile(r" {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*")
+# A link reference definition (CommonMark 4.7) at the start of the text: a label with something
+# other than spaces in it, a destination, an optional title (on the same line or the next; a title
+# that does not end its line leaves the definition without one), then the end of a line. Matched
+# repeatedly over a paragraph's lines, so a definition's title may continue over lines.
+_DEFINITION: Final = re.compile(
+    r" {0,3}\[(?=[^\]]*?[^\s\]])(?:[^\\\[\]]|\\.){1,999}\]:"
+    r"[ \t]*\n?[ \t]*(?:<(?:[^<>\n\\]|\\.)*>|[^<\s\x00-\x1f][^\s\x00-\x1f]*)"
+    r"(?:(?:[ \t]*\n[ \t]*|[ \t]+)"
+    r"(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?"
+    r"[ \t]*(?:\n|$)"
+)
 _FENCE_OPEN: Final = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _QUOTE: Final = re.compile(r" {0,3}>")
 # A list item's marker, then the spaces after it and the first character of its content (none for
@@ -172,11 +183,20 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
         if paragraph is not None:
             setext = _SETEXT.fullmatch(line)
             if setext:
-                title = " ".join(part.strip() for part in lines[paragraph : index - 1])
-                level = 1 if setext.group(1)[0] == "=" else 2
-                found.append(Heading(level, title, starts[paragraph], end_of(index - 1)))
+                # Link reference definitions at the start of the paragraph are taken out of it
+                # when it closes (CommonMark 4.7); the heading is the rest. With nothing left
+                # there is no heading: the line is a thematic break if it is one, and otherwise
+                # it continues the paragraph, which an underline that follows may still close.
+                first = paragraph + _definition_lines(lines[paragraph : index - 1])
+                if first < index - 1:
+                    title = " ".join(part.strip() for part in lines[first : index - 1])
+                    level = 1 if setext.group(1)[0] == "=" else 2
+                    found.append(Heading(level, title, starts[first], end_of(index - 1)))
+                    paragraph = None
+                    continue
+                if not _THEMATIC_BREAK.fullmatch(line):
+                    continue
                 paragraph = None
-                continue
         if _THEMATIC_BREAK.fullmatch(line):
             paragraph, lazy, quoted = None, False, False
             continue
@@ -226,6 +246,17 @@ def _opens_paragraph(line: str) -> bool:
     if item:
         return bool(item.group(4)) and _opens_paragraph(line[item.start(4) :])
     return not (_ATX.fullmatch(line) or _THEMATIC_BREAK.fullmatch(line) or _fence_open(line))
+
+
+def _definition_lines(lines: list[str]) -> int:
+    """How many of a paragraph's ``lines`` the link reference definitions at its start take."""
+    if not lines or not lines[0].lstrip(" ").startswith("["):
+        return 0
+    text = "\n".join(lines)
+    position = 0
+    while match := _DEFINITION.match(text, position):
+        position = match.end()
+    return text.count("\n", 0, position) + (position == len(text) and position > 0)
 
 
 def _quoted_indent(line: str) -> int:
