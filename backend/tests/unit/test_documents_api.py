@@ -11,12 +11,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, delete, func, select, update
+from sqlalchemy import Engine, delete, event, func, select, update
 
 from vault.api.documents import JobStatus, Method, Origin, Stage, State
 from vault.core.config import Settings
 from vault.db import ids
-from vault.db.documents import ListQuery, _utc, get_document
+from vault.db.documents import ListQuery, _utc, get_document, list_documents
 from vault.db.engine import read_snapshot
 from vault.db.schema import (
     DOCUMENT_STATES,
@@ -261,6 +261,27 @@ def test_a_time_is_given_in_utc() -> None:
         2026, 10, 1, 11, 0, tzinfo=UTC
     )
     assert _utc(datetime(2026, 10, 1, 11, 0)) == datetime(2026, 10, 1, 11, 0, tzinfo=UTC)
+
+
+def test_a_page_past_the_end_and_its_total_come_from_one_snapshot(library: Library) -> None:
+    """Codex #41: a commit between the empty page and the count must not change the total."""
+    library.add("first.txt", "first\n")
+    counted: list[str] = []
+
+    def import_during_the_count(_conn: Any, _cursor: Any, statement: str, *_: Any) -> None:
+        # The fallback count, after the page came back empty (the page holds a window count).
+        if statement.lstrip().upper().startswith("SELECT COUNT") and not counted:
+            counted.append(statement)
+            library.add("second.txt", "second\n")  # commits on another connection
+
+    event.listen(library.engine, "before_cursor_execute", import_during_the_count)
+    try:
+        page_ = list_documents(library.engine, ListQuery(offset=10))
+    finally:
+        event.remove(library.engine, "before_cursor_execute", import_during_the_count)
+    assert counted  # the import really ran between the two reads
+    assert (page_.items, page_.total) == ((), 1)
+    assert list_documents(library.engine, ListQuery(offset=10)).total == 2
 
 
 # --- one document ---------------------------------------------------------------------------------
