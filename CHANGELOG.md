@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Document details `GET /api/documents/{id}`: hash, current version, every import source and the processing jobs, read from one snapshot (`vault.db.engine.read_snapshot`).
 - Document list `GET /api/documents`: one page of the documents in use or in the trash, sorted on the server by time added, name or size, with the name of the first import, the size and type of the current version, and the total.
 - Project licence: Apache-2.0 (`LICENSE`, ADR 0017), declared in the backend, frontend and demo generator package metadata; the backend's wheel and sdist include the licence text.
 - Import of one file (`vault.ingest.importer`): validate, store the blob, validate the stored copy, then record a new document with its version, source and `extract` job, or a new source for the document that already holds the same bytes. Concurrent imports of the same bytes make one document.
