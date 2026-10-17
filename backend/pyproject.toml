@@ -9,19 +9,19 @@ license-files = ["LICENSE"]
 dependencies = [
     "alembic>=1.14",
     "anyio>=4.6",
-    "fastapi>=0.115",
+    "fastapi>=0.143.0",
     "pydantic-settings>=2.6",
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.1.4",
     "uvicorn>=0.32",
 ]
 
 [dependency-groups]
 dev = [
     "httpx2>=0.1",
-    "mypy>=1.13",
+    "mypy>=2.4.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "ruff>=0.8",
+    "ruff>=0.17.0",
 ]
 
 [build-system]
