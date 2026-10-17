@@ -49,7 +49,7 @@ class Library:
 
     def add(self, name: str, body: str, **changes: Any) -> str:
         self.now += timedelta(minutes=1)
-        path = self.folder / f"incoming-{ids.new_ulid()}.txt"
+        path = self.folder / f"incoming-{ids.new_ulid()}{Path(name).suffix or '.txt'}"
         path.write_bytes(body.encode("utf-8"))  # write_text would turn \n into \r\n on Windows
         values: dict[str, Any] = {
             "path": path,
@@ -406,3 +406,109 @@ def test_a_snapshot_does_not_see_a_commit_made_during_it(library: Library) -> No
     assert (before, after) == (1, 1)
     with library.engine.connect() as connection:
         assert connection.execute(select(func.count()).select_from(documents)).scalar_one() == 2
+
+
+# --- download ---------------------------------------------------------------------------------
+
+
+def test_the_original_downloads_byte_for_byte_as_an_attachment(
+    client: TestClient, library: Library
+) -> None:
+    document_id = library.add("Syllabus.md", "# Week 1\n", folder_segments=["School"])
+    library.add("Later name.md", "# Week 1\n")
+    response = client.get(f"{URL}/{document_id}/file")
+    assert response.status_code == 200
+    assert response.content == b"# Week 1\n"
+    assert response.headers["content-type"] == "text/markdown"
+    assert response.headers["content-disposition"] == 'attachment; filename="Syllabus.md"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_utf16_text_is_not_labelled_utf8(client: TestClient, library: Library) -> None:
+    path = library.folder / "utf16.txt"
+    data = "﻿Week 1\n".encode("utf-16-le")
+    path.write_bytes(data)
+    result = library.importer.import_file(
+        ImportRequest(
+            path=path, original_filename="notes.txt", method="upload", batch_id=ids.new_ulid()
+        )
+    )
+    assert result.document_id is not None
+    response = client.get(f"{URL}/{result.document_id}/file")
+    assert response.content == data
+    assert response.headers["content-type"] == "text/plain"
+
+
+@pytest.mark.parametrize(
+    ("name", "header"),
+    [
+        ("Résumé 2026.txt", "attachment; filename*=utf-8''R%C3%A9sum%C3%A9%202026.txt"),
+        ('a"b.txt', "attachment; filename*=utf-8''a%22b.txt"),
+        ("semi;colon.txt", "attachment; filename*=utf-8''semi%3Bcolon.txt"),
+    ],
+)
+def test_a_name_outside_plain_ascii_is_encoded_in_the_header(
+    client: TestClient, library: Library, name: str, header: str
+) -> None:
+    document_id = library.add(name, f"{name}\n")
+    response = client.get(f"{URL}/{document_id}/file")
+    assert response.headers["content-disposition"] == header
+
+
+def test_a_document_without_a_source_downloads_under_its_id(
+    client: TestClient, library: Library
+) -> None:
+    document_id = library.add("lost.txt", "lost\n")
+    with library.engine.begin() as connection:
+        connection.execute(delete(import_sources))
+    response = client.get(f"{URL}/{document_id}/file")
+    assert response.headers["content-disposition"] == f'attachment; filename="{document_id}.txt"'
+
+
+def test_a_document_in_the_trash_can_be_downloaded(client: TestClient, library: Library) -> None:
+    document_id = library.add("old.txt", "old\n")
+    library.trash(document_id)
+    assert client.get(f"{URL}/{document_id}/file").content == b"old\n"
+
+
+@pytest.mark.parametrize("document_id", [None, "Patient-Name"])
+def test_downloading_an_unknown_document_is_a_404(
+    client: TestClient, document_id: str | None
+) -> None:
+    response = client.get(f"{URL}/{document_id or ids.new_ulid()}/file")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "no such document"}
+
+
+def test_a_missing_stored_copy_is_a_500_that_logs_no_name(
+    client: TestClient, library: Library, app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    document_id = library.add("Diagnosis-Patient.txt", "private words\n")
+    path = app.state.blobs.find(hashlib.sha256(b"private words\n").hexdigest())
+    path.chmod(0o644)
+    path.unlink()
+    response = client.get(f"{URL}/{document_id}/file")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "the stored copy of this document is unavailable"}
+    assert "documents.blob_unavailable" in caplog.text
+    assert "Diagnosis" not in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_two_files_under_one_hash_are_not_served(
+    client: TestClient, library: Library, app: FastAPI
+) -> None:
+    document_id = library.add("twin.txt", "twin\n")
+    path = app.state.blobs.find(hashlib.sha256(b"twin\n").hexdigest())
+    (path.parent / f"{path.stem}.md").write_bytes(b"twin\n")
+    assert client.get(f"{URL}/{document_id}/file").status_code == 500
+
+
+def test_the_download_needs_the_token(anonymous: TestClient) -> None:
+    assert anonymous.get(f"{URL}/{ids.new_ulid()}/file").status_code == 401
+
+
+def test_without_a_vault_there_is_nothing_to_download() -> None:
+    app = create_app(Settings())
+    client = TestClient(app, base_url=LOCAL, headers={"Authorization": f"Bearer {app.state.token}"})
+    assert client.get(f"{URL}/{ids.new_ulid()}/file").status_code == 503
