@@ -11,6 +11,8 @@ A job is one processing stage (``extract``, ``ocr``, ...) for one document. Its 
   which can quote document content) and queues it again after a back-off, or marks it ``failed``
   once its attempts are used up. Both act only for the worker that holds the job, and say so
   (``JobLostError``) if it no longer does.
+- ``release`` gives a claimed job back unstarted, with the attempt it counted returned (the
+  worker pool calls it when it was paused or stopped while the claim was on its way).
 - ``retry`` queues a failed job again with fresh attempts (the owner's Retry button).
 - ``recover`` runs at start-up, before any worker: a job left ``running`` by a process that was
   killed is queued again, or failed if that attempt was its last. Nothing is lost by a crash.
@@ -236,6 +238,25 @@ class JobQueue:
                 update(jobs)
                 .where(self._held(job_id, worker_id))
                 .values(status="done", locked_by=None, locked_at=None, finished_at=now)
+            )
+        if result.rowcount != 1:
+            msg = "the worker no longer holds this job"
+            raise JobLostError(msg)
+
+    def release(self, job_id: str, worker_id: str) -> None:
+        """Give back a job the worker claimed but never started: queued again as it was, without
+        the attempt ``claim`` counted and without waiting for a back-off."""
+        _check_worker(worker_id)
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                update(jobs)
+                .where(self._held(job_id, worker_id))
+                .values(
+                    status="queued",
+                    locked_by=None,
+                    locked_at=None,
+                    attempts=jobs.c.attempts - 1,
+                )
             )
         if result.rowcount != 1:
             msg = "the worker no longer holds this job"

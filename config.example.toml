@@ -14,5 +14,14 @@ port = 8765
 # The built frontend (npm run build in frontend/). Defaults to frontend/dist in this repository.
 # dist = 'C:\path\to\frontend\dist'
 
+[workers]
+# How many jobs of each processing stage may run at once (1 to 16).
+extract = 2
+ocr = 1
+metadata = 1
+chunk = 1
+embed = 1
+enrich = 2
+
 [logging]
 level = "INFO"

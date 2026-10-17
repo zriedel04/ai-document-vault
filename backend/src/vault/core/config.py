@@ -66,6 +66,29 @@ class FrontendSettings(_Section):
     dist: Path | None = None
 
 
+class WorkerSettings(_Section):
+    """How many jobs of each stage may run at once (vault.jobs.worker). The defaults are the plan's:
+    extraction 2, OCR 1, embedding 1, AI enrichment 2."""
+
+    extract: int = Field(default=2, ge=1, le=16)
+    ocr: int = Field(default=1, ge=1, le=16)
+    metadata: int = Field(default=1, ge=1, le=16)
+    chunk: int = Field(default=1, ge=1, le=16)
+    embed: int = Field(default=1, ge=1, le=16)
+    enrich: int = Field(default=2, ge=1, le=16)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _not_a_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            msg = "a worker limit must be a number"
+            raise ValueError(msg)
+        return value
+
+    def limits(self) -> dict[str, int]:
+        return self.model_dump()
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -78,6 +101,7 @@ class Settings(BaseSettings):
     vault: VaultSettings = VaultSettings()
     server: ServerSettings = ServerSettings()
     frontend: FrontendSettings = FrontendSettings()
+    workers: WorkerSettings = WorkerSettings()
     logging: LoggingSettings = LoggingSettings()
 
     @classmethod
