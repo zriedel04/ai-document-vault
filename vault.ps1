@@ -614,12 +614,12 @@ function Invoke-Backup {
        not on its command line: Windows PowerShell 5.1 quotes an argument that has a space but
        does not escape a trailing backslash, so "E:\My Backups\" would reach Python with a stray
        quote. A relative folder is taken from this window's location, not from the backend
-       folder Python runs in. #>
-    param([string]$Target)
+       folder Python runs in. -Python replaces the backend's interpreter, for the tests. #>
+    param([string]$Target, [object]$Python)
     if (-not $Target) {
         throw 'name the backup folder, for example: .\vault.ps1 backup -To E:\VaultBackups'
     }
-    $python = Get-BackendPython
+    if ($null -eq $Python) { $Python = Get-BackendPython }
     $folder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Target)
     $previous = [Environment]::GetEnvironmentVariable($script:BackupVariable, 'Process')
     [Environment]::SetEnvironmentVariable($script:BackupVariable, $folder, 'Process')
@@ -628,7 +628,7 @@ function Invoke-Backup {
         # Windows PowerShell 5.1 turns a native program's error output into an exception while
         # the preference is Stop, so the backend's messages are passed on as plain lines.
         $ErrorActionPreference = 'Continue'
-        & $python -m vault.backup 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+        & $Python -m vault.backup 2>&1 | ForEach-Object { Write-Host ([string]$_) }
         $code = $LASTEXITCODE
     }
     finally {
