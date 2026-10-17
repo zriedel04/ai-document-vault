@@ -169,7 +169,8 @@ def replace_pages(
     """Store ``pages_in`` as the only pages of the version, in one transaction.
 
     Raises ``ValueError`` for pages, an extractor or an encoding that break the rules, before
-    anything is written, and ``VersionNotFoundError`` for an id that names no version.
+    anything is written, and ``VersionNotFoundError`` for an id that names no version. The
+    version's chunks go with its old pages (a foreign-key cascade): they point at the old text.
     """
     checked = check_pages(pages_in)
     check_extractor(extractor)
