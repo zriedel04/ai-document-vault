@@ -7,6 +7,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 ### Added
 
 - Text and Markdown extractor (`vault.ingest.extractors.text`): decodes by byte order mark, else UTF-8, else the Windows code page set in `[processing] text_fallback_encoding` (Windows-1252 by default), refuses a file that is not text as a whole by the validator's own rule, stores `\n` line breaks, and finds Markdown headings by the CommonMark rules (outside code, front matter, quotes and lists) with offsets into the stored text. Not wired into the job queue yet.
+- Trash and restore: `POST /api/documents/{id}/trash` and `POST /api/documents/{id}/restore` move a document to the trash and back, keeping its state, file, versions, imports and jobs; both are idempotent and return the document as it now is.
 - Download of a document's original `GET /api/documents/{id}/file`: the current bytes as an attachment, under the first import's name, with the validator's media type.
 - Document details `GET /api/documents/{id}`: hash, current version, every import source and the processing jobs, read from one snapshot (`vault.db.engine.read_snapshot`).
 - Document list `GET /api/documents`: one page of the documents in use or in the trash, sorted on the server by time added, name or size, with the name of the first import, the size and type of the current version, and the total.

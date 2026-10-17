@@ -1,4 +1,5 @@
-"""The document list (one page at a time, sorted on the server) and one document's details."""
+"""The document list (one page at a time, sorted on the server), one document's details, its
+original file, and moving it to the trash and back."""
 
 from __future__ import annotations
 
@@ -23,7 +24,10 @@ from vault.db.documents import (
     get_document,
     get_original,
     list_documents,
+    move_to_trash,
+    restore,
 )
+from vault.jobs.queue import utc_now
 from vault.storage.blobs import BlobIntegrityError, BlobStore
 
 logger = logging.getLogger(__name__)
@@ -127,9 +131,17 @@ async def read_document(
     every import (oldest first; the first names the document) and its processing jobs (in the
     order of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message
     does not repeat it."""
+    return await _detail(_engine(request), document_id)
+
+
+def _engine(request: Request) -> Engine:
     engine: Engine | None = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="no vault is open")
+    return engine
+
+
+async def _detail(engine: Engine, document_id: str) -> DocumentDetail:
     detail = await run_in_threadpool(get_document, engine, document_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="no such document")
@@ -143,6 +155,37 @@ async def read_document(
         import_sources=[Source.model_validate(s, from_attributes=True) for s in detail.sources],
         jobs=[Job.model_validate(job, from_attributes=True) for job in detail.jobs],
     )
+
+
+@router.post("/documents/{document_id}/trash", responses={404: {"description": "No such document"}})
+async def trash_document(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+) -> DocumentDetail:
+    """Move a document to the trash and return it as it now is. Nothing is deleted: its file,
+    versions, imports and jobs stay, and a restore brings it back in the state it had. A document
+    already in the trash stays there with the time it first went there."""
+    engine = _engine(request)
+    if not await run_in_threadpool(move_to_trash, engine, document_id, utc_now()):
+        raise HTTPException(status_code=404, detail="no such document")
+    return await _detail(engine, document_id)
+
+
+@router.post(
+    "/documents/{document_id}/restore", responses={404: {"description": "No such document"}}
+)
+async def restore_document(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+) -> DocumentDetail:
+    """Bring a document out of the trash, in the state it had, and return it as it now is. A
+    document that is not in the trash is returned unchanged."""
+    engine = _engine(request)
+    if not await run_in_threadpool(restore, engine, document_id):
+        raise HTTPException(status_code=404, detail="no such document")
+    return await _detail(engine, document_id)
 
 
 @router.get(

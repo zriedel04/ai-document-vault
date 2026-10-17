@@ -512,3 +512,156 @@ def test_without_a_vault_there_is_nothing_to_download() -> None:
     app = create_app(Settings())
     client = TestClient(app, base_url=LOCAL, headers={"Authorization": f"Bearer {app.state.token}"})
     assert client.get(f"{URL}/{ids.new_ulid()}/file").status_code == 503
+
+
+# Moving a document to the trash and back.
+
+
+def set_state(library: Library, document_id: str, state: str) -> None:
+    with library.engine.begin() as connection:
+        connection.execute(
+            update(documents).where(documents.c.id == document_id).values(state=state)
+        )
+
+
+def document_row(library: Library, document_id: str) -> Any:
+    with library.engine.connect() as connection:
+        return connection.execute(select(documents).where(documents.c.id == document_id)).one()
+
+
+def everything_but_the_state(library: Library, document_id: str) -> Any:
+    """What the trash must never touch: the versions, imports, jobs and blob of a document."""
+    from vault.db.schema import blobs, document_versions, jobs
+
+    with library.engine.connect() as connection:
+        return (
+            connection.execute(
+                select(document_versions).where(document_versions.c.document_id == document_id)
+            ).all(),
+            connection.execute(
+                select(import_sources).where(import_sources.c.document_id == document_id)
+            ).all(),
+            connection.execute(select(jobs).where(jobs.c.document_id == document_id)).all(),
+            connection.execute(select(blobs)).all(),
+        )
+
+
+@pytest.mark.parametrize("state", ["processing", "searchable", "ready", "failed"])
+def test_a_document_goes_to_the_trash_and_comes_back_as_it_was(
+    client: TestClient, library: Library, state: str
+) -> None:
+    document_id = library.add("Lease.txt", "Rent is due on the first.\n")
+    set_state(library, document_id, state)
+    kept = everything_but_the_state(library, document_id)
+    before = datetime.now(UTC).replace(microsecond=0)
+
+    trashed = client.post(f"{URL}/{document_id}/trash")
+    assert trashed.status_code == 200, trashed.text
+    body = trashed.json()
+    assert body["id"] == document_id
+    assert body["state"] == "trashed"
+    assert before <= datetime.fromisoformat(body["trashed_at"]) <= datetime.now(UTC)
+    assert body["trashed_at"].endswith("Z")  # UTC, so the page does not read it as local time
+    assert page(client)["total"] == 0
+    assert [item["id"] for item in page(client, trash=True)["items"]] == [document_id]
+    row = document_row(library, document_id)
+    assert (row.state, row.state_before_trash) == (TRASHED, state)
+    assert everything_but_the_state(library, document_id) == kept
+
+    restored = client.post(f"{URL}/{document_id}/restore")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["state"] == state
+    assert restored.json()["trashed_at"] is None
+    assert page(client, trash=True)["total"] == 0
+    assert [item["id"] for item in page(client)["items"]] == [document_id]
+    row = document_row(library, document_id)
+    assert (row.state, row.state_before_trash, row.trashed_at) == (state, None, None)
+    assert everything_but_the_state(library, document_id) == kept
+
+
+def test_a_document_in_the_trash_can_still_be_opened_and_downloaded(
+    client: TestClient, library: Library
+) -> None:
+    document_id = library.add("Lease.txt", "Rent is due on the first.\n")
+    client.post(f"{URL}/{document_id}/trash")
+    assert client.get(f"{URL}/{document_id}").json()["state"] == "trashed"
+    download = client.get(f"{URL}/{document_id}/file")
+    assert download.status_code == 200
+    assert download.content == b"Rent is due on the first.\n"
+
+
+def test_trashing_twice_keeps_the_first_time_and_state(
+    client: TestClient, library: Library
+) -> None:
+    document_id = library.add("Lease.txt", "Rent is due on the first.\n")
+    set_state(library, document_id, "ready")
+    first = client.post(f"{URL}/{document_id}/trash").json()
+    second = client.post(f"{URL}/{document_id}/trash")
+    assert second.status_code == 200
+    assert second.json()["trashed_at"] == first["trashed_at"]
+    # The second move must not record "trashed" as the state to come back to.
+    assert document_row(library, document_id).state_before_trash == "ready"
+    assert client.post(f"{URL}/{document_id}/restore").json()["state"] == "ready"
+
+
+def test_restoring_a_document_in_use_changes_nothing(client: TestClient, library: Library) -> None:
+    document_id = library.add("Lease.txt", "Rent is due on the first.\n")
+    set_state(library, document_id, "searchable")
+    response = client.post(f"{URL}/{document_id}/restore")
+    assert response.status_code == 200
+    assert response.json()["state"] == "searchable"
+    assert response.json()["trashed_at"] is None
+
+
+def test_importing_a_trashed_document_again_brings_it_back(
+    client: TestClient, library: Library
+) -> None:
+    document_id = library.add("Lease.txt", "Rent is due on the first.\n")
+    client.post(f"{URL}/{document_id}/trash")
+    assert library.add("Lease copy.txt", "Rent is due on the first.\n") == document_id
+    detail = client.get(f"{URL}/{document_id}").json()
+    assert (detail["state"], detail["trashed_at"], detail["sources"]) == ("processing", None, 2)
+
+
+@pytest.mark.parametrize("action", ["trash", "restore"])
+@pytest.mark.parametrize(
+    "document_id", ["01J9ZZZZZZZZZZZZZZZZZZZZZZ", "Patient-Name", "a" * 26, "..%2Fvault.db"]
+)
+def test_trashing_or_restoring_an_unknown_document_is_a_404(
+    client: TestClient, library: Library, action: str, document_id: str
+) -> None:
+    library.add("Lease.txt", "Rent is due on the first.\n")
+    response = client.post(f"{URL}/{document_id}/{action}")
+    assert response.status_code == 404
+    assert "Patient" not in response.text
+    assert "vault" not in response.text
+
+
+@pytest.mark.parametrize("action", ["trash", "restore"])
+def test_trash_and_restore_need_the_token(anonymous: TestClient, action: str) -> None:
+    # With the Origin a page sends, so it is the token that is missing (no Origin is a 403).
+    response = anonymous.post(f"{URL}/{ids.new_ulid()}/{action}", headers={"Origin": LOCAL})
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("action", ["trash", "restore"])
+def test_trash_and_restore_refuse_another_origin(
+    app: FastAPI, token: str, library: Library, action: str
+) -> None:
+    document_id = library.add("Lease.txt", "Rent is due on the first.\n")
+    other = TestClient(
+        app,
+        base_url=LOCAL,
+        headers={"Authorization": f"Bearer {token}", "Origin": "http://evil.example"},
+    )
+    assert other.post(f"{URL}/{document_id}/{action}").status_code == 403
+    assert document_row(library, document_id).state == "processing"
+
+
+@pytest.mark.parametrize("action", ["trash", "restore"])
+def test_without_a_vault_there_is_nothing_to_trash_or_restore(action: str) -> None:
+    app = create_app(Settings())
+    client = TestClient(
+        app, base_url=LOCAL, headers={"Authorization": f"Bearer {app.state.token}", "Origin": LOCAL}
+    )
+    assert client.post(f"{URL}/{ids.new_ulid()}/{action}").status_code == 503

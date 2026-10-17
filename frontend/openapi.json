@@ -740,6 +740,98 @@
         ]
       }
     },
+    "/api/documents/{document_id}/restore": {
+      "post": {
+        "description": "Bring a document out of the trash, in the state it had, and return it as it now is. A\ndocument that is not in the trash is returned unchanged.",
+        "operationId": "restore_document_api_documents__document_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{document_id}/trash": {
+      "post": {
+        "description": "Move a document to the trash and return it as it now is. Nothing is deleted: its file,\nversions, imports and jobs stay, and a restore brings it back in the state it had. A document\nalready in the trash stays there with the time it first went there.",
+        "operationId": "trash_document_api_documents__document_id__trash_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trash Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Report that the server is up. Reads nothing from the vault or the database.",
