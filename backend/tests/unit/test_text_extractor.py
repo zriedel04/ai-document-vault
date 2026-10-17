@@ -398,6 +398,64 @@ def test_a_line_left_of_the_content_column_leaves_the_list_item() -> None:
     assert titles("10. Ten\n\n   # out\n") == [(1, "out")]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "10. item\n\n    paragraph\nlazy\n---\n",  # content column 4: the paragraph is not code
+        "100. item\n\n     paragraph\nlazy\n---\n",
+        "-    item\n\n     paragraph\nlazy\n---\n",  # four spaces after the marker
+        "-\titem\n\n    paragraph\nlazy\n---\n",  # a tab after the marker
+        "- a\n\n  - b\n\n    paragraph\nlazy\n---\n",  # nested items
+        "1. a\n\n   10. b\n\n       paragraph\nlazy\n---\n",
+        "- a\n\n  1. b\n\n     para\n\n  more of a\nlazy\n---\n",  # back out to the outer item
+        "- a\n      deeper\nlazy\n---\n",  # indented code cannot interrupt the paragraph
+    ],
+)
+def test_a_list_items_paragraph_is_judged_by_its_indent_within_the_item(text: str) -> None:
+    assert titles(text) == []  # the paragraph takes "lazy", so "---" is a break
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- a\n\n      code in the item\nOutside\n---\n",  # code four columns into the item
+        "- a\n\n  ```\n  code\nOutside\n---\n",  # a fence in the item ends with the item
+        "- a\n\n  ```\n  code\n  ```\nOutside\n---\n",
+        "10. a\n\n        code\nOutside\n---\n",
+    ],
+)
+def test_code_in_a_list_item_takes_no_lazy_line(text: str) -> None:
+    assert titles(text) == [(2, "Outside")]
+
+
+def test_fenced_code_in_a_list_item_is_not_read_as_paragraph_text() -> None:
+    assert titles("- a\n\n  ```\n  text\n  ```\nOutside\n---\n# After\n") == [
+        (2, "Outside"),
+        (1, "After"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- a\n10. b\n  ```\n  # in code\n",  # a new list starts here even at 10
+        "> q\n>     code\ntext\n===\n",  # indented code cannot interrupt the quote's paragraph
+    ],
+)
+def test_lazy_lines_keep_their_container_open(text: str) -> None:
+    assert titles(text) == []
+
+
+def test_a_lazy_line_keeps_the_list_item_open() -> None:
+    # "text" continues the item's paragraph, so "  ```" opens a fence in the item, which ends
+    # with the item at "# H" instead of swallowing it as a top-level fence would.
+    assert titles("- a\ntext\n  ```\n# H\n") == [(1, "H")]
+
+
+def test_an_empty_list_item_followed_by_a_blank_line_ends() -> None:
+    assert titles("-\n\n  ```\n# in code\n```\n# After\n") == [(1, "After")]
+
+
 def test_every_text_and_markdown_file_of_the_demo_corpus_extracts() -> None:
     corpus = Path(__file__).resolve().parents[3] / "demo" / "corpus"
     files = sorted(p for p in corpus.rglob("*") if p.suffix in {".txt", ".md"})

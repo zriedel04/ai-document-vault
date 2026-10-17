@@ -118,8 +118,11 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
     found: list[Heading] = []
     fence: tuple[str, int] | None = None
     paragraph: int | None = None  # index of the first line of the open top-level paragraph
-    item_indent: int | None = None  # content column of the open list item
+    items: list[int] = []  # content columns of the open list items, outermost first
+    item_fence: tuple[str, int] | None = None  # fenced code open inside the list items
+    empty_item = False  # the innermost list item opened empty and has no line yet
     lazy = False  # the previous line continues a paragraph inside a quote or a list item
+    quoted = False  # that paragraph is in a quote
     index = _after_front_matter(lines)
     while index < len(lines):
         line = lines[index]
@@ -130,12 +133,42 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
             continue
         if not line.strip():
             paragraph = None
-            lazy = False
+            lazy = quoted = False
+            if empty_item:  # an empty item followed by a blank line ends (CommonMark)
+                items.pop()
+                empty_item = False
+                if not items:
+                    item_fence = None
             continue
-        if item_indent is not None and _indent(line) >= item_indent:
-            lazy = _opens_paragraph(line)  # inside the list item
+        indent = _indent(line)
+        if items and indent >= items[0]:
+            # Inside a list item: judge the line by its indent within the innermost item it
+            # reaches, not by its column on the page.
+            while indent < items[-1]:
+                items.pop()
+            empty_item = quoted = False
+            inner = _dedent(line, items[-1])
+            if item_fence is not None:
+                if _closes(inner, item_fence):
+                    item_fence = None
+                continue
+            if lazy and _indent(inner) >= 4:
+                continue  # indented code cannot interrupt a paragraph: this line continues it
+            item_fence = _fence_open(inner)
+            if item_fence is not None:
+                lazy = False
+                continue
+            nested = _list_item(inner)
+            if nested and (not lazy or _interrupts(nested)):
+                items.append(_content_column(inner, nested, items[-1]))
+                empty_item = not nested.group(4)
+            lazy = _opens_paragraph(inner)
             continue
-        item_indent = None
+        if items and lazy and _continues(line):
+            continue  # a lazy line of the item's paragraph: the item stays open
+        items.clear()
+        item_fence = None  # fenced code in a list item ends with the item
+        empty_item = False
         if paragraph is not None:
             setext = _SETEXT.fullmatch(line)
             if setext:
@@ -145,26 +178,29 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
                 paragraph = None
                 continue
         if _THEMATIC_BREAK.fullmatch(line):
-            paragraph, lazy = None, False
+            paragraph, lazy, quoted = None, False, False
             continue
         opened = _fence_open(line)
         if opened:
             fence = opened
-            paragraph, lazy = None, False
+            paragraph, lazy, quoted = None, False, False
             continue
         atx = _ATX.fullmatch(line)
         if atx:
             title = _ATX_CLOSING.sub("", atx.group(2) or "", count=1).strip()
             found.append(Heading(len(atx.group(1)), title, starts[index - 1], end_of(index - 1)))
-            paragraph, lazy = None, False
+            paragraph, lazy, quoted = None, False, False
             continue
         if _QUOTE.match(line):
-            paragraph, lazy = None, _opens_paragraph(line)
+            # Indented code cannot interrupt the quote's open paragraph: such a line continues it.
+            lazy = (quoted and lazy and _quoted_indent(line) >= 4) or _opens_paragraph(line)
+            paragraph, quoted = None, True
             continue
         item = _list_item(line)
         if item and (paragraph is None or _interrupts(item)):
-            item_indent = _content_column(line, item)
-            paragraph, lazy = None, _opens_paragraph(line)
+            items[:] = [_content_column(line, item)]
+            empty_item = not item.group(4)
+            paragraph, lazy, quoted = None, _opens_paragraph(line), False
             continue
         if lazy or paragraph is not None:
             continue  # a continuation line of a quote, a list item or the open paragraph
@@ -192,6 +228,29 @@ def _opens_paragraph(line: str) -> bool:
     return not (_ATX.fullmatch(line) or _THEMATIC_BREAK.fullmatch(line) or _fence_open(line))
 
 
+def _quoted_indent(line: str) -> int:
+    """The indent of ``line``'s text inside all the quote markers it starts with."""
+    while quote := _QUOTE.match(line):
+        inner = line[quote.end() :]
+        line = inner[1:] if inner[:1] == " " else inner
+    return _indent(line)
+
+
+def _continues(line: str) -> bool:
+    """Is ``line``, left of an open list item, a lazy line of the item's paragraph?
+
+    Any list item starts a block here, even one that could not interrupt a paragraph: that rule
+    holds only within the same container, and this line is outside the item (CommonMark).
+    """
+    return not (
+        _THEMATIC_BREAK.fullmatch(line)
+        or _ATX.fullmatch(line)
+        or _fence_open(line)
+        or _QUOTE.match(line)
+        or _list_item(line)
+    )
+
+
 def _fence_open(line: str) -> tuple[str, int] | None:
     """The fence character and length if ``line`` opens fenced code. A backtick fence whose info
     string holds a backtick is not one (CommonMark): that line is paragraph text."""
@@ -217,14 +276,15 @@ def _interrupts(item: re.Match[str]) -> bool:
     return number is None or int(number) == 1
 
 
-def _content_column(line: str, item: re.Match[str]) -> int:
+def _content_column(line: str, item: re.Match[str], start: int = 0) -> int:
     """The column a list item's content starts at: lines indented this far belong to the item.
+    ``line`` starts at column ``start`` (the content column of the item it is nested in).
 
     One to four spaces after the marker count; with none (an empty item) or more than four, the
     content starts one column after the marker (CommonMark, list items rule 2).
     """
-    marker_end = _column(line[: item.start(3)])
-    spaces = _column(line[: item.end(3)]) - marker_end
+    marker_end = _column(line[: item.start(3)], start)
+    spaces = _column(line[: item.end(3)], start) - marker_end
     if not item.group(4) or spaces > 4:
         return marker_end + 1
     return marker_end + spaces
@@ -244,12 +304,20 @@ def _indent(line: str) -> int:
     return _column(line[: len(line) - len(line.lstrip(" \t"))])
 
 
-def _column(prefix: str) -> int:
-    """The column after ``prefix``, with tab stops every four columns (CommonMark)."""
-    width = 0
+def _column(prefix: str, start: int = 0) -> int:
+    """The column after ``prefix`` when it starts at column ``start``, with tab stops every four
+    columns (CommonMark)."""
+    width = start
     for char in prefix:
         width += 4 - width % 4 if char == "\t" else 1
     return width
+
+
+def _dedent(line: str, columns: int) -> str:
+    """``line`` without its first ``columns`` columns of indentation (it has at least that many),
+    with the rest of its indentation as spaces, so a tab is split where the boundary falls."""
+    body = line.lstrip(" \t")
+    return " " * (_indent(line) - columns) + body
 
 
 def _after_front_matter(lines: list[str]) -> int:
