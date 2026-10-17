@@ -7,15 +7,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI
 
-from vault.api import health, session
+from vault.api import health, imports, session
 from vault.core.config import Settings, load_settings
 from vault.core.headers import SecurityHeadersMiddleware
 from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
+from vault.ingest.importer import Importer
 from vault.jobs.queue import JobQueue
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
@@ -46,6 +48,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
 
     engine = None
     blobs = None
+    importer = None
     if settings.vault.path is not None:
         paths = ensure_vault(settings.vault.path)
         token = load_or_create_token(paths.token_file)
@@ -63,6 +66,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             requeued=metric(recovery.requeued),
             failed=metric(recovery.failed),
         )
+        importer = Importer(engine, blobs)
     else:
         token = new_token()
 
@@ -83,11 +87,14 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.token = token
     app.state.engine = engine
     app.state.blobs = blobs
+    app.state.importer = importer
+    app.state.upload_slots = anyio.Semaphore(imports.UPLOAD_SLOTS)
     app.add_middleware(LocalSecurityMiddleware, token=token)
     # Added last, so it is outermost and its headers are on the refusals above as well.
     app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(health.router, prefix="/api")
     app.include_router(session.router, prefix="/api")
+    app.include_router(imports.router, prefix="/api")
     dist = settings.frontend.dist or DEFAULT_FRONTEND_DIST
     serving = serve_frontend and find_file(dist, INDEX) is not None
     if serving:

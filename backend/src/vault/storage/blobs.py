@@ -50,6 +50,7 @@ CHUNK_BYTES: Final = 1024 * 1024
 READ_ONLY: Final = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 WRITABLE: Final = stat.S_IWUSR
 LOCK_SUFFIX: Final = ".lock"
+STAGING_MARK: Final = ".incoming"  # a staged upload, not a copy in progress
 LOCK_WAIT_SECONDS: Final = 60.0
 LOCK_POLL_SECONDS: Final = 0.01
 UNLINK_TRIES: Final = 100
@@ -403,6 +404,15 @@ class BlobStore:
 
     def _temp_path(self) -> Path:
         return self._temp_folder() / uuid.uuid4().hex
+
+    def staging_path(self, extension: str) -> Path:
+        """A new, unused path in the temporary folder for a file on its way in (an upload being
+        received), with this extension. The caller creates and removes the file; after a crash,
+        ``clean_temp()`` removes it at the next start-up."""
+        return (
+            self._temp_folder()
+            / f"{uuid.uuid4().hex}{STAGING_MARK}.{normalise_extension(extension)}"
+        )
 
     def clean_temp(self) -> int:
         """Remove what a crashed copy left behind, locks included. Run at start-up, before

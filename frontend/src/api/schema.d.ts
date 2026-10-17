@@ -24,6 +24,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/imports/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload
+         * @description Import one file sent as the request body. The answer says whether it became a new
+         *     document, was already in the vault (a new source for that document), or was refused.
+         */
+        post: operations["upload_api_imports_upload_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -48,6 +69,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
         /** Health */
         Health: {
             /** Launch */
@@ -66,6 +92,38 @@ export interface components {
             id: string;
             /** Name */
             name: string;
+        };
+        /**
+         * Outcome
+         * @enum {string}
+         */
+        Outcome: "imported" | "duplicate" | "refused";
+        /**
+         * Reason
+         * @enum {string}
+         */
+        Reason: "not_a_file" | "unreadable" | "empty" | "too_large" | "unsupported_extension" | "content_mismatch" | "legacy_or_encrypted_office" | "unreadable_archive" | "encrypted_archive" | "unsafe_archive";
+        /** UploadResult */
+        UploadResult: {
+            /** Batch Id */
+            batch_id: string;
+            /** Document Id */
+            document_id?: string | null;
+            outcome: components["schemas"]["Outcome"];
+            reason?: components["schemas"]["Reason"] | null;
+        };
+        /** ValidationError */
+        ValidationError: {
+            /** Context */
+            ctx?: Record<string, never>;
+            /** Input */
+            input?: unknown;
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
         };
     };
     responses: never;
@@ -92,6 +150,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Health"];
+                };
+            };
+        };
+    };
+    upload_api_imports_upload_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "x-vault-filename": string;
+                "x-vault-batch"?: string | null;
+                "x-vault-last-modified"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadResult"];
+                };
+            };
+            /** @description A malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

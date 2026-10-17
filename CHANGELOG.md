@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Upload endpoint `POST /api/imports/upload`: one file as the request body, its name, batch and modification time in headers (never in the address), streamed to a staging file under the size limit and handed to the importer.
 - Project licence: Apache-2.0 (`LICENSE`, ADR 0017), declared in the backend, frontend and demo generator package metadata; the backend's wheel and sdist include the licence text.
 - Import of one file (`vault.ingest.importer`): validate, store the blob, validate the stored copy, then record a new document with its version, source and `extract` job, or a new source for the document that already holds the same bytes. Concurrent imports of the same bytes make one document.
 - Persistent job queue (`vault.jobs.queue`, `jobs` table, migration `0003`, ADR 0005): enqueue without duplicates, an atomic claim, back-off and a failed state after the last attempt, retry, and recovery at start-up of jobs a killed process left running. Error messages are never stored, only the exception's class name.
