@@ -8,6 +8,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
     "alembic>=1.14",
+    "anyio>=4.6",
     "fastapi>=0.115",
     "pydantic-settings>=2.6",
     "sqlalchemy>=2.0",
