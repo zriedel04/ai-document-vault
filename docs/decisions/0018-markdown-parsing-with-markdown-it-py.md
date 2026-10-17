@@ -1,6 +1,6 @@
 # ADR 0018: Markdown parsing with markdown-it-py
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-17
 - Hardware-dependent: no
 - Plan reference: docs/architecture.md, section 3 (stack table, document extraction)
@@ -20,11 +20,11 @@ markdown-it-py (MIT, depending only on mdurl, MIT) is a maintained port of markd
 - A heading's offsets run from the start of its first source line (for a setext heading under link reference definitions, the first line after them) to the end of its last line, without the line break, from the token's line map. The title is the inline token's raw source: an ATX title without its closing sequence, a setext title with its lines stripped and joined by single spaces.
 - YAML front matter at the very start is still skipped by the extractor before parsing, as before.
 - The known deviations on link reference definitions are accepted and recorded as tests (`test_known_deviations_from_commonmark_on_link_reference_definitions`), so an upgrade that changes them is noticed.
-- Once this ADR is Accepted it supersedes the "Markdown/TXT: direct" cell of the plan's stack table for Markdown; the plan is updated then.
+- This replaces "Markdown/TXT: direct" in the plan's stack table for Markdown; the table now names markdown-it-py and this ADR.
 
-## Evidence needed
+## Approval
 
-- The owner's approval of the dependency and of the known deviations on link reference definitions. The comparison with the reference implementation is described above; the code and its tests are in PR #46.
+- Approved by the owner on 2026-10-17, choosing markdown-it-py over keeping the hand-written parser after the comparison above. The code and its tests are in PR #46.
 
 ## Alternatives considered
 
