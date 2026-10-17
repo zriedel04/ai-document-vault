@@ -1,6 +1,128 @@
 {
   "components": {
     "schemas": {
+      "DocumentDetail": {
+        "properties": {
+          "added_at": {
+            "format": "date-time",
+            "title": "Added At",
+            "type": "string"
+          },
+          "extension": {
+            "title": "Extension",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "import_sources": {
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "title": "Import Sources",
+            "type": "array"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "local_only": {
+            "title": "Local Only",
+            "type": "boolean"
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "sources": {
+            "title": "Sources",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "processing",
+              "searchable",
+              "ready",
+              "failed",
+              "trashed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "trashed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trashed At"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_no": {
+            "title": "Version No",
+            "type": "integer"
+          },
+          "version_origin": {
+            "enum": [
+              "import",
+              "user",
+              "ai_copy"
+            ],
+            "title": "Version Origin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "extension",
+          "mime",
+          "size",
+          "state",
+          "added_at",
+          "trashed_at",
+          "sources",
+          "sha256",
+          "local_only",
+          "version_id",
+          "version_no",
+          "version_origin",
+          "import_sources",
+          "jobs"
+        ],
+        "title": "DocumentDetail",
+        "type": "object"
+      },
       "DocumentItem": {
         "properties": {
           "added_at": {
@@ -151,6 +273,73 @@
         "title": "Health",
         "type": "object"
       },
+      "Job": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "max_attempts": {
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "stage": {
+            "enum": [
+              "extract",
+              "ocr",
+              "metadata",
+              "chunk",
+              "embed",
+              "enrich"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "status",
+          "attempts",
+          "max_attempts",
+          "last_error",
+          "finished_at"
+        ],
+        "title": "Job",
+        "type": "object"
+      },
       "Me": {
         "properties": {
           "id": {
@@ -210,6 +399,78 @@
         ],
         "title": "SortKey",
         "type": "string"
+      },
+      "Source": {
+        "properties": {
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "folders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Folders",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "imported_at": {
+            "format": "date-time",
+            "title": "Imported At",
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "upload",
+              "folder",
+              "watch"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "original_mtime": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Mtime"
+          },
+          "original_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Path"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "original_path",
+          "folders",
+          "original_mtime",
+          "method",
+          "batch_id",
+          "imported_at"
+        ],
+        "title": "Source",
+        "type": "object"
       },
       "UploadResult": {
         "properties": {
@@ -378,6 +639,52 @@
           }
         },
         "summary": "Read Documents",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{document_id}": {
+      "get": {
+        "description": "One document, in use or in the trash: what the list shows, plus its hash, current version,\nevery import (oldest first; the first names the document) and its processing jobs (in the\norder of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message\ndoes not repeat it.",
+        "operationId": "read_document_api_documents__document_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Document",
         "tags": [
           "documents"
         ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import typing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -12,13 +13,23 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, event, func, select, update
 
-from vault.api.documents import State
+from vault.api.documents import JobStatus, Method, Origin, Stage, State
 from vault.core.config import Settings
 from vault.db import ids
-from vault.db.documents import ListQuery, _utc, list_documents
+from vault.db.documents import ListQuery, _utc, get_document, list_documents
 from vault.db.engine import read_snapshot
-from vault.db.schema import DOCUMENT_STATES, TRASHED, documents, import_sources
+from vault.db.schema import (
+    DOCUMENT_STATES,
+    IMPORT_METHODS,
+    JOB_STAGES,
+    JOB_STATUSES,
+    TRASHED,
+    VERSION_ORIGINS,
+    documents,
+    import_sources,
+)
 from vault.ingest.importer import Importer, ImportRequest, Outcome
+from vault.jobs.queue import JobQueue
 from vault.main import create_app
 
 from ..conftest import LOCAL
@@ -36,15 +47,17 @@ class Library:
         self.now = START
         self.importer = Importer(self.engine, app.state.blobs, clock=lambda: self.now)
 
-    def add(self, name: str, body: str) -> str:
+    def add(self, name: str, body: str, **changes: Any) -> str:
         self.now += timedelta(minutes=1)
         path = self.folder / f"incoming-{ids.new_ulid()}.txt"
         path.write_bytes(body.encode("utf-8"))  # write_text would turn \n into \r\n on Windows
-        result = self.importer.import_file(
-            ImportRequest(
-                path=path, original_filename=name, method="upload", batch_id=ids.new_ulid()
-            )
-        )
+        values: dict[str, Any] = {
+            "path": path,
+            "original_filename": name,
+            "method": "upload",
+            "batch_id": ids.new_ulid(),
+        }
+        result = self.importer.import_file(ImportRequest(**(values | changes)))
         assert result.outcome in {Outcome.IMPORTED, Outcome.DUPLICATE}
         assert result.document_id is not None
         return result.document_id
@@ -269,6 +282,117 @@ def test_a_page_past_the_end_and_its_total_come_from_one_snapshot(library: Libra
     assert counted  # the import really ran between the two reads
     assert (page_.items, page_.total) == ((), 1)
     assert list_documents(library.engine, ListQuery(offset=10)).total == 2
+
+
+# --- one document ---------------------------------------------------------------------------------
+
+
+def test_one_document_with_its_version_imports_and_jobs(
+    client: TestClient, library: Library
+) -> None:
+    batch = ids.new_ulid()
+    document_id = library.add(
+        "Syllabus.txt",
+        "Week 1: introduction\n",
+        method="folder",
+        batch_id=batch,
+        original_path="C:/School/Term 1/Syllabus.txt",
+        folder_segments=["School", "Term 1"],
+        original_mtime=datetime(2026, 9, 1, 8, 30),
+    )
+    library.add("Syllabus (copy).txt", "Week 1: introduction\n")
+    response = client.get(f"{URL}/{document_id}")
+    assert response.status_code == 200
+    body = response.json()
+    listed = page(client)["items"][0]
+    assert {key: body[key] for key in listed} == listed  # the detail holds the list item
+    assert body["sha256"] == hashlib.sha256(b"Week 1: introduction\n").hexdigest()
+    assert body["local_only"] is False
+    assert body["version_no"] == 1
+    assert body["version_origin"] == "import"
+    assert ids.is_ulid(body["version_id"])
+    first, second = body["import_sources"]
+    assert first | {"id": None} == {
+        "id": None,
+        "filename": "Syllabus.txt",
+        "original_path": "C:/School/Term 1/Syllabus.txt",
+        "folders": ["School", "Term 1"],
+        "original_mtime": "2026-09-01T08:30:00Z",
+        "method": "folder",
+        "batch_id": batch,
+        "imported_at": "2026-10-01T09:01:00Z",
+    }
+    assert (second["filename"], second["original_path"], second["folders"]) == (
+        "Syllabus (copy).txt",
+        None,
+        [],
+    )
+    assert body["jobs"] == [
+        {
+            "stage": "extract",
+            "status": "queued",
+            "attempts": 0,
+            "max_attempts": body["jobs"][0]["max_attempts"],
+            "last_error": None,
+            "finished_at": None,
+        }
+    ]
+
+
+def test_jobs_come_in_pipeline_order(client: TestClient, library: Library, app: FastAPI) -> None:
+    document_id = library.add("scan.txt", "scan\n")
+    queue = JobQueue(app.state.engine)
+    for stage in ("embed", "chunk", "ocr"):
+        queue.enqueue(document_id, stage, "0" * 64)
+    stages = [job["stage"] for job in client.get(f"{URL}/{document_id}").json()["jobs"]]
+    assert stages == ["extract", "ocr", "chunk", "embed"]
+
+
+def test_a_document_in_the_trash_has_details_too(client: TestClient, library: Library) -> None:
+    document_id = library.add("old.txt", "old\n")
+    library.trash(document_id)
+    body = client.get(f"{URL}/{document_id}").json()
+    assert (body["state"], body["trashed_at"]) == ("trashed", "2026-10-01T09:01:00Z")
+
+
+@pytest.mark.parametrize(
+    "document_id", [None, "01J9ZZZZZZZZZZZZZZZZZZZZZZ", "Patient-Name", "a" * 26]
+)
+def test_an_unknown_document_is_a_404_that_does_not_repeat_the_id(
+    client: TestClient, library: Library, document_id: str | None
+) -> None:
+    if document_id is None:
+        document_id = ids.new_ulid()
+    library.add("other.txt", "other\n")
+    response = client.get(f"{URL}/{document_id}")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "no such document"}
+
+
+def test_the_details_need_the_token(anonymous: TestClient) -> None:
+    assert anonymous.get(f"{URL}/{ids.new_ulid()}").status_code == 401
+
+
+def test_without_a_vault_there_are_no_details() -> None:
+    app = create_app(Settings())
+    client = TestClient(app, base_url=LOCAL, headers={"Authorization": f"Bearer {app.state.token}"})
+    assert client.get(f"{URL}/{ids.new_ulid()}").status_code == 503
+
+
+def test_folders_that_are_not_names_are_refused(library: Library) -> None:
+    """The table only checks for a JSON list; a list of numbers is not a folder path."""
+    document_id = library.add("odd.txt", "odd\n")
+    with library.engine.begin() as connection:
+        connection.execute(update(import_sources).values(folder_segments="[1, 2]"))
+    with pytest.raises(ValueError, match="not a list of names"):
+        get_document(library.engine, document_id)
+
+
+def test_the_api_lists_every_origin_method_stage_and_job_status() -> None:
+    assert typing.get_args(Origin) == VERSION_ORIGINS
+    assert typing.get_args(Method) == IMPORT_METHODS
+    assert typing.get_args(Stage) == JOB_STAGES
+    assert typing.get_args(JobStatus) == JOB_STATUSES
 
 
 def test_a_snapshot_does_not_see_a_commit_made_during_it(library: Library) -> None:

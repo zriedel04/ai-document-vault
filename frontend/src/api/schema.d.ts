@@ -26,6 +26,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Document
+         * @description One document, in use or in the trash: what the list shows, plus its hash, current version,
+         *     every import (oldest first; the first names the document) and its processing jobs (in the
+         *     order of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message
+         *     does not repeat it.
+         */
+        get: operations["read_document_api_documents__document_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -91,6 +114,50 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** DocumentDetail */
+        DocumentDetail: {
+            /**
+             * Added At
+             * Format: date-time
+             */
+            added_at: string;
+            /** Extension */
+            extension: string;
+            /** Id */
+            id: string;
+            /** Import Sources */
+            import_sources: components["schemas"]["Source"][];
+            /** Jobs */
+            jobs: components["schemas"]["Job"][];
+            /** Local Only */
+            local_only: boolean;
+            /** Mime */
+            mime: string;
+            /** Name */
+            name: string | null;
+            /** Sha256 */
+            sha256: string;
+            /** Size */
+            size: number;
+            /** Sources */
+            sources: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "processing" | "searchable" | "ready" | "failed" | "trashed";
+            /** Trashed At */
+            trashed_at: string | null;
+            /** Version Id */
+            version_id: string;
+            /** Version No */
+            version_no: number;
+            /**
+             * Version Origin
+             * @enum {string}
+             */
+            version_origin: "import" | "user" | "ai_copy";
+        };
         /** DocumentItem */
         DocumentItem: {
             /**
@@ -146,6 +213,27 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** Job */
+        Job: {
+            /** Attempts */
+            attempts: number;
+            /** Finished At */
+            finished_at: string | null;
+            /** Last Error */
+            last_error: string | null;
+            /** Max Attempts */
+            max_attempts: number;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "extract" | "ocr" | "metadata" | "chunk" | "embed" | "enrich";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "done" | "failed";
+        };
         /** Me */
         Me: {
             /** Id */
@@ -173,6 +261,31 @@ export interface components {
          * @enum {string}
          */
         SortKey: "added" | "name" | "size";
+        /** Source */
+        Source: {
+            /** Batch Id */
+            batch_id: string;
+            /** Filename */
+            filename: string;
+            /** Folders */
+            folders: string[];
+            /** Id */
+            id: string;
+            /**
+             * Imported At
+             * Format: date-time
+             */
+            imported_at: string;
+            /**
+             * Method
+             * @enum {string}
+             */
+            method: "upload" | "folder" | "watch";
+            /** Original Mtime */
+            original_mtime: string | null;
+            /** Original Path */
+            original_path: string | null;
+        };
         /** UploadResult */
         UploadResult: {
             /** Batch Id */
@@ -227,6 +340,44 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DocumentList"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_document_api_documents__document_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description No such document */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

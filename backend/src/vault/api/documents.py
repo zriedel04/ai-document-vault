@@ -1,4 +1,4 @@
-"""The document list: one page at a time, sorted on the server."""
+"""The document list (one page at a time, sorted on the server) and one document's details."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from vault.db.documents import (
     ListQuery,
     Order,
     SortKey,
+    get_document,
     list_documents,
 )
 
@@ -28,6 +29,11 @@ MAX_OFFSET = 1_000_000_000
 
 # The states of vault.db.schema.DOCUMENT_STATES, spelled out so the API schema lists them.
 State = Literal["processing", "searchable", "ready", "failed", "trashed"]
+# And of VERSION_ORIGINS, IMPORT_METHODS, JOB_STAGES and JOB_STATUSES.
+Origin = Literal["import", "user", "ai_copy"]
+Method = Literal["upload", "folder", "watch"]
+Stage = Literal["extract", "ocr", "metadata", "chunk", "embed", "enrich"]
+JobStatus = Literal["queued", "running", "done", "failed"]
 
 
 class DocumentItem(BaseModel):
@@ -72,4 +78,62 @@ async def read_documents(
         total=page.total,
         limit=limit,
         offset=offset,
+    )
+
+
+class Source(BaseModel):
+    id: str
+    filename: str
+    original_path: str | None
+    folders: list[str]
+    original_mtime: datetime | None
+    method: Method
+    batch_id: str
+    imported_at: datetime
+
+
+class Job(BaseModel):
+    stage: Stage
+    status: JobStatus
+    attempts: int
+    max_attempts: int
+    last_error: str | None
+    finished_at: datetime | None
+
+
+class DocumentDetail(DocumentItem):
+    sha256: str
+    local_only: bool
+    version_id: str
+    version_no: int
+    version_origin: Origin
+    import_sources: list[Source]
+    jobs: list[Job]
+
+
+@router.get("/documents/{document_id}", responses={404: {"description": "No such document"}})
+async def read_document(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+) -> DocumentDetail:
+    """One document, in use or in the trash: what the list shows, plus its hash, current version,
+    every import (oldest first; the first names the document) and its processing jobs (in the
+    order of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message
+    does not repeat it."""
+    engine: Engine | None = request.app.state.engine
+    if engine is None:
+        raise HTTPException(status_code=503, detail="no vault is open")
+    detail = await run_in_threadpool(get_document, engine, document_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="no such document")
+    return DocumentDetail(
+        **DocumentItem.model_validate(detail.summary, from_attributes=True).model_dump(),
+        sha256=detail.sha256,
+        local_only=detail.local_only,
+        version_id=detail.version_id,
+        version_no=detail.version_no,
+        version_origin=detail.version_origin,
+        import_sources=[Source.model_validate(s, from_attributes=True) for s in detail.sources],
+        jobs=[Job.model_validate(job, from_attributes=True) for job in detail.jobs],
     )
