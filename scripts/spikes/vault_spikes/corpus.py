@@ -13,6 +13,7 @@ import json
 import os
 import posixpath
 import re
+import stat
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -135,7 +136,7 @@ def files_below(root: Path, suffixes: frozenset[str]) -> list[Path]:
     for folder, subfolders, names in os.walk(root, onerror=fail):
         for name in (*subfolders, *names):
             if is_link(Path(folder) / name):
-                msg = "the folder holds a symbolic link or junction; the spike follows none"
+                msg = "the folder holds a symbolic, junction or hard link; the spike follows none"
                 raise SpikeInputError(msg)
         subfolders.sort()
         found.extend(
@@ -150,11 +151,15 @@ _REPARSE_POINT: Final = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
 def is_link(path: Path) -> bool:
-    """Is ``path`` itself a link: a symbolic link, or on Windows a junction or any other reparse
-    point (``os.lstat`` does not follow it)? Junctions have the reparse attribute, not the
-    symbolic-link mode, so ``Path.is_symlink`` misses them."""
-    attributes = getattr(os.lstat(path), "st_file_attributes", 0)
-    return path.is_symlink() or bool(attributes & _REPARSE_POINT)
+    """Is ``path`` itself a link: a symbolic link, on Windows a junction or any other reparse
+    point (``os.lstat`` does not follow it), or a file with more than one hard link? Junctions
+    have the reparse attribute, not the symbolic-link mode, so ``Path.is_symlink`` misses them,
+    and a hard link is a regular file whose other name can sit anywhere on the same drive, so a
+    private file linked into ``demo/corpus`` would be read as public data."""
+    status = os.lstat(path)
+    attributes = getattr(status, "st_file_attributes", 0)
+    hard_linked = stat.S_ISREG(status.st_mode) and status.st_nlink > 1
+    return stat.S_ISLNK(status.st_mode) or bool(attributes & _REPARSE_POINT) or hard_linked
 
 
 def reference_folder(file: Path, root: Path, references: Path | None) -> Path:
@@ -179,7 +184,7 @@ def not_a_link(path: Path) -> Path:
     """``path``, unless it is a link (:func:`is_link`), which stops the run. A path that does not
     exist is returned as it is."""
     if os.path.lexists(path) and is_link(path):
-        msg = "a reference path is a symbolic link or junction; the spike follows none"
+        msg = "a reference path is a symbolic, junction or hard link; the spike follows none"
         raise SpikeInputError(msg)
     return path
 
@@ -417,11 +422,18 @@ def canonical_paths(documents: list[Document]) -> dict[str, str]:
 
 
 def safe_file(folder: Path, relative: str) -> Path:
-    """``relative`` inside ``folder``, or SpikeInputError if it climbs out or is not a file."""
+    """``relative`` inside ``folder``, or SpikeInputError if it climbs out or is not a file.
+
+    ``resolve`` follows symbolic links and junctions, so one that leads out of the folder is
+    refused here; a hard link has no target to resolve and is refused by :func:`is_link`, since
+    its other name can be anywhere on the drive and the run is labelled by the folder."""
     root = folder.resolve()
     candidate = (root / relative).resolve()
     if not candidate.is_relative_to(root) or not candidate.is_file():
         msg = "a listed document is missing or outside the corpus folder"
+        raise SpikeInputError(msg)
+    if is_link(candidate):
+        msg = "a listed document is a hard link; the spike reads none"
         raise SpikeInputError(msg)
     return candidate
 

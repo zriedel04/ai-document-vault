@@ -810,7 +810,7 @@ class FolderWalkTest(unittest.TestCase):
                         link.with_suffix(".pdf").symlink_to(root / "outside" / "private.pdf")
                 except OSError:
                     self.skipTest("this system does not allow symbolic links")
-                with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
                     c.files_below(root / "tree", frozenset({".pdf"}))
 
     def test_a_link_in_the_reference_tree_stops_the_run(self) -> None:
@@ -849,7 +849,7 @@ class FolderWalkTest(unittest.TestCase):
                     self.skipTest("this system does not allow symbolic links")
                 images = root / "images"
                 pdfs = c.files_below(images, frozenset({".pdf"}))
-                with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
                     pdf.run_pdf_spike(
                         FakePdf({"a.pdf": pdf.PdfText(["text"], ["Text"])}),
                         pdfs,
@@ -859,7 +859,7 @@ class FolderWalkTest(unittest.TestCase):
                         clock=Clock(),
                     )
                 if kind != "headings file":  # the OCR spike reads no headings file
-                    with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+                    with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
                         ocr.find_labelled_images(images, references)
 
     def test_a_reparse_point_in_the_reference_tree_stops_the_run(self) -> None:
@@ -879,9 +879,34 @@ class FolderWalkTest(unittest.TestCase):
             (root / "references" / "receipts" / "a.txt").write_text("alpha", encoding="utf-8")
             with (
                 mock.patch.object(os, "lstat", side_effect=lstat),
-                self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"),
+                self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"),
             ):
                 ocr.find_labelled_images(root / "images", root / "references")
+
+    def test_a_hard_link_in_either_tree_stops_the_run(self) -> None:
+        # A hard-linked file is a regular file whose other name can be a private file anywhere
+        # on the drive; inside demo/corpus it would be read as public data.
+        for place in ("image", "reference"):
+            with self.subTest(place), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "outside").mkdir()
+                (root / "outside" / "a.png").write_bytes(b"x")
+                (root / "outside" / "a.txt").write_text("private", encoding="utf-8")
+                (root / "images" / "receipts").mkdir(parents=True)
+                (root / "references" / "receipts").mkdir(parents=True)
+                try:
+                    if place == "image":
+                        os.link(root / "outside" / "a.png", root / "images" / "receipts" / "a.png")
+                        (root / "references" / "receipts" / "a.txt").write_text("own", "utf-8")
+                    else:
+                        (root / "images" / "receipts" / "a.png").write_bytes(b"x")
+                        os.link(
+                            root / "outside" / "a.txt", root / "references" / "receipts" / "a.txt"
+                        )
+                except OSError:
+                    self.skipTest("this system does not allow hard links")
+                with self.assertRaisesRegex(SpikeInputError, "hard link"):
+                    ocr.find_labelled_images(root / "images", root / "references")
 
     def test_a_reparse_point_stops_the_walk(self) -> None:
         # A Windows junction has the reparse attribute and not the symbolic-link mode, so
@@ -900,7 +925,7 @@ class FolderWalkTest(unittest.TestCase):
             (root / "own.pdf").write_bytes(b"x")
             with (
                 mock.patch.object(os, "lstat", side_effect=lstat),
-                self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"),
+                self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"),
             ):
                 c.files_below(root, frozenset({".pdf"}))
 
@@ -916,7 +941,7 @@ class FolderWalkTest(unittest.TestCase):
             create_junction = getattr(_winapi, "CreateJunction")  # noqa: B009 - typed for Windows only
             create_junction(str(root / "outside"), str(root / "tree" / "junction"))
             self.assertFalse((root / "tree" / "junction").is_symlink())  # why the attribute
-            with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+            with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
                 c.files_below(root / "tree", frozenset({".pdf"}))
             # The same junction in the reference tree, which no walk lists.
             (root / "images" / "junction").mkdir(parents=True)
@@ -924,7 +949,7 @@ class FolderWalkTest(unittest.TestCase):
             (root / "outside" / "private.txt").write_text("private", encoding="utf-8")
             (root / "references").mkdir()
             create_junction(str(root / "outside"), str(root / "references" / "junction"))
-            with self.assertRaisesRegex(SpikeInputError, "symbolic link or junction"):
+            with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
                 ocr.find_labelled_images(root / "images", root / "references")
 
     def test_a_subfolder_that_cannot_be_listed_stops_the_walk(self) -> None:
