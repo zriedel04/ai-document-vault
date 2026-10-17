@@ -191,14 +191,43 @@ def render(notices: Iterable[Notice]) -> str:
         if notice.source:
             lines += ["", notice.source]
         for file_name, text in notice.texts:
-            fence = "````" if "```" in text else "```"
+            fence = fence_for(text)
             lines += ["", f"`{file_name}`:", "", f"{fence}text", text.rstrip(), fence]
     return "\n".join(lines) + "\n"
 
 
+def fence_for(text: str) -> str:
+    """A code fence longer than any run of backticks in ``text``, so no line of it closes the block."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def split(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """The part before the first package heading, and each (heading, body) after it.
+
+    Only a ``## `` line outside a code fence is a heading: a licence text can hold a Markdown
+    heading of its own (``## Warranty``), and splitting there would hide the rest of the text from
+    the comparison.
+    """
+    preamble: list[str] = []
+    found: list[tuple[str, list[str]]] = []
+    fence = ""
+    for line in text.split("\n"):
+        if fence:
+            if line == fence:
+                fence = ""
+        elif opening := re.fullmatch(r"(`{3,})text", line):
+            fence = opening.group(1)
+        elif line.startswith("## "):
+            found.append((line.removeprefix("## "), []))
+            continue
+        (found[-1][1] if found else preamble).append(line)
+    return "\n".join(preamble), [(heading, "\n".join(body).strip()) for heading, body in found]
+
+
 def table(text: str, ecosystem: str) -> set[tuple[str, str]]:
     """The package table's rows for one ecosystem; the licence texts below it are not read."""
-    text = text.split("\n## ", 1)[0]
+    text = split(text)[0]
     return {
         (name, licence.strip())
         for found_ecosystem, name, licence in ROW.findall(text)
@@ -209,11 +238,10 @@ def table(text: str, ecosystem: str) -> set[tuple[str, str]]:
 def sections(text: str, ecosystem: str) -> dict[str, str]:
     """Each package's section (licence and texts) for one ecosystem, by package name."""
     found = {}
-    for block in text.split("\n## ")[1:]:
-        heading, _, body = block.partition("\n")
-        prefix = f"{ecosystem}: "
+    prefix = f"{ecosystem}: "
+    for heading, body in split(text)[1]:
         if heading.startswith(prefix):
-            found[heading.removeprefix(prefix)] = body.strip()
+            found[heading.removeprefix(prefix)] = body
     return found
 
 

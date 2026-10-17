@@ -49,6 +49,21 @@ class RenderTest(unittest.TestCase):
         self.assertIn("````text\na\n```\nb\n````", text)
 
 
+class SplitTest(unittest.TestCase):
+    def test_a_heading_inside_a_licence_text_is_not_a_section(self) -> None:
+        notice = Notice("npm", "headed", "MIT", (("LICENSE", "terms\n## Warranty\nold"),))
+        [(heading, body)] = notices.split(notices.render([notice]))[1]
+        self.assertEqual(heading, "npm: headed")
+        self.assertIn("## Warranty\nold", body)
+
+    def test_a_text_with_long_backtick_runs_gets_a_longer_fence(self) -> None:
+        for text, fence in (("plain", "```"), ("a ``` b", "````"), ("````\n## x", "`````")):
+            with self.subTest(text=text):
+                self.assertEqual(notices.fence_for(text), fence)
+                rendered = notices.render([Notice("npm", "p", "MIT", (("LICENSE", text),))])
+                self.assertEqual([h for h, _ in notices.split(rendered)[1]], ["npm: p"])
+
+
 class DriftTest(unittest.TestCase):
     committed = notices.render(sample())
 
@@ -81,6 +96,15 @@ class DriftTest(unittest.TestCase):
         ]
         self.assertEqual(
             notices.drift(self.committed, current, "npm"), ["~ @scope/alpha: licence text differs"]
+        )
+
+    def test_a_change_after_a_heading_inside_a_licence_text_is_drift(self) -> None:
+        """Codex #39: a `## ` line inside a fenced text must not end the comparison there."""
+        before = [Notice("npm", "headed", "MIT", (("LICENSE", "terms\n## Warranty\nold"),))]
+        after = [Notice("npm", "headed", "MIT", (("LICENSE", "terms\n## Warranty\nnew"),))]
+        self.assertEqual(
+            notices.drift(notices.render(before), after, "npm"),
+            ["~ headed: licence text differs"],
         )
 
     def test_a_licence_file_added_or_removed_is_drift(self) -> None:
