@@ -10,12 +10,13 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, delete, update
+from sqlalchemy import Engine, delete, event, func, select, update
 
 from vault.api.documents import State
 from vault.core.config import Settings
 from vault.db import ids
-from vault.db.documents import ListQuery, _utc
+from vault.db.documents import ListQuery, _utc, list_documents
+from vault.db.engine import read_snapshot
 from vault.db.schema import DOCUMENT_STATES, TRASHED, documents, import_sources
 from vault.ingest.importer import Importer, ImportRequest, Outcome
 from vault.main import create_app
@@ -247,3 +248,37 @@ def test_a_time_is_given_in_utc() -> None:
         2026, 10, 1, 11, 0, tzinfo=UTC
     )
     assert _utc(datetime(2026, 10, 1, 11, 0)) == datetime(2026, 10, 1, 11, 0, tzinfo=UTC)
+
+
+def test_a_page_past_the_end_and_its_total_come_from_one_snapshot(library: Library) -> None:
+    """Codex #41: a commit between the empty page and the count must not change the total."""
+    library.add("first.txt", "first\n")
+    counted: list[str] = []
+
+    def import_during_the_count(_conn: Any, _cursor: Any, statement: str, *_: Any) -> None:
+        # The fallback count, after the page came back empty (the page holds a window count).
+        if statement.lstrip().upper().startswith("SELECT COUNT") and not counted:
+            counted.append(statement)
+            library.add("second.txt", "second\n")  # commits on another connection
+
+    event.listen(library.engine, "before_cursor_execute", import_during_the_count)
+    try:
+        page_ = list_documents(library.engine, ListQuery(offset=10))
+    finally:
+        event.remove(library.engine, "before_cursor_execute", import_during_the_count)
+    assert counted  # the import really ran between the two reads
+    assert (page_.items, page_.total) == ((), 1)
+    assert list_documents(library.engine, ListQuery(offset=10)).total == 2
+
+
+def test_a_snapshot_does_not_see_a_commit_made_during_it(library: Library) -> None:
+    """The driver opens no transaction for a read, so without the snapshot the second read would
+    see the document added between the two."""
+    library.add("first.txt", "first\n")
+    with read_snapshot(library.engine) as connection:
+        before = connection.execute(select(func.count()).select_from(documents)).scalar_one()
+        library.add("second.txt", "second\n")
+        after = connection.execute(select(func.count()).select_from(documents)).scalar_one()
+    assert (before, after) == (1, 1)
+    with library.engine.connect() as connection:
+        assert connection.execute(select(func.count()).select_from(documents)).scalar_one() == 2

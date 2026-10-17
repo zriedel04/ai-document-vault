@@ -24,6 +24,7 @@ from typing import Final
 
 from sqlalchemy import ColumnElement, Engine, Row, func, select
 
+from vault.db.engine import read_snapshot
 from vault.db.schema import TRASHED, blobs, document_versions, documents, import_sources
 
 MAX_PAGE: Final = 100
@@ -116,10 +117,7 @@ def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
             documents.c.created_at,
             documents.c.trashed_at,
             func.coalesce(first.c.sources, 0).label("sources"),
-            # The total in the same statement as the page, so both come from one snapshot: the
-            # driver does not open a transaction for a read, so two statements could see a write
-            # between them.
-            func.count().over().label("total"),
+            func.count().over().label("total"),  # the total, without a second statement
         )
         .select_from(documents)
         .join(
@@ -142,7 +140,9 @@ def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
     else:
         ordering = (key.desc(), documents.c.id.desc())
 
-    with engine.connect() as connection:
+    # One snapshot for both reads: the driver opens no transaction for a read, so without it a
+    # commit between the page and the fallback count could pair an old page with a new total.
+    with read_snapshot(engine) as connection:
         rows = connection.execute(
             base.order_by(*ordering).limit(query.limit).offset(query.offset)
         ).all()
