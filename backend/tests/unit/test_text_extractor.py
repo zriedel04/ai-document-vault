@@ -504,6 +504,17 @@ def test_known_deviations_from_commonmark_on_link_reference_definitions(text: st
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "<div>\n# Inside\n</div>\n\n# Real\n",  # an HTML block runs to its blank line
+        "<!--\n# Inside\n-->\n# Real\n",  # a comment runs to its closing marker
+    ],
+)
+def test_headings_inside_an_html_block_are_not_recorded(text: str) -> None:
+    assert titles(text) == [(1, "Real")]
+
+
+@pytest.mark.parametrize(
     ("text", "title"),
     [
         ("[ref]: </x y>\nTitle\n---\n", "Title"),  # a pointy destination may hold a space
