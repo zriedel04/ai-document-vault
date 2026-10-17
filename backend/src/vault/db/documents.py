@@ -13,6 +13,10 @@ the id), so the same request on unchanged data always gives the same page.
 
 The names are the owner's own file names: they go to the page that asked for them and are never
 logged.
+
+A document moves to the trash and back without losing anything (ADR 0005, plan section 13): the
+trash is a state, the state it had is kept in ``state_before_trash``, and its versions, imports,
+blob and jobs stay as they are. Removing it for good is a separate, later operation.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Engine, Row, func, select
+from sqlalchemy import ColumnElement, Connection, Engine, Row, func, select, update
 
 from vault.db import ids
 from vault.db.engine import read_snapshot
@@ -349,3 +353,49 @@ def get_original(engine: Engine, document_id: str) -> Original | None:
         mime=row.mime,
         filename=row.name if row.name is not None else f"{document_id}.{row.ext}",
     )
+
+
+def move_to_trash(engine: Engine, document_id: str, now: datetime) -> bool:
+    """Put a document in use into the trash at ``now`` (UTC without a zone, as the database stores
+    times; ``vault.jobs.queue.utc_now``), keeping its state for a restore.
+
+    True when the document exists, in the trash now whether or not it was before: trashing it
+    twice keeps the time it first went there. False for an unknown id. One statement decides and
+    writes, so an import that brings the same document out of the trash at the same moment either
+    comes first or finds it in the trash, never half of each.
+    """
+    if not ids.is_ulid(document_id):
+        return False
+    with engine.begin() as connection:
+        moved = connection.execute(
+            update(documents)
+            .where(documents.c.id == document_id, documents.c.state != TRASHED)
+            .values(
+                state=TRASHED,
+                state_before_trash=documents.c.state,  # SET reads the row as it was
+                trashed_at=now,
+            )
+        ).rowcount
+        return moved == 1 or _exists(connection, document_id)
+
+
+def restore(engine: Engine, document_id: str) -> bool:
+    """Bring a document out of the trash in the state it had when it went there.
+
+    True when the document exists, in use now whether or not it was in the trash; False for an
+    unknown id.
+    """
+    if not ids.is_ulid(document_id):
+        return False
+    with engine.begin() as connection:
+        restored = connection.execute(
+            update(documents)
+            .where(documents.c.id == document_id, documents.c.state == TRASHED)
+            .values(state=documents.c.state_before_trash, trashed_at=None, state_before_trash=None)
+        ).rowcount
+        return restored == 1 or _exists(connection, document_id)
+
+
+def _exists(connection: Connection, document_id: str) -> bool:
+    found = connection.execute(select(documents.c.id).where(documents.c.id == document_id))
+    return found.first() is not None
