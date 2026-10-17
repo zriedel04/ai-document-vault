@@ -207,6 +207,9 @@ def test_lines_that_are_not_atx_headings(line: str) -> None:
         ("#", ""),
         ("# #", ""),
         ("### ###", ""),
+        ("# # #", "#"),
+        ("# ##", ""),
+        ("# Title # #", "Title #"),
         ("#   spaced   ", "spaced"),
     ],
 )
@@ -232,6 +235,40 @@ def test_headings_inside_list_items_and_quotes_are_not_recorded() -> None:
     text = "- item\n\n  Inner\n  -----\n\n  # Inner too\n\n> # Quoted\n\n# Outer\n"
 
     assert titles(text) == [(1, "Outer")]
+
+
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "> # Quoted",
+        ">",
+        "> ---",
+        "> ```",
+        ">     indented code",
+        "> > # Nested",
+        "> - # In a list",
+        "- # Item heading",
+        "-",
+        "- ```",
+        "- > # Quoted in a list",
+    ],
+)
+def test_a_quote_or_list_item_that_holds_no_paragraph_takes_no_lazy_line(opening: str) -> None:
+    # Only a paragraph continues lazily, so the next line starts a top-level paragraph.
+    assert titles(f"{opening}\nOutside\n---\n") == [(2, "Outside")]
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["> text", "> > text", "> - text", "- text", "- > text", "1. text"],
+)
+def test_a_quote_or_list_item_that_holds_a_paragraph_takes_lazy_lines(opening: str) -> None:
+    assert titles(f"{opening}\nlazy\n===\n") == []
+
+
+def test_a_list_items_inner_paragraph_takes_lazy_lines_and_its_inner_heading_does_not() -> None:
+    assert titles("- a\n\n  para\nlazy\n===\n") == []
+    assert titles("- a\n\n  # Inner\nOutside\n---\n") == [(2, "Outside")]
 
 
 def test_a_numbered_line_that_cannot_start_a_list_stays_in_the_paragraph() -> None:

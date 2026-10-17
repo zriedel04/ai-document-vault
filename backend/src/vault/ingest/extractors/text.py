@@ -22,8 +22,11 @@ underlined with ``===`` (level 1) or ``---`` (level 2). Lines inside fenced code
 backticks or tildes, closed by a fence of the same character at least as long, or open to the
 end), indented code and a YAML front matter block at the very start are not headings. Headings
 inside block quotes and list items are not recorded either: they are not section headings of the
-document. HTML blocks are not recognised, so a ``#`` line inside one counts as a heading; that is
-rare in notes and only adds a section break.
+document. A line after a quote or list item continues it only when that item holds a paragraph,
+as CommonMark's lazy continuation says. Two simplifications remain: HTML blocks are not recognised,
+so a ``#`` line inside one counts as a heading, and the lines of a fenced code block inside a list
+item are read as paragraph text, so a line right after such a block may be taken as continuing the
+item and its underline missed. Both are rare in notes and change only where a section starts.
 """
 
 from __future__ import annotations
@@ -40,7 +43,8 @@ FALLBACK_ENCODING: Final = "cp1252"
 
 _LINE_BREAK: Final = re.compile(r"\r\n?")
 _ATX: Final = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*")
-_ATX_CLOSING: Final = re.compile(r"[ \t]+#+$")
+# The closing sequence: the last run of #, after a space or tab, or making up the whole content.
+_ATX_CLOSING: Final = re.compile(r"(?:^|[ \t]+)#+$")
 _SETEXT: Final = re.compile(r" {0,3}(=+|-+)[ \t]*")
 _THEMATIC_BREAK: Final = re.compile(r" {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*")
 _FENCE_OPEN: Final = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
@@ -103,7 +107,7 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
     fence: tuple[str, int] | None = None
     paragraph: int | None = None  # index of the first line of the open top-level paragraph
     item_indent: int | None = None  # content column of the open list item
-    lazy = False  # the previous line belongs to a quote or a list item
+    lazy = False  # the previous line continues a paragraph inside a quote or a list item
     index = _after_front_matter(lines)
     while index < len(lines):
         line = lines[index]
@@ -117,7 +121,8 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
             lazy = False
             continue
         if item_indent is not None and _indent(line) >= item_indent:
-            continue  # inside the list item
+            lazy = _opens_paragraph(line)  # inside the list item
+            continue
         item_indent = None
         if paragraph is not None:
             setext = _SETEXT.fullmatch(line)
@@ -137,18 +142,17 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
             continue
         atx = _ATX.fullmatch(line)
         if atx:
-            content = atx.group(2) or ""
-            title = "" if not content.strip("# \t") else _ATX_CLOSING.sub("", content).strip()
+            title = _ATX_CLOSING.sub("", atx.group(2) or "", count=1).strip()
             found.append(Heading(len(atx.group(1)), title, starts[index - 1], end_of(index - 1)))
             paragraph, lazy = None, False
             continue
         if _QUOTE.match(line):
-            paragraph, lazy = None, True
+            paragraph, lazy = None, _opens_paragraph(line)
             continue
         item = _list_item(line)
         if item and (paragraph is None or _interrupts(item)):
             item_indent = _content_column(line, item)
-            paragraph, lazy = None, True
+            paragraph, lazy = None, _opens_paragraph(line)
             continue
         if lazy or paragraph is not None:
             continue  # a continuation line of a quote, a list item or the open paragraph
@@ -156,6 +160,26 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
             continue  # indented code
         paragraph = index - 1
     return tuple(found)
+
+
+def _opens_paragraph(line: str) -> bool:
+    """Does ``line`` hold paragraph text, inside any quotes and list items it opens?
+
+    Only a paragraph takes lazy continuation lines (CommonMark): after ``> # Quoted`` the quote
+    ends, so a following ``Outside`` line starts a paragraph of its own and can be underlined.
+    """
+    if not line.strip() or _indent(line) >= 4:
+        return False  # blank, or indented code
+    quote = _QUOTE.match(line)
+    if quote:
+        inner = line[quote.end() :]
+        return _opens_paragraph(inner[1:] if inner[:1] in (" ", "\t") else inner)
+    item = _list_item(line)
+    if item:
+        return bool(item.group(4)) and _opens_paragraph(line[item.start(4) :])
+    return not (
+        _ATX.fullmatch(line) or _THEMATIC_BREAK.fullmatch(line) or _FENCE_OPEN.fullmatch(line)
+    )
 
 
 def _list_item(line: str) -> re.Match[str] | None:
