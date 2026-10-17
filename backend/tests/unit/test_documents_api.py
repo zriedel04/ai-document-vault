@@ -38,7 +38,7 @@ class Library:
     def add(self, name: str, body: str) -> str:
         self.now += timedelta(minutes=1)
         path = self.folder / f"incoming-{ids.new_ulid()}.txt"
-        path.write_text(body, encoding="utf-8")
+        path.write_bytes(body.encode("utf-8"))  # write_text would turn \n into \r\n on Windows
         result = self.importer.import_file(
             ImportRequest(
                 path=path, original_filename=name, method="upload", batch_id=ids.new_ulid()
