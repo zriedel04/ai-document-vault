@@ -22,6 +22,8 @@ import {
   type DocumentsError,
   ERROR_TEXT,
   MOVE_ERROR_TEXT,
+  MOVE_UNKNOWN_RELOAD_FAILED_TEXT,
+  MOVE_UNKNOWN_TEXT,
   type MoveAction,
   STATE_LABEL,
   fileName,
@@ -31,7 +33,7 @@ import {
   saveOriginal,
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
-import { useDocument } from "../api/useDocuments";
+import { loadDocument, useDocument } from "../api/useDocuments";
 
 const METHOD_LABEL: Record<Detail["import_sources"][number]["method"], string> = {
   upload: "Upload",
@@ -98,7 +100,7 @@ function Loaded({ documentId }: { documentId: string }) {
       </Stack>
     );
   }
-  return <Details document={state.data} />;
+  return <Details document={state.data} reload={reload} />;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -122,12 +124,19 @@ const MOVED_TEXT: Record<MoveAction, { title: string; text: string }> = {
   restore: { title: "Restored", text: "The document is back in the library." },
 };
 
+/** How the last move ended, as the page tells it. */
+type MoveOutcome =
+  | { kind: "done"; action: MoveAction }
+  | { kind: "refused"; action: MoveAction; error: DocumentsError }
+  | { kind: "unknown" }
+  | { kind: "unknown-reload-failed"; error: DocumentsError };
+
 const MOVE_FAILED_TITLE: Record<MoveAction, string> = {
   trash: "Not moved to trash",
   restore: "Not restored",
 };
 
-function Details({ document: loaded }: { document: Detail }) {
+function Details({ document: loaded, reload }: { document: Detail; reload: () => void }) {
   const api = useApi();
   const { recheck } = useSessionState();
   const [saving, setSaving] = useState(false);
@@ -138,28 +147,39 @@ function Details({ document: loaded }: { document: Detail }) {
   // Set at once on a click, before React re-renders the disabled button, so a second click that
   // arrives in between sends nothing.
   const movingNow = useRef(false);
-  const [moved, setMoved] = useState<MoveAction | null>(null);
-  const [moveError, setMoveError] = useState<{ action: MoveAction; error: DocumentsError } | null>(
-    null,
-  );
+  const [outcome, setOutcome] = useState<MoveOutcome | null>(null);
   const trashed = document.state === "trashed";
 
   const move = (action: MoveAction) => {
     if (movingNow.current) return;
     movingNow.current = true;
     setMoving(true);
-    setMoved(null);
-    setMoveError(null);
-    void moveDocument(api, document.id, action).then((result) => {
+    setOutcome(null);
+    const settle = (next: MoveOutcome, error?: DocumentsError) => {
       movingNow.current = false;
       setMoving(false);
+      setOutcome(next);
+      if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
+    };
+    void moveDocument(api, document.id, action).then(async (result) => {
       if (result.status === "ok") {
         setDocument(result.document);
-        setMoved(action);
+        settle({ kind: "done", action });
         return;
       }
-      setMoveError({ action, error: result.error });
-      if (result.error === "needs-token") recheck(); // bring the token notice back (see useRequest)
+      if (result.status === "error") {
+        settle({ kind: "refused", action, error: result.error }, result.error);
+        return;
+      }
+      // The move may have been made: show the document as the backend now has it. The button
+      // stays disabled until then. Trying again is safe either way, as both moves are idempotent.
+      const reloaded = await loadDocument(api, document.id);
+      if (reloaded.status === "ok") {
+        setDocument(reloaded.data);
+        settle({ kind: "unknown" });
+      } else {
+        settle({ kind: "unknown-reload-failed", error: reloaded.error }, reloaded.error);
+      }
     });
   };
 
@@ -213,14 +233,30 @@ function Details({ document: loaded }: { document: Detail }) {
           {ERROR_TEXT[saveError]}
         </Alert>
       )}
-      {moved !== null && (
-        <Alert color="green" title={MOVED_TEXT[moved].title} role="status">
-          {MOVED_TEXT[moved].text}
+      {outcome?.kind === "done" && (
+        <Alert color="green" title={MOVED_TEXT[outcome.action].title} role="status">
+          {MOVED_TEXT[outcome.action].text}
         </Alert>
       )}
-      {moveError !== null && (
-        <Alert color="red" title={MOVE_FAILED_TITLE[moveError.action]}>
-          {MOVE_ERROR_TEXT[moveError.error]}
+      {outcome?.kind === "refused" && (
+        <Alert color="red" title={MOVE_FAILED_TITLE[outcome.action]}>
+          {MOVE_ERROR_TEXT[outcome.error]}
+        </Alert>
+      )}
+      {outcome?.kind === "unknown" && (
+        <Alert color="yellow" title="Change not confirmed">
+          {MOVE_UNKNOWN_TEXT}
+        </Alert>
+      )}
+      {outcome?.kind === "unknown-reload-failed" && (
+        <Alert color="red" title="Change not confirmed">
+          <Stack gap="xs" align="flex-start">
+            <Text size="sm">{MOVE_UNKNOWN_RELOAD_FAILED_TEXT}</Text>
+            <Text size="sm">{ERROR_TEXT[outcome.error]}</Text>
+            <Button size="xs" variant="light" onClick={reload}>
+              Reload
+            </Button>
+          </Stack>
         </Alert>
       )}
       <Card withBorder>

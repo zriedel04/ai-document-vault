@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type DocumentDetail,
   type DocumentItem,
+  ERROR_TEXT,
   MAX_OFFSET,
+  MOVE_UNKNOWN_RELOAD_FAILED_TEXT,
+  MOVE_UNKNOWN_TEXT,
   MAX_PAGE,
   ORDERS,
   PAGE_SIZE,
@@ -545,20 +548,17 @@ describe("trash and restore", () => {
 
   const SERVER_TEXT = "Lease agreement.pdf: private server detail";
 
+  function detailRequests(spy: ReturnType<typeof backend>): Request[] {
+    return spy.mock.calls
+      .map(([input]) => input as Request)
+      .filter((r) => r.method === "GET" && new URL(r.url).pathname === `/api/documents/${ID}`);
+  }
+
   it.each([
-    ["a 500", () => jsonResponse({ detail: SERVER_TEXT }, 500), /The change was not saved/],
     ["a 422", () => jsonResponse({ detail: [{ msg: SERVER_TEXT }] }, 422), /not saved/],
-    ["a 503", () => jsonResponse({ detail: SERVER_TEXT }, 503), /No vault is open/],
     ["a 404", () => jsonResponse({ detail: SERVER_TEXT }, 404), /There is no such document/],
-    ["another document", () => jsonResponse(detail({ id: "C".repeat(26) })), /not saved/],
-    [
-      "a lost connection",
-      () => {
-        throw new TypeError(SERVER_TEXT);
-      },
-      /not saved/,
-    ],
-  ])("says the move failed after %s, with a fixed text", async (_case, answer, text) => {
+    ["a 409", () => jsonResponse({ detail: SERVER_TEXT }, 409), /not saved/],
+  ])("says the move was refused after %s, with a fixed text", async (_case, answer, text) => {
     const spy = backend((request, url) => {
       if (url.pathname === `/api/documents/${ID}/trash`) return answer();
       return request.method === "GET" && url.pathname === `/api/documents/${ID}`
@@ -573,9 +573,121 @@ describe("trash and restore", () => {
     expect(alert).toHaveTextContent(text);
     expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
-    // The page still shows the document as it was, and the button can be used again.
+    // A 4xx is a definite answer: nothing is asked again, the document is shown as it was, and
+    // the button can be used again.
+    expect(detailRequests(spy)).toHaveLength(1);
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Move to trash" })).toBeEnabled();
+  });
+
+  const failure = (): Response => {
+    throw new TypeError(SERVER_TEXT);
+  };
+
+  it.each([
+    ["a 500 after the move was made", true, () => jsonResponse({ detail: SERVER_TEXT }, 500)],
+    ["a 500 before the move was made", false, () => jsonResponse({ detail: SERVER_TEXT }, 500)],
+    ["a 503", false, () => jsonResponse({ detail: SERVER_TEXT }, 503)],
+    ["a lost connection after the move", true, failure],
+    ["a lost connection before the move", false, failure],
+    // Another document in the state the move gives, so only the id tells it apart.
+    [
+      "an answer for another document",
+      true,
+      () => jsonResponse({ ...inTrash, id: "C".repeat(26) }),
+    ],
+    ["an answer in the wrong state", false, () => jsonResponse(inUse)],
+    ["an empty answer", true, () => new Response(null, { status: 200 })],
+    [
+      "an answer that is not JSON",
+      true,
+      () => new Response(SERVER_TEXT, { headers: { "content-type": "application/json" } }),
+    ],
+  ])("loads the document again after %s and shows it as it is", async (_case, applied, answer) => {
+    let current = inUse;
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/trash`) {
+        if (applied) current = inTrash;
+        return answer();
+      }
+      return request.method === "GET" && url.pathname === `/api/documents/${ID}`
+        ? jsonResponse(current)
+        : undefined;
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: "Move to trash" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Change not confirmed");
+    expect(alert).toHaveTextContent(MOVE_UNKNOWN_TEXT);
+    expect(screen.queryByText(/not saved/)).toBeNull();
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(detailRequests(spy)).toHaveLength(2);
+    // The page shows what the backend has, and offers the action that fits it.
+    if (applied) {
+      expect(screen.getByText("In trash")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    } else {
+      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Move to trash" })).toBeEnabled();
+    }
+  });
+
+  it("keeps the button disabled until the document has been loaded again", async () => {
+    const reloads: ((response: Response) => void)[] = [];
+    let posted = false;
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/trash`) {
+        posted = true;
+        return jsonResponse({ detail: SERVER_TEXT }, 500);
+      }
+      if (request.method !== "GET" || url.pathname !== `/api/documents/${ID}`) return undefined;
+      return posted
+        ? new Promise<Response>((resolve) => reloads.push(resolve))
+        : jsonResponse(inUse);
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    const button = await screen.findByRole("button", { name: "Move to trash" });
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(reloads).toHaveLength(1);
+    });
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(posts(spy)).toHaveLength(1);
+
+    reloads[0]?.(jsonResponse(inTrash));
+    expect(await screen.findByRole("button", { name: "Restore" })).toBeEnabled();
+  });
+
+  it("offers to reload when the document cannot be loaded again either", async () => {
+    let current = inUse;
+    let reloadFails = false;
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/trash`) {
+        current = inTrash;
+        reloadFails = true;
+        return jsonResponse({ detail: SERVER_TEXT }, 500);
+      }
+      if (request.method !== "GET" || url.pathname !== `/api/documents/${ID}`) return undefined;
+      return reloadFails ? jsonResponse({ detail: SERVER_TEXT }, 500) : jsonResponse(current);
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: "Move to trash" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Change not confirmed");
+    expect(alert).toHaveTextContent(MOVE_UNKNOWN_RELOAD_FAILED_TEXT);
+    expect(alert).toHaveTextContent(ERROR_TEXT.unreachable);
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    expect(screen.queryByText(/not saved/)).toBeNull();
+
+    reloadFails = false;
+    await userEvent.click(within(alert).getByRole("button", { name: "Reload" }));
+    expect(await screen.findByText("In trash")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(screen.queryByText("Change not confirmed")).toBeNull();
   });
 
   it("brings the token notice back when the move is refused", async () => {

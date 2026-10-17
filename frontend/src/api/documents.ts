@@ -118,12 +118,29 @@ export async function saveOriginal(
 /** Moving a document to the trash, or bringing it back. */
 export type MoveAction = "trash" | "restore";
 
+/**
+ * How a move ended: done (with the document as the backend now has it), refused (a 4xx: the
+ * backend did not make the change), or unknown (the request may have reached the backend, but the
+ * answer does not prove what it did; the caller must ask for the document again).
+ */
 export type MoveResult =
-  { status: "ok"; document: DocumentDetail } | { status: "error"; error: DocumentsError };
+  | { status: "ok"; document: DocumentDetail }
+  | { status: "error"; error: DocumentsError }
+  | { status: "unknown" };
+
+/** The state a document must be in after `action`, if the backend made it. */
+function showsMove(document: DocumentDetail, action: MoveAction): boolean {
+  return action === "trash" ? document.state === "trashed" : document.state !== "trashed";
+}
 
 /**
  * Move a document to the trash or restore it, and return it as the backend now has it. Only the
  * status code decides the error, so nothing the server wrote reaches the page or a log.
+ *
+ * The backend commits the move before it reads the document for the answer, so a 5xx, a lost
+ * connection or an unreadable answer can follow a change that was made: those are "unknown", not
+ * failures. Only a 4xx says the change was not made. Both endpoints are idempotent (trashing a
+ * trashed document or restoring one in use changes nothing), so trying again is always safe.
  */
 export async function moveDocument(
   api: Api,
@@ -136,17 +153,31 @@ export async function moveDocument(
       action === "trash"
         ? await api.POST("/api/documents/{document_id}/trash", options)
         : await api.POST("/api/documents/{document_id}/restore", options);
-    if (!response.ok) return { status: "error", error: errorFor(response.status) };
-    // The answer must be the document that was asked for, not just any document.
-    if (data?.id !== documentId) return { status: "error", error: "unreachable" };
+    if (response.status >= 400 && response.status < 500) {
+      return { status: "error", error: errorFor(response.status) };
+    }
+    // Anything else proves the change only with the document that was asked for, in the state
+    // the move gives: a 5xx, another 2xx or 3xx, a missing body or another document does not.
+    if (!response.ok || data?.id !== documentId || !showsMove(data, action)) {
+      return { status: "unknown" };
+    }
     return { status: "ok", document: data };
   } catch {
-    return { status: "error", error: "unreachable" };
+    // The request may have been sent before the connection or the answer failed.
+    return { status: "unknown" };
   }
 }
 
-/** What a failed move says: the same texts as a failed load, except that nothing was saved. */
+/** What a refused move (a 4xx) says. The load texts, except for a refusal the page cannot name. */
 export const MOVE_ERROR_TEXT: Record<DocumentsError, string> = {
   ...ERROR_TEXT,
-  unreachable: "The change was not saved. Check that the backend is running.",
+  unreachable: "The change was not saved. Reload the page and try again.",
 };
+
+/** What the page says when a move's outcome is unknown and the document was loaded again. */
+export const MOVE_UNKNOWN_TEXT =
+  "We could not confirm the change. Showing the document as it is now.";
+
+/** What it says when the document could not be loaded again either. */
+export const MOVE_UNKNOWN_RELOAD_FAILED_TEXT =
+  "We could not confirm the change, and the document could not be loaded again, so it may not be shown as it is now.";
