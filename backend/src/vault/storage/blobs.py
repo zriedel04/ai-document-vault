@@ -56,6 +56,7 @@ STAGING_MARK: Final = ".incoming"  # a staged upload, not a copy in progress
 LOCK_WAIT_SECONDS: Final = 60.0
 LOCK_POLL_SECONDS: Final = 0.01
 UNLINK_TRIES: Final = 100
+FOLDER_TRIES: Final = 3  # publications retried when a delete removed the empty prefix folders
 IS_WINDOWS: Final = os.name == "nt"
 
 
@@ -235,9 +236,13 @@ class BlobStore:
             return []
         if folder is None:
             return []
+        try:
+            entries = list(folder.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return []  # removed since the check, by a delete of the last blob it held
         return sorted(
             entry
-            for entry in folder.iterdir()
+            for entry in entries
             if (match := BLOB_NAME.fullmatch(entry.name))
             and match.group(1) == sha256
             and _blob_status(entry) is not None
@@ -303,8 +308,18 @@ class BlobStore:
             self._seal_file(existing)  # a crash may have left it writable
             return StoredBlob(sha256, size, existing, created=False)
         final = self.path_for(sha256, suffix)
-        self._safe_folder(sha256, create=True)
-        if not self._publish(temp, final):
+        published = False
+        for attempt in range(FOLDER_TRIES):
+            try:
+                self._safe_folder(sha256, create=True)
+                published = self._publish(temp, final)
+                break
+            except FileNotFoundError:
+                # A delete of another blob with the same prefix removed the folders it left empty
+                # (it holds that blob's claim, not this one): make them again.
+                if attempt == FOLDER_TRIES - 1:
+                    raise
+        if not published:
             # The name is taken. Only a real blob counts as the winner: a folder or another
             # odd entry in its place is not one, and pointing a caller at it would be wrong.
             winner = self.find(sha256)
@@ -457,11 +472,17 @@ class BlobStore:
     # --- Reading and checking --------------------------------------------------------------
 
     def open(self, sha256: str) -> BinaryIO:
+        """The blob's bytes. ``BlobNotFoundError`` if there is none, also when a permanent delete
+        removes it between the look-up and the open (``find`` does not hold the claim)."""
         path = self.find(sha256)
         if path is None:
             msg = "no blob has this hash"
             raise BlobNotFoundError(msg)
-        return path.open("rb")
+        try:
+            return path.open("rb")
+        except FileNotFoundError:
+            msg = "no blob has this hash"
+            raise BlobNotFoundError(msg) from None
 
     def verify(self, sha256: str) -> bool:
         """Re-hash the stored bytes. False if they no longer match their name (damage or edit)."""
