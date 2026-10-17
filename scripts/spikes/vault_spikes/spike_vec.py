@@ -41,7 +41,8 @@ PROBES = 5
 """How many queries the correctness check asks; ``same_answer_as_python`` is a share of them."""
 METHOD = (
     "`python -m vault_spikes vec`. Random unit-free float32 vectors from a seeded generator are "
-    "inserted into a `vec0` table; each size is queried with random vectors for the 10 nearest "
+    "inserted into a `vec0` table in a WAL-mode database with `synchronous=NORMAL`, as the "
+    "application opens its databases; each size is queried with random vectors for the 10 nearest "
     "neighbours (exact, brute force). Latency is wall-clock time per query. Correctness compares "
     f"the extension's answers to {PROBES} random queries with a plain-Python search over a "
     "separate, smaller set of vectors (the `vectors` of the `exact-search-check` row): the same "
@@ -222,8 +223,21 @@ class SqliteVecStore:
         os.close(handle)
         self.path = Path(name)
         self.db = sqlite3.connect(self.path)
+        self._use_wal()
         self._load_extension()
         self._create_table(dim)
+
+    def _use_wal(self) -> None:
+        """Measure the journal the application uses (ADR 0004, ``vault.db.engine``): WAL with
+        ``synchronous=NORMAL``. Without it inserts go through the rollback journal with
+        ``synchronous=FULL``, a different write path. A folder that cannot hold a WAL database
+        stops the run instead of measuring the other path."""
+        mode = self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if str(mode).lower() != "wal":
+            self.close()
+            msg = "SQLite could not switch the spike database to WAL mode"
+            raise OwnRuntimeError(msg)
+        self.db.execute("PRAGMA synchronous=NORMAL")
 
     def _load_extension(self) -> None:
         import sqlite_vec
@@ -261,9 +275,20 @@ def probe_extension_loading() -> dict[str, bool]:
     facts = {"can_load_extensions": hasattr(sqlite3.Connection, "enable_load_extension")}
     facts["vec_loads"] = False
     if facts["can_load_extensions"]:
+        # In memory, not through SqliteVecStore: a folder that cannot hold a WAL database is a
+        # failure of the setup, which stops the measured run, not a sign that sqlite-vec does
+        # not load, so nothing but the extension itself may decide this answer.
         try:
-            with tempfile.TemporaryDirectory() as folder:
-                SqliteVecStore(4, Path(folder)).close()
+            import sqlite_vec
+
+            db = sqlite3.connect(":memory:")
+            try:
+                db.enable_load_extension(True)
+                sqlite_vec.load(db)
+                db.enable_load_extension(False)
+                db.execute("CREATE VIRTUAL TABLE v USING vec0(embedding float[4])")
+            finally:
+                db.close()
             facts["vec_loads"] = True
         except Exception:
             facts["vec_loads"] = False

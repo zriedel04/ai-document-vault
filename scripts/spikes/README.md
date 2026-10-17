@@ -2,7 +2,7 @@
 
 Measurement scripts for the hardware-dependent decisions in [ADR 0004](../../docs/decisions/0004-sqlite-instead-of-postgresql.md) (sqlite-vec), [0013](../../docs/decisions/0013-embedding-model.md) (embedding model), [0014](../../docs/decisions/0014-ocr-engine.md) (OCR engine) and [0015](../../docs/decisions/0015-pdf-extraction-quality.md) (PDF extraction). **They are run on the owner's Windows PC, never on another machine as a substitute.** CI runs only the unit tests, which use fakes and measure nothing.
 
-Nothing has been measured yet. The numbers come from runs on the owner's PC.
+The numbers come from runs on the owner's PC. The sqlite-vec spike has been run and recorded in [docs/spikes/01-sqlite-vec.md](../../docs/spikes/01-sqlite-vec.md); the embedding, OCR and PDF spikes have not been measured yet.
 
 ## Set up (Windows PowerShell)
 
@@ -66,7 +66,7 @@ The method of each spike is also written into its report, so a report explains i
 
 ### sqlite-vec
 
-- Whether this Python's sqlite3 can load extensions and whether sqlite-vec loads, then insert rate, database size and exact-search latency at each size, on random vectors (no document is involved).
+- Whether this Python's sqlite3 can load extensions and whether sqlite-vec loads, then insert rate, database size and exact-search latency at each size, on random vectors (no document is involved). Each store is a WAL-mode database with `synchronous=NORMAL`, as the application opens its databases, so the insert rate is the write path ADR 0004 uses; a folder that cannot hold a WAL database stops the run.
 - `queries_timed` is the number of searches the p50 and p95 latencies rest on, and `vectors` in a `vectors-N` row is the N vectors that row inserted.
 - The exact-search check asks five random queries over a separate set of `vectors` (500) and compares each answer of the extension with a plain-Python search place by place; `same_answer_as_python` is the share of the five that match. The comparison is place by place, so the right ten neighbours in the wrong order (farthest first, for example) fail it. A neighbour is accepted in place of the exact one only when its distance is equal within float32 rounding (a tie); a repeated id, a missing id or an id outside the data fails.
 
