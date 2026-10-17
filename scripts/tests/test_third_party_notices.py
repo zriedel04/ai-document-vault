@@ -293,6 +293,28 @@ class OverrideTest(unittest.TestCase):
         with self.assertRaisesRegex(notices.NoticeError, "bare.LICENSE is missing"):
             notices.with_overrides([Notice("npm", "bare", "MIT", ())], self.folder)
 
+    def test_a_blank_reviewed_text_fails(self) -> None:
+        for blank in ("", " \n\t\r\n"):
+            (self.folder / "bare.LICENSE").write_text(blank, encoding="utf-8")
+            with self.assertRaisesRegex(notices.NoticeError, "bare.LICENSE is blank"):
+                notices.with_overrides([Notice("npm", "bare", "MIT", ())], self.folder)
+
+    def test_a_package_whose_licence_files_are_all_blank_has_no_text(self) -> None:
+        """Codex #39: an empty LICENSE states no terms, so it cannot stand for the licence."""
+        blank = Notice("npm", "hollow", "MIT", (("LICENSE", ""), ("NOTICE", "  \n")))
+        with self.assertRaisesRegex(notices.NoticeError, "npm:hollow ships no licence file"):
+            notices.with_overrides([blank], self.folder)
+
+    def test_a_blank_file_beside_a_real_text_is_left_out(self) -> None:
+        mixed = Notice("npm", "mixed", "MIT", (("LICENSE", "MIT text"), ("NOTICE", "\n")))
+        [kept] = notices.with_overrides([mixed, Notice("npm", "bare", "MIT", ())], self.folder)[:1]
+        self.assertEqual(kept.texts, (("LICENSE", "MIT text"),))
+
+    def test_a_blank_file_does_not_hide_that_an_override_is_needed_or_stale(self) -> None:
+        # A blank file where the override's package ships none still uses the override.
+        found = notices.with_overrides([Notice("npm", "bare", "MIT", (("LICENSE", " "),))], self.folder)
+        self.assertEqual(found[0].texts, (("LICENSE", "reviewed text"),))
+
     def test_every_committed_override_has_its_text(self) -> None:
         for key, (file_name, source) in self.saved.items():
             with self.subTest(key=key):

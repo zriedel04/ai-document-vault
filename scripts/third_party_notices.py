@@ -42,7 +42,7 @@ import json
 import re
 import sys
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
 
@@ -186,7 +186,10 @@ def with_overrides(notices: Iterable[Notice], folder: Path = OVERRIDE_FOLDER) ->
     """Fill in the reviewed text of every package that ships none; fail on any gap or stale entry."""
     result = []
     used = set()
-    for notice in notices:
+    for shipped in notices:
+        # A blank file (empty, or only white space) states no terms, so it is not a licence text:
+        # a package whose files are all blank needs a reviewed text like one that ships none.
+        notice = replace(shipped, texts=tuple(t for t in shipped.texts if t[1].strip()))
         key = f"{notice.ecosystem}:{notice.name}"
         override = OVERRIDES.get(key)
         if override is None:
@@ -205,6 +208,9 @@ def with_overrides(notices: Iterable[Notice], folder: Path = OVERRIDE_FOLDER) ->
             msg = f"{key}: its reviewed text scripts/notices/{file_name} is missing"
             raise NoticeError(msg)
         text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            msg = f"{key}: its reviewed text scripts/notices/{file_name} is blank"
+            raise NoticeError(msg)
         result.append(
             Notice(notice.ecosystem, notice.name, notice.licence, (("LICENSE", text),), source)
         )
