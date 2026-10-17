@@ -15,6 +15,7 @@ import pytest
 
 from vault.storage import blobs as blobs_module
 from vault.storage.blobs import (
+    TEMP_FOLDER,
     BlobBusyError,
     BlobIntegrityError,
     BlobNotFoundError,
@@ -1179,3 +1180,17 @@ class TestOneHashIsOneFile:
         assert store.find(HELLO_SHA) == path
         assert store.delete(HELLO_SHA) is True
         assert not path.exists()
+
+
+def test_a_staged_upload_is_in_the_temporary_folder_and_cleaned_after_a_crash(
+    tmp_path: Path,
+) -> None:
+    store = BlobStore(tmp_path / "blobs")
+    first = store.staging_path("TXT")
+    assert first.parent == store.root / TEMP_FOLDER
+    assert first.name.endswith(".incoming.txt")
+    assert store.staging_path("txt") != first
+    first.write_bytes(b"half an upload")  # the server died while receiving it
+    assert store.clean_temp() == 1
+    assert not first.exists()
+    assert store.scan().blobs == ()

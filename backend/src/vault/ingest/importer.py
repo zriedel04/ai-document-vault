@@ -136,6 +136,10 @@ class Importer:
         self._clock = clock
         self._queue = JobQueue(engine, clock=clock)
 
+    @property
+    def limits(self) -> Limits:
+        return self._limits
+
     def import_file(self, request: ImportRequest) -> ImportResult:
         """Import ``request.path``. A file that is not acceptable is a REFUSED result with the
         reason, not an exception; a damaged or busy blob store raises its own ``BlobError``."""
