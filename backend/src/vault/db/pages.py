@@ -1,0 +1,245 @@
+"""The page repository: the extracted text of each document version (plan section 6, ``pages``).
+
+An extractor reads one version's blob into pages, and ``replace_pages`` stores them: all pages of
+that version are replaced in one transaction, so a reader sees the old set or the new one, never
+a mixture, and a second extraction (a new extractor version) leaves no page of the first behind.
+``read_pages`` gives them back in order.
+
+What is stored is checked on the way in and again on the way out, because the database can be
+edited by hand: page numbers run 1, 2, 3 ... without a gap, a heading lies inside its page's text,
+in order and not overlapping another, the extractor is a name and a version (``text-1``), and the
+encoding is the canonical name of a Python codec (``utf-8``, ``cp1252``).
+
+Page text and heading titles are the document's own words. They are never logged, and no error
+here quotes them: messages name a page by its number and a heading by its position.
+"""
+
+from __future__ import annotations
+
+import codecs
+import json
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Final
+
+from sqlalchemy import Engine, delete, insert, select
+
+from vault.db import ids
+from vault.db.engine import read_snapshot
+from vault.db.schema import document_versions, pages
+
+# The application's rule for an extractor's name: lower-case words joined by hyphens, then the
+# version, a whole number from 1 (the database checks a looser form of the same rule).
+EXTRACTOR: Final = re.compile(r"[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*-[1-9][0-9]{0,5}")
+ENCODING: Final = re.compile(r"[a-z][a-z0-9_-]{0,39}")
+MAX_EXTRACTOR_LENGTH: Final = 40
+HEADING_LEVELS: Final = range(1, 7)
+
+
+class VersionNotFoundError(LookupError):
+    """No document version has the given id."""
+
+    def __init__(self) -> None:
+        super().__init__("There is no such document version.")
+
+
+class PageDataError(ValueError):
+    """Stored pages that break the rules above (a hand edit, or a bug). Messages are fixed text."""
+
+
+@dataclass(frozen=True)
+class PageHeading:
+    """A heading: its level (1 is the top), its title, and the span ``text[start:end]`` it takes."""
+
+    level: int
+    title: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class PageText:
+    """One page: its number (from 1), its text and the headings in it."""
+
+    number: int
+    text: str
+    headings: tuple[PageHeading, ...] = ()
+
+
+@dataclass(frozen=True)
+class StoredPages:
+    """Every page of a version, with the extractor that read them and the encoding it used."""
+
+    extractor: str
+    encoding: str | None
+    pages: tuple[PageText, ...]
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _storable(value: str) -> bool:
+    """Text SQLite stores and measures as Python does: no NUL, no lone surrogate."""
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def check_extractor(extractor: object) -> str:
+    if (
+        not isinstance(extractor, str)
+        or len(extractor) > MAX_EXTRACTOR_LENGTH
+        or EXTRACTOR.fullmatch(extractor) is None
+    ):
+        msg = "The extractor must be a name and a version, such as text-1."
+        raise ValueError(msg)
+    return extractor
+
+
+def check_encoding(encoding: object) -> str | None:
+    """``None``, or the canonical name of a Python codec (the name ``codecs.lookup`` gives)."""
+    if encoding is None:
+        return None
+    if isinstance(encoding, str) and ENCODING.fullmatch(encoding):
+        try:
+            canonical = codecs.lookup(encoding).name
+        except LookupError:
+            canonical = None
+        if canonical == encoding:
+            return encoding
+    msg = "The encoding must be the canonical name of a Python codec, such as utf-8."
+    raise ValueError(msg)
+
+
+def check_pages(pages_in: Sequence[PageText]) -> tuple[PageText, ...]:
+    """The pages, if they follow the rules above; a ``ValueError`` naming the first break if not."""
+    checked = tuple(pages_in)
+    if not checked:
+        msg = "A version has at least one page (an empty file is one empty page)."
+        raise ValueError(msg)
+    for position, page in enumerate(checked, start=1):
+        if not isinstance(page, PageText) or not _is_int(page.number) or page.number != position:
+            msg = f"Page {position} is missing or out of order: pages are numbered 1, 2, 3 ..."
+            raise ValueError(msg)
+        if not isinstance(page.text, str) or not _storable(page.text):
+            msg = f"The text of page {position} holds a NUL or a character that is not Unicode."
+            raise ValueError(msg)
+        _check_headings(page)
+    return checked
+
+
+def _check_headings(page: PageText) -> None:
+    previous_end = 0
+    if not isinstance(page.headings, tuple):
+        msg = f"The headings of page {page.number} must be a tuple."
+        raise ValueError(msg)
+    for position, heading in enumerate(page.headings, start=1):
+        where = f"Heading {position} of page {page.number}"
+        if not isinstance(heading, PageHeading):
+            msg = f"{where} is not a heading."
+            raise ValueError(msg)
+        if not _is_int(heading.level) or heading.level not in HEADING_LEVELS:
+            msg = f"{where} has a level outside 1 to 6."
+            raise ValueError(msg)
+        if not isinstance(heading.title, str) or not _storable(heading.title):
+            msg = f"{where} has a title that is not storable text."
+            raise ValueError(msg)
+        if not (_is_int(heading.start) and _is_int(heading.end)):
+            msg = f"{where} has offsets that are not whole numbers."
+            raise ValueError(msg)
+        if not previous_end <= heading.start < heading.end <= len(page.text):
+            msg = f"{where} is outside its page, empty, or overlaps the heading before it."
+            raise ValueError(msg)
+        previous_end = heading.end
+
+
+def replace_pages(
+    engine: Engine,
+    version_id: str,
+    pages_in: Sequence[PageText],
+    extractor: str,
+    encoding: str | None,
+) -> None:
+    """Store ``pages_in`` as the only pages of the version, in one transaction.
+
+    Raises ``ValueError`` for pages, an extractor or an encoding that break the rules, before
+    anything is written, and ``VersionNotFoundError`` for an id that names no version.
+    """
+    checked = check_pages(pages_in)
+    check_extractor(extractor)
+    check_encoding(encoding)
+    if not ids.is_ulid(version_id):
+        raise VersionNotFoundError
+    rows = [
+        {
+            "version_id": version_id,
+            "page_no": page.number,
+            "text": page.text,
+            "char_count": len(page.text),
+            "headings": json.dumps(
+                [[h.level, h.title, h.start, h.end] for h in page.headings], ensure_ascii=False
+            ),
+            "extractor": extractor,
+            "encoding": encoding,
+        }
+        for page in checked
+    ]
+    with engine.begin() as connection:
+        # The first statement writes, so the transaction holds SQLite's write lock from here on
+        # and the version cannot disappear between the check and the insert.
+        connection.execute(delete(pages).where(pages.c.version_id == version_id))
+        found = connection.execute(
+            select(document_versions.c.id).where(document_versions.c.id == version_id)
+        ).first()
+        if found is None:
+            raise VersionNotFoundError
+        connection.execute(insert(pages), rows)
+
+
+def read_pages(engine: Engine, version_id: str) -> StoredPages | None:
+    """Every page of the version in order, or ``None`` if it has none (not extracted yet, or no
+    such version). Raises ``PageDataError`` if what is stored breaks the rules."""
+    if not ids.is_ulid(version_id):
+        return None
+    with read_snapshot(engine) as connection:
+        rows = connection.execute(
+            select(pages).where(pages.c.version_id == version_id).order_by(pages.c.page_no)
+        ).all()
+    if not rows:
+        return None
+    if len({(row.extractor, row.encoding) for row in rows}) != 1:
+        msg = "The pages of one version name different extractors or encodings."
+        raise PageDataError(msg)
+    try:
+        result = StoredPages(
+            extractor=check_extractor(rows[0].extractor),
+            encoding=check_encoding(rows[0].encoding),
+            pages=check_pages(
+                [PageText(row.page_no, row.text, _headings_from_json(row.headings)) for row in rows]
+            ),
+        )
+    except PageDataError:
+        raise
+    except ValueError as error:
+        raise PageDataError(str(error)) from None
+    return result
+
+
+def _headings_from_json(stored: object) -> tuple[PageHeading, ...]:
+    """The headings in their stored form, ``[[level, title, start, end], ...]``, read strictly."""
+    try:
+        items = json.loads(stored) if isinstance(stored, str) else None
+    except ValueError:
+        items = None
+    if not isinstance(items, list) or not all(
+        isinstance(item, list) and len(item) == 4 for item in items
+    ):
+        msg = "Stored headings are not a list of [level, title, start, end]."
+        raise PageDataError(msg)
+    return tuple(PageHeading(*item) for item in items)

@@ -6,6 +6,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 
 ### Added
 
+- Pages table (`pages`, migration `0004`) and repository (`vault.db.pages`): the extracted text of each page of a document version with its headings, extractor version and encoding, replaced as a whole in one transaction and checked on the way in and out (contiguous page numbers, headings inside their page and in order, a canonical codec name). Not written by anything yet.
 - Trash and restore: `POST /api/documents/{id}/trash` and `POST /api/documents/{id}/restore` move a document to the trash and back, keeping its state, file, versions, imports and jobs; both are idempotent and return the document as it now is.
 - Download of a document's original `GET /api/documents/{id}/file`: the current bytes as an attachment, under the first import's name, with the validator's media type.
 - Document details `GET /api/documents/{id}`: hash, current version, every import source and the processing jobs, read from one snapshot (`vault.db.engine.read_snapshot`).
