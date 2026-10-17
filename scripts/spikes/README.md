@@ -2,7 +2,7 @@
 
 Measurement scripts for the hardware-dependent decisions in [ADR 0004](../../docs/decisions/0004-sqlite-instead-of-postgresql.md) (sqlite-vec), [0013](../../docs/decisions/0013-embedding-model.md) (embedding model), [0014](../../docs/decisions/0014-ocr-engine.md) (OCR engine) and [0015](../../docs/decisions/0015-pdf-extraction-quality.md) (PDF extraction). **They are run on the owner's Windows PC, never on another machine as a substitute.** CI runs only the unit tests, which use fakes and measure nothing.
 
-Nothing has been measured yet. The numbers come from runs on the owner's PC.
+The numbers come from runs on the owner's PC. The sqlite-vec spike has been run and recorded in [docs/spikes/01-sqlite-vec.md](../../docs/spikes/01-sqlite-vec.md); the embedding, OCR and PDF spikes have not been measured yet.
 
 ## Set up (Windows PowerShell)
 
