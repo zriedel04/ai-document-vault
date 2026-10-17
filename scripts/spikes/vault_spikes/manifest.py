@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vault_spikes.corpus import PdfPages, SpikeInputError, load_manifest, safe_file
+from vault_spikes.corpus import PdfPages, SpikeInputError, load_manifest, reader_of, safe_file
 from vault_spikes.errors import OwnValueError
 from vault_spikes.report import WINDOWS, remove_own, same_file
 
@@ -175,8 +175,9 @@ def _pdf(path: Path, pdf_pages: PdfPages) -> _Pdf | None:
 def build_manifest(root: Path, pdf_pages: PdfPages) -> tuple[dict[str, Any], Tally]:
     """The manifest of every file of a known kind below ``root``, and the counts of what happened.
 
-    Files are listed in sorted path order, and of a set of byte-identical files the first in that
-    order is the original and every later one is marked ``exact_duplicate_of`` it. Paths that the
+    Files are listed in sorted path order, and of a set of byte-identical files that are read the
+    same way (:func:`~vault_spikes.corpus.reader_of`) the first in that order is the original and
+    every later one is marked ``exact_duplicate_of`` it. Paths that the
     loader would take for one file (they differ only in case, as on Windows) keep only the first.
     ``pdf_pages`` reads a PDF's page texts (``adapters.pdf_pages_for_corpus``); a library that is
     missing stops the run from inside it, before anything is written.
@@ -186,7 +187,7 @@ def build_manifest(root: Path, pdf_pages: PdfPages) -> tuple[dict[str, Any], Tal
         raise OwnValueError(msg)
     tally = Tally()
     documents: list[dict[str, Any]] = []
-    originals: dict[str, str] = {}
+    originals: dict[tuple[str, str], str] = {}
     pdfs: dict[str, _Pdf] = {}
     identities: set[str] = set()
     for relative, path, _ in sorted(_files(root, tally), key=lambda found: found[0]):
@@ -221,11 +222,14 @@ def build_manifest(root: Path, pdf_pages: PdfPages) -> tuple[dict[str, Any], Tal
             "pages": pages,
             "needs_ocr": kind == "pdf_scan" or kind in IMAGE_KINDS,
         }
-        if sha256 in originals:
-            row["exact_duplicate_of"] = originals[sha256]
+        # A copy is the same bytes read the same way: a PNG and a .txt with equal bytes are two
+        # documents, as the corpus reader picks its parser from the suffix.
+        key = (reader_of(relative, row["needs_ocr"]), sha256)
+        if key in originals:
+            row["exact_duplicate_of"] = originals[key]
             tally.duplicates += 1
         else:
-            originals[sha256] = relative
+            originals[key] = relative
         documents.append(row)
         tally.listed += 1
         tally.by_kind[kind] += 1

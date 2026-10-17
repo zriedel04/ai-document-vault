@@ -261,6 +261,35 @@ class KindsTest(unittest.TestCase):
 
 
 class WriteManifestTest(Folder):
+    def test_identical_bytes_are_a_copy_only_when_read_the_same_way(self) -> None:
+        # The corpus reader picks its parser from the suffix: a PNG gives no text (it needs OCR)
+        # and a .txt is decoded, so equal bytes under those suffixes are two documents. Marking
+        # the .txt as a copy of the PNG would drop it, and its questions, from the corpus.
+        same = b"the same bytes in every file"
+        for name in ("a.png", "b.txt", "c.md", "d.jpg", "e.jpeg", "f.docx", "g.csv", "h.tif"):
+            self.write(name, same)
+        manifest, tally = self.build()
+        marks = {row["path"]: row.get("exact_duplicate_of") for row in manifest["documents"]}
+        self.assertEqual(
+            marks,
+            {
+                "a.png": None,
+                "b.txt": None,
+                "c.md": "b.txt",  # the text suffixes share one reader
+                "d.jpg": None,
+                "e.jpeg": "d.jpg",  # one format under two spellings
+                "f.docx": None,
+                "g.csv": "b.txt",
+                "h.tif": None,
+            },
+        )
+        self.assertEqual(tally.duplicates, 3)
+        m.write_manifest(self.root, manifest, force=False)
+        documents = corpus.load_manifest(self.root / "manifest.json")
+        built = corpus.build_corpus(self.root, documents, fake_pdf_pages)
+        self.assertTrue({"b.txt", "c.md", "g.csv"} <= built.readable)
+        self.assertEqual({chunk.doc_path for chunk in built.chunks}, {"b.txt"})
+
     def test_the_written_manifest_loads_and_builds_a_corpus(self) -> None:
         self.sample()
         (self.root / "manifest.json").unlink()
