@@ -369,6 +369,41 @@ class OutputTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.write(root, stem="../x", overwrite=True)
 
+    def test_a_report_or_link_that_appears_after_the_check_is_kept(self) -> None:
+        # ``require_free`` runs before the measurement, which can last an hour; a file made in
+        # the folder after it must be neither replaced nor followed when the report is written.
+        for suffix in (".json", ".md"):
+            for kind in ("file", "link"):
+                with self.subTest(suffix=suffix, kind=kind):
+                    self.check_appeared(suffix, kind)
+
+    def check_appeared(self, suffix: str, kind: str) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            outside = root / "outside.txt"
+            outside.write_text("keep", encoding="utf-8")
+            appeared = root / f"a{suffix}"
+
+            def meanwhile(directory: Path, stem: str) -> None:
+                if kind == "file":
+                    appeared.write_text("someone else's", encoding="utf-8")
+                    return
+                try:
+                    appeared.symlink_to(outside)
+                except OSError:  # Windows without the privilege to make links
+                    self.skipTest("cannot create symbolic links here")
+
+            with (
+                mock.patch.object(r, "require_free", side_effect=meanwhile),
+                self.assertRaises(OwnValueError) as caught,
+            ):
+                make().write(root, stem="a")
+            self.assertNotIn(folder, str(caught.exception))
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            if kind == "file":
+                self.assertEqual(appeared.read_text(encoding="utf-8"), "someone else's")
+            self.assertEqual({p.name for p in root.iterdir()}, {"outside.txt", f"a{suffix}"})
+
     def test_file_stems_cannot_escape_the_folder(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             for stem in ("../x", "a/b", "", "A", "x\n", ".."):

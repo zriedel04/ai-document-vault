@@ -326,6 +326,125 @@ class WriteManifestTest(Folder):
         self.assertEqual(len(corpus.load_manifest(self.root / "manifest.json")), 1)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["a.txt", "manifest.json"])
 
+    def appears_meanwhile(self) -> mock._patch[Any]:
+        """Patch the read-back so that another process writes ``manifest.json`` after
+        :func:`check_target` has passed and before the manifest is put in place."""
+        real = corpus.load_manifest
+
+        def meanwhile(path: Path) -> list[corpus.Document]:
+            (self.root / "manifest.json").write_bytes(b"written by someone else")
+            return real(path)
+
+        return mock.patch("vault_spikes.manifest.load_manifest", side_effect=meanwhile)
+
+    def assert_kept(self) -> None:
+        self.assertEqual((self.root / "manifest.json").read_bytes(), b"written by someone else")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["a.txt", "manifest.json"])
+
+    def test_without_hard_links_a_manifest_that_appears_is_not_replaced(self) -> None:
+        # The fallback this platform takes (a rename on Windows, an exclusive create elsewhere).
+        self.write("a.txt")
+        manifest, _ = self.build()
+        with (
+            self.appears_meanwhile(),
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            self.assertRaises(OwnValueError),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assert_kept()
+
+    def test_the_exclusive_copy_never_replaces_a_manifest_that_appears(self) -> None:
+        # The fallback for a system other than Windows, run on every platform.
+        self.write("a.txt")
+        manifest, _ = self.build()
+        with (
+            self.appears_meanwhile(),
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            mock.patch.object(os, "name", "posix"),
+            self.assertRaises(OwnValueError),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assert_kept()
+
+    def test_the_exclusive_copy_writes_the_whole_manifest(self) -> None:
+        self.write("a.txt")
+        manifest, _ = self.build()
+        with (
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            mock.patch.object(os, "name", "posix"),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assertEqual(len(corpus.load_manifest(self.root / "manifest.json")), 1)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["a.txt", "manifest.json"])
+
+    def test_the_exclusive_copy_never_follows_a_link_that_appears(self) -> None:
+        self.write("a.txt")
+        manifest, _ = self.build()
+        outside = Path(tempfile.mkdtemp()) / "outside.json"
+        self.addCleanup(shutil.rmtree, outside.parent)
+        outside.write_bytes(b"keep")
+        real = corpus.load_manifest
+
+        def meanwhile(path: Path) -> list[corpus.Document]:
+            link_or_skip(self, self.root / "manifest.json", outside)
+            return real(path)
+
+        with (
+            mock.patch("vault_spikes.manifest.load_manifest", side_effect=meanwhile),
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            mock.patch.object(os, "name", "posix"),
+            self.assertRaises(OwnValueError),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assertEqual(outside.read_bytes(), b"keep")
+
+    def test_a_failed_exclusive_copy_leaves_no_partial_manifest(self) -> None:
+        self.write("a.txt")
+        manifest, _ = self.build()
+        with (
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(os, "fsync", side_effect=[None, OSError("disk full")]),
+            self.assertRaises(OSError),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["a.txt"])
+
+    @unittest.skipUnless(os.name == "nt", "a rename that never replaces is Windows behaviour")
+    def test_the_windows_rename_never_replaces_a_manifest_that_appears(self) -> None:
+        self.write("a.txt")
+        manifest, _ = self.build()
+        with (
+            self.appears_meanwhile(),
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            mock.patch.object(m, "_copy_exclusive", side_effect=AssertionError("not Windows")),
+            self.assertRaises(OwnValueError),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assert_kept()
+
+    def test_publishing_without_force_never_uses_an_operation_that_replaces(self) -> None:
+        # A check followed by a replace leaves a window in which another process's manifest is
+        # overwritten, so no fallback may use one: ``os.replace`` never, and ``os.rename`` only
+        # on Windows, where it refuses an existing name (elsewhere it replaces).
+        for name in ["posix"] + (["nt"] if os.name == "nt" else []):
+            with self.subTest(fallback=name):
+                for leftover in self.root.iterdir():
+                    leftover.unlink()
+                self.write("a.txt")
+                manifest, _ = self.build()
+                replacing = mock.patch.object(
+                    os, "rename", side_effect=AssertionError("rename used off Windows")
+                )
+                with (
+                    mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+                    mock.patch.object(os, "replace", side_effect=AssertionError("replace used")),
+                    mock.patch.object(os, "name", name),
+                    replacing if name != "nt" else contextlib.nullcontext(),
+                ):
+                    m.write_manifest(self.root, manifest, force=False)
+                self.assertEqual(len(corpus.load_manifest(self.root / "manifest.json")), 1)
+
     def test_a_manifest_that_does_not_read_back_is_not_put_in_place(self) -> None:
         self.write("a.txt")
         manifest, _ = self.build()

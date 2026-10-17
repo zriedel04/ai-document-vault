@@ -596,7 +596,9 @@ class Report:
         A measurement can cost an hour on the owner's PC, so an existing file is never
         overwritten silently: ``overwrite`` is for a file that is only derived from others (a
         merged report). The CLI calls :func:`require_free` before a run starts, so a name clash
-        is found before the hour is spent, not after."""
+        is found before the hour is spent, not after. Without ``overwrite`` each file is also
+        created exclusively (mode ``x``), so a report or a link that appears after that check is
+        neither replaced nor followed, and the first file is removed if the second is refused."""
         stem = self.spike if stem is None else stem
         if not overwrite:
             require_free(directory, stem)
@@ -605,9 +607,37 @@ class Report:
         directory.mkdir(parents=True, exist_ok=True)
         json_path = directory / f"{stem}.json"
         md_path = directory / f"{stem}.md"
-        json_path.write_text(json.dumps(self.to_json(), indent=2) + "\n", encoding="utf-8")
-        md_path.write_text(self.to_markdown(), encoding="utf-8")
+        contents = [
+            (json_path, json.dumps(self.to_json(), indent=2) + "\n"),
+            (md_path, self.to_markdown()),
+        ]
+        if overwrite:
+            for path, text in contents:
+                path.write_text(text, encoding="utf-8")
+            return json_path, md_path
+        created: list[Path] = []
+        try:
+            for path, text in contents:
+                with path.open("x", encoding="utf-8") as stream:
+                    created.append(path)
+                    stream.write(text)
+        except FileExistsError:
+            _remove(created)
+            raise OwnValueError(_APPEARED_MESSAGE) from None
+        except BaseException:
+            _remove(created)
+            raise
         return json_path, md_path
+
+
+_APPEARED_MESSAGE = (
+    "a report with this name appeared in the output folder during the run; it is not replaced"
+)
+
+
+def _remove(paths: list[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 _STEM = re.compile(r"[a-z0-9][a-z0-9._-]{0,80}")

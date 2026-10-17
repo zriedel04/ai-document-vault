@@ -255,10 +255,9 @@ def write_manifest(root: Path, manifest: dict[str, Any], *, force: bool) -> None
     """Write ``manifest.json`` atomically: into a temporary file in the same folder, read back
     with the spike's own loader (every path must be a file inside the folder), then put in place.
 
-    Without ``force`` the temporary file is hard-linked to the name, which fails if a manifest
-    appeared after :func:`check_target`, so one is never replaced. A file system without hard
-    links (FAT, exFAT) falls back to a check just before the replace. The temporary file starts
-    with a dot, so a run that is killed leaves a hidden file that the next run does not list.
+    Without ``force`` the file is published by :func:`_publish_new`, which never replaces a
+    manifest that appeared after :func:`check_target`. The temporary file starts with a dot, so a
+    run that is killed leaves a hidden file that the next run does not list.
     """
     check_target(root, force=force)
     target = root / MANIFEST
@@ -278,14 +277,58 @@ def write_manifest(root: Path, manifest: dict[str, Any], *, force: bool) -> None
         if force:
             os.replace(temporary, target)
             return
-        try:
-            os.link(temporary, target)
-        except FileExistsError:
-            msg = "a manifest.json appeared in the --corpus folder during the run; not replaced"
-            raise OwnValueError(msg) from None
-        except OSError:
-            check_target(root, force=False)
-            os.replace(temporary, target)
+        _publish_new(Path(temporary), target)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
+
+
+_APPEARED = "a manifest.json appeared in the --corpus folder during the run; not replaced"
+
+
+def _publish_new(temporary: Path, target: Path) -> None:
+    """Put ``temporary`` at ``target`` only if nothing is there, with an operation that checks and
+    creates in one step, so there is no window between a check and a replace in which a manifest
+    made by another process could be overwritten.
+
+    A hard link is tried first: it shows the whole file at once. A file system without hard links
+    (FAT, exFAT) refuses it, and then Windows renames, which never replaces an existing name, and
+    any other system creates the name exclusively (``O_CREAT | O_EXCL``, which also refuses a link
+    in its place) and copies the bytes into it. ``os.replace`` is never used here."""
+    try:
+        os.link(temporary, target)
+    except FileExistsError:
+        raise OwnValueError(_APPEARED) from None
+    except OSError:
+        pass
+    else:
+        return
+    if os.name == "nt":
+        try:
+            os.rename(temporary, target)  # MoveFileExW without MOVEFILE_REPLACE_EXISTING
+        except FileExistsError:
+            raise OwnValueError(_APPEARED) from None
+        return
+    _copy_exclusive(temporary, target)
+
+
+def _copy_exclusive(temporary: Path, target: Path) -> None:
+    """Create ``target`` exclusively and copy ``temporary`` into it. If the copy fails, the file
+    this call created is removed, but only while the name still holds that same file."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        handle = os.open(target, flags, 0o666)
+    except FileExistsError:
+        raise OwnValueError(_APPEARED) from None
+    created = os.fstat(handle)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(temporary.read_bytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            now = target.lstat()
+            if (now.st_dev, now.st_ino) == (created.st_dev, created.st_ino):
+                target.unlink()
+        raise
