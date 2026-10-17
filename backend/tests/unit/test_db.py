@@ -18,7 +18,7 @@ from sqlalchemy import inspect, text
 from vault.core.logging import SafeFormatter, configure_logging
 from vault.db.engine import BUSY_TIMEOUT_MS, DatabaseError, create_vault_engine
 from vault.db.migrate import alembic_config, upgrade_to_latest
-from vault.db.schema import metadata
+from vault.db.schema import include_name, metadata
 
 
 def pragma(db_file: Path, name: str) -> object:
@@ -57,7 +57,8 @@ def test_the_migrations_match_the_table_definitions(tmp_path: Path) -> None:
     engine = create_vault_engine(db_file)
     try:
         with engine.connect() as connection:
-            differences = compare_metadata(MigrationContext.configure(connection), metadata)
+            context = MigrationContext.configure(connection, opts={"include_name": include_name})
+            differences = compare_metadata(context, metadata)
     finally:
         engine.dispose()
     assert differences == []
