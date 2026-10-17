@@ -50,7 +50,7 @@ class Library:
     def add(self, name: str, body: str, **changes: Any) -> str:
         self.now += timedelta(minutes=1)
         path = self.folder / f"incoming-{ids.new_ulid()}{Path(name).suffix or '.txt'}"
-        path.write_text(body, encoding="utf-8")
+        path.write_bytes(body.encode("utf-8"))  # write_text would turn \n into \r\n on Windows
         values: dict[str, Any] = {
             "path": path,
             "original_filename": name,
