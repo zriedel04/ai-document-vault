@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { useApi } from "./api-context";
+import type { Api } from "./client";
 import {
   type DocumentDetail,
   type DocumentList,
@@ -83,13 +84,26 @@ export function useDocumentList(query: ListQuery): Request<DocumentList> {
   });
 }
 
-/** One document's details. */
-export function useDocument(id: string): Request<DocumentDetail> {
-  const api = useApi();
-  return useRequest(id, async () => {
+/**
+ * Ask for one document's details. A rejected request is "unreachable"; the caller asks the
+ * session again on a 401 (`useRequest` does, and so does the details page after a move).
+ */
+export async function loadDocument(
+  api: Api,
+  id: string,
+): Promise<Exclude<Loaded<DocumentDetail>, { status: "loading" }>> {
+  try {
     const { data, response } = await api.GET("/api/documents/{document_id}", {
       params: { path: { document_id: id } },
     });
     return data ? { status: "ok", data } : { status: "error", error: errorFor(response.status) };
-  });
+  } catch {
+    return { status: "error", error: "unreachable" };
+  }
+}
+
+/** One document's details. */
+export function useDocument(id: string): Request<DocumentDetail> {
+  const api = useApi();
+  return useRequest(id, () => loadDocument(api, id));
 }
