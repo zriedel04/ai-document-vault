@@ -410,6 +410,48 @@ class WriteManifestTest(Folder):
             m.write_manifest(self.root, manifest, force=False)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["a.txt"])
 
+    def test_the_temporary_name_taken_by_another_file_is_not_removed(self) -> None:
+        # The cleanup of the temporary file runs after publishing; if another process has put
+        # its own file at that name meanwhile, that file stays.
+        self.write("a.txt")
+        manifest, _ = self.build()
+        taken: list[Path] = []
+
+        def publish_then_taken(temporary: Path, target: Path) -> None:
+            temporary.replace(target)
+            temporary.write_text("someone else's", encoding="utf-8")
+            taken.append(temporary)
+
+        with mock.patch.object(m, "_publish_new", side_effect=publish_then_taken):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assertEqual(len(taken), 1)
+        self.assertEqual(taken[0].read_text(encoding="utf-8"), "someone else's")
+
+    @unittest.skipIf(os.name == "nt", "Windows does not let an open file be removed or moved")
+    def test_a_failed_copy_leaves_a_manifest_that_took_the_name_meanwhile(self) -> None:
+        self.write("a.txt")
+        manifest, _ = self.build()
+        target = self.root / "manifest.json"
+        real_fsync = os.fsync
+        calls: list[int] = []
+
+        def fsync(fd: int) -> None:
+            calls.append(fd)
+            if len(calls) == 2:  # the copy into the name this run created
+                target.replace(self.root / "moved.json")
+                target.write_bytes(b"written by someone else")
+                raise OSError("disk full")
+            real_fsync(fd)
+
+        with (
+            mock.patch.object(os, "link", side_effect=OSError("no hard links on FAT")),
+            mock.patch.object(os, "name", "posix"),
+            mock.patch.object(os, "fsync", side_effect=fsync),
+            self.assertRaises(OSError),
+        ):
+            m.write_manifest(self.root, manifest, force=False)
+        self.assertEqual(target.read_bytes(), b"written by someone else")
+
     @unittest.skipUnless(os.name == "nt", "a rename that never replaces is Windows behaviour")
     def test_the_windows_rename_never_replaces_a_manifest_that_appears(self) -> None:
         self.write("a.txt")

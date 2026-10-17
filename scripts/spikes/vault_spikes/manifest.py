@@ -25,6 +25,7 @@ from typing import Any
 
 from vault_spikes.corpus import PdfPages, SpikeInputError, load_manifest, safe_file
 from vault_spikes.errors import OwnValueError
+from vault_spikes.report import remove_own, same_file
 
 MANIFEST = "manifest.json"
 
@@ -262,12 +263,17 @@ def write_manifest(root: Path, manifest: dict[str, Any], *, force: bool) -> None
     check_target(root, force=force)
     target = root / MANIFEST
     handle, temporary = tempfile.mkstemp(dir=root, prefix=".manifest-", suffix=".tmp")
+    made = os.fstat(handle)
+    is_open = True
     try:
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n", closefd=False) as stream:
             json.dump(manifest, stream, indent=2, ensure_ascii=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if os.name == "nt":  # Windows renames or links only a file that is not open here
+            os.close(handle)
+            is_open = False
         documents = load_manifest(Path(temporary))
         if len(documents) != len(manifest["documents"]):
             msg = "the manifest did not read back as written"
@@ -279,8 +285,15 @@ def write_manifest(root: Path, manifest: dict[str, Any], *, force: bool) -> None
             return
         _publish_new(Path(temporary), target)
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
+        # Gone after a rename, still there after a link. Elsewhere than Windows the descriptor is
+        # still open, so a file that another process put at the name is told apart reliably. On
+        # Windows the file number of NTFS carries a sequence number and is not reused for a new
+        # file; FAT has no links, so the temporary file was renamed away or the run failed.
+        if is_open:
+            remove_own(Path(temporary), handle, lambda: os.close(handle))
+        elif same_file(Path(temporary), made):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
 
 
 _APPEARED = "a manifest.json appeared in the --corpus folder during the run; not replaced"
@@ -314,21 +327,19 @@ def _publish_new(temporary: Path, target: Path) -> None:
 
 def _copy_exclusive(temporary: Path, target: Path) -> None:
     """Create ``target`` exclusively and copy ``temporary`` into it. If the copy fails, the file
-    this call created is removed, but only while the name still holds that same file."""
+    this call created is removed, but only while the name still holds that same file
+    (:func:`~vault_spikes.report.remove_own`)."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     try:
         handle = os.open(target, flags, 0o666)
     except FileExistsError:
         raise OwnValueError(_APPEARED) from None
-    created = os.fstat(handle)
     try:
-        with os.fdopen(handle, "wb") as stream:
+        with os.fdopen(handle, "wb", closefd=False) as stream:
             stream.write(temporary.read_bytes())
             stream.flush()
             os.fsync(stream.fileno())
     except BaseException:
-        with contextlib.suppress(OSError):
-            now = target.lstat()
-            if (now.st_dev, now.st_ino) == (created.st_dev, created.st_ino):
-                target.unlink()
+        remove_own(target, handle, lambda: os.close(handle))  # compared while still open
         raise
+    os.close(handle)

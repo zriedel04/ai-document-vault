@@ -13,6 +13,7 @@ conclusion left for the owner's review.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -24,7 +25,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from importlib import metadata
 from pathlib import Path
-from typing import Final, NamedTuple, cast
+from typing import Final, NamedTuple, TextIO, cast
 
 from vault_spikes.errors import OwnTypeError, OwnValueError
 
@@ -615,18 +616,23 @@ class Report:
             for path, text in contents:
                 path.write_text(text, encoding="utf-8")
             return json_path, md_path
-        created: list[Path] = []
+        # Each file stays open until both are written, so the cleanup can tell whether a name
+        # still holds the file this call made (see :func:`remove_own`).
+        opened: list[tuple[Path, TextIO]] = []
         try:
             for path, text in contents:
-                with path.open("x", encoding="utf-8") as stream:
-                    created.append(path)
-                    stream.write(text)
+                stream = path.open("x", encoding="utf-8")
+                opened.append((path, stream))
+                stream.write(text)
+                stream.flush()
         except FileExistsError:
-            _remove(created)
+            _remove(opened)
             raise OwnValueError(_APPEARED_MESSAGE) from None
         except BaseException:
-            _remove(created)
+            _remove(opened)
             raise
+        for _, written in opened:
+            written.close()
         return json_path, md_path
 
 
@@ -635,9 +641,48 @@ _APPEARED_MESSAGE = (
 )
 
 
-def _remove(paths: list[Path]) -> None:
-    for path in paths:
-        path.unlink(missing_ok=True)
+def _remove(opened: list[tuple[Path, TextIO]]) -> None:
+    for path, stream in reversed(opened):
+        with contextlib.suppress(OSError, ValueError):
+            stream.flush()  # so that closing has nothing left to write
+        remove_own(path, stream.fileno(), stream.close)
+
+
+def same_file(path: Path, identity: os.stat_result) -> bool:
+    """Whether ``path`` itself (a link is not followed) is the file ``identity`` describes, by
+    device and file number."""
+    try:
+        now = path.lstat()
+    except OSError:
+        return False
+    return (now.st_dev, now.st_ino) == (identity.st_dev, identity.st_ino)
+
+
+def remove_own(path: Path, handle: int, close: Callable[[], object]) -> None:
+    """Remove ``path`` only if it still is the file open on ``handle`` (which this process
+    created), and close that file with ``close``, the one call that owns the descriptor, so it
+    is never closed twice (an error from it is ignored, as the file is being discarded). Another
+    process may have moved or removed the file and put its own at the name, or a link; that one
+    is left alone.
+
+    The comparison is made while ``handle`` is open, so the file number cannot have gone to a new
+    file (a removed file's number is reused at once on Linux). Elsewhere than Windows the name is
+    removed while the file is still open. Windows refuses to remove a file that is open here, so
+    it is closed first; while it was open no other process could move or remove it either, so the
+    name still held this file when it was compared."""
+    try:
+        own = same_file(path, os.fstat(handle))
+    except OSError:
+        own = False
+    if os.name == "nt":
+        with contextlib.suppress(OSError, ValueError):
+            close()
+    if own:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    if os.name != "nt":
+        with contextlib.suppress(OSError, ValueError):
+            close()
 
 
 _STEM = re.compile(r"[a-z0-9][a-z0-9._-]{0,80}")

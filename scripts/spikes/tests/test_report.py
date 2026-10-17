@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import sys
 import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 from unittest import mock
 
 from vault_spikes import report as r
@@ -403,6 +405,99 @@ class OutputTest(unittest.TestCase):
             if kind == "file":
                 self.assertEqual(appeared.read_text(encoding="utf-8"), "someone else's")
             self.assertEqual({p.name for p in root.iterdir()}, {"outside.txt", f"a{suffix}"})
+
+    def test_a_first_report_that_another_process_replaced_is_not_removed(self) -> None:
+        # The .md name is refused, so the .json this call made is cleaned up; but another process
+        # has removed that .json meanwhile and written its own, which must stay.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            real_open = Path.open
+
+            def swapping_open(path: Path, mode: str = "r", **kwargs: Any) -> Any:
+                if path.name == "a.md":
+                    for name in ("a.json", "a.md"):
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(os.path.join(folder, name))
+                        with open(os.path.join(folder, name), "w", encoding="utf-8") as other:
+                            other.write("someone else's")
+                return real_open(path, mode, **kwargs)
+
+            with (
+                mock.patch.object(Path, "open", new=swapping_open),
+                self.assertRaises(OwnValueError),
+            ):
+                make().write(root, stem="a")
+            self.assertEqual((root / "a.json").read_text(encoding="utf-8"), "someone else's")
+            self.assertEqual((root / "a.md").read_text(encoding="utf-8"), "someone else's")
+
+    def test_remove_own_removes_only_the_file_open_on_the_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            mine = root / "mine.txt"
+
+            def create() -> int:
+                return os.open(mine, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+
+            def assert_closed(handle: int) -> None:
+                with self.assertRaises(OSError):
+                    os.fstat(handle)
+
+            handle = create()
+            r.remove_own(mine, handle, lambda: os.close(handle))
+            self.assertFalse(os.path.lexists(mine))
+            assert_closed(handle)
+
+            handle = create()
+            mine.unlink()  # removed by another process: nothing to remove, still closed
+            r.remove_own(mine, handle, lambda: os.close(handle))
+            assert_closed(handle)
+
+            outside = root / "outside.txt"
+            outside.write_text("keep", encoding="utf-8")
+            handle = create()
+            try:
+                if os.name == "nt":  # an open file cannot be moved there; only the name is taken
+                    os.close(handle)
+                    handle = os.open(outside, os.O_RDONLY)
+                else:
+                    mine.replace(root / "moved.txt")  # moved, then the name is taken again
+                mine.symlink_to(outside)
+            except OSError:
+                os.close(handle)
+                self.skipTest("cannot create symbolic links here")
+            r.remove_own(mine, handle, lambda: os.close(handle))
+            self.assertTrue(mine.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            assert_closed(handle)
+            mine.unlink()
+
+            if os.name != "nt":
+                handle = create()
+                mine.unlink()  # removed and made again at once: the same number on Linux
+                mine.write_text("someone else's", encoding="utf-8")
+                r.remove_own(mine, handle, lambda: os.close(handle))
+                self.assertEqual(mine.read_text(encoding="utf-8"), "someone else's")
+                assert_closed(handle)
+
+    @unittest.skipIf(os.name == "nt", "Windows closes first, as it cannot remove an open file")
+    def test_remove_own_compares_before_the_file_number_can_be_reused(self) -> None:
+        # Once the descriptor is closed, a removed file's number can go to the next new file (at
+        # once on Linux), so a comparison made after closing would take that file for its own.
+        with tempfile.TemporaryDirectory() as folder:
+            mine = Path(folder) / "mine.txt"
+            handle = os.open(mine, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            real_close = os.close
+
+            def close_then_replaced(fd: int) -> None:
+                real_close(fd)
+                if fd == handle:
+                    with contextlib.suppress(FileNotFoundError):
+                        mine.unlink()
+                    mine.write_text("someone else's", encoding="utf-8")
+
+            with mock.patch.object(os, "close", side_effect=close_then_replaced):
+                r.remove_own(mine, handle, lambda: os.close(handle))
+            self.assertEqual(mine.read_text(encoding="utf-8"), "someone else's")
 
     def test_file_stems_cannot_escape_the_folder(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
