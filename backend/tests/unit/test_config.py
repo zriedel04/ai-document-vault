@@ -170,3 +170,18 @@ def test_the_example_config_is_valid() -> None:
     settings = load_settings(example)
     assert settings.server.port == 8765
     assert settings.frontend.dist is None  # the example leaves the default in place
+
+
+def test_the_text_fallback_defaults_to_windows_1252_and_can_be_chosen(tmp_path: Path) -> None:
+    assert Settings().processing.text_fallback_encoding == "cp1252"
+    config = tmp_path / "config.toml"
+    config.write_text('[processing]\ntext_fallback_encoding = "cp1251"\n', encoding="utf-8")
+    assert load_settings(config).processing.text_fallback_encoding == "cp1251"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "latin-1", "CP1251", "cp1251 ", "koi8_r", ""])
+def test_the_text_fallback_must_be_a_windows_code_page(tmp_path: Path, encoding: str) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(f'[processing]\ntext_fallback_encoding = "{encoding}"\n', encoding="utf-8")
+    with pytest.raises(ValidationError, match="text_fallback_encoding"):
+        load_settings(config)

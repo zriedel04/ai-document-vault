@@ -1,5 +1,5 @@
 # Copy to config.toml (git-ignored) and adjust. Never put API keys in this file.
-# Later sections (processing, ai, pricing) arrive with their phases.
+# Later sections (ai, pricing) arrive with their phases.
 
 [vault]
 # An absolute folder outside every Git repository (the app refuses to start otherwise).
@@ -13,6 +13,12 @@ port = 8765
 [frontend]
 # The built frontend (npm run build in frontend/). Defaults to frontend/dist in this repository.
 # dist = 'C:\path\to\frontend\dist'
+
+[processing]
+# The code page of old TXT and Markdown files that are not UTF-8 (Notepad's "ANSI"): cp1252 for
+# English and Western European, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp932
+# Japanese, and the other Windows code pages listed in the error if you mistype one.
+text_fallback_encoding = "cp1252"
 
 [logging]
 level = "INFO"

@@ -16,6 +16,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from vault.ingest.extractors.text import FALLBACK_ENCODING, FALLBACK_ENCODINGS
+
 CONFIG_ENV_VAR = "AIVAULT_CONFIG"
 DEFAULT_CONFIG_FILE = "config.toml"
 # Keep in step with the Host pattern in vault.core.security.
@@ -66,6 +68,22 @@ class FrontendSettings(_Section):
     dist: Path | None = None
 
 
+class ProcessingSettings(_Section):
+    # The Windows code page for a TXT or Markdown file that is neither UTF-8 nor marked with a byte
+    # order mark (vault.ingest.extractors.text). Windows-1252 suits English and Western European
+    # notes; Windows-1251 Cyrillic ones, cp932 Japanese, and so on.
+    text_fallback_encoding: str = FALLBACK_ENCODING
+
+    @field_validator("text_fallback_encoding")
+    @classmethod
+    def _windows_code_page(cls, encoding: str) -> str:
+        if encoding not in FALLBACK_ENCODINGS:
+            choices = ", ".join(sorted(FALLBACK_ENCODINGS))
+            msg = f"processing.text_fallback_encoding must be one of {choices}"
+            raise ValueError(msg)
+        return encoding
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -78,6 +96,7 @@ class Settings(BaseSettings):
     vault: VaultSettings = VaultSettings()
     server: ServerSettings = ServerSettings()
     frontend: FrontendSettings = FrontendSettings()
+    processing: ProcessingSettings = ProcessingSettings()
     logging: LoggingSettings = LoggingSettings()
 
     @classmethod

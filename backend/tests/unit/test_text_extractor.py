@@ -1,4 +1,5 @@
 import codecs
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from vault.ingest.extractors import ExtractionError, Heading, NotTextError
 from vault.ingest.extractors.text import (
     FALLBACK_ENCODING,
+    FALLBACK_ENCODINGS,
     VERSION,
     decode,
     extract,
@@ -16,6 +18,10 @@ from vault.ingest.validate import TEXT_BOMS, Kind, sniff
 # Letters outside ASCII, from code points: e acute, an em dash, and the CJK word for resume.
 WORDS = "café — 履歴書"
 CANARY = "canary-secret-xyzzy"
+
+
+def _no_error() -> contextlib.AbstractContextManager[None]:
+    return contextlib.nullcontext()
 
 
 def titles(text: str) -> list[tuple[int, str]]:
@@ -43,6 +49,44 @@ def test_bytes_that_are_not_utf8_are_read_as_windows_1252() -> None:
     # What Notepad wrote as "ANSI": e acute is one byte, and 0x80 is the euro sign.
     assert decode(b"caf\xe9 \x80 5") == ("café € 5", "cp1252")
     assert FALLBACK_ENCODING == "cp1252"
+
+
+@pytest.mark.parametrize(
+    ("text", "fallback"),
+    [
+        # Russian, Greek and Japanese notes, from code points.
+        ("\u041f\u0440\u0438\u0432\u0435\u0442, \u043e\u0442\u0447\u0451\u0442", "cp1251"),
+        ("\u039a\u03b1\u03bb\u03b7\u03bc\u03ad\u03c1\u03b1", "cp1253"),
+        ("\u5831\u544a\u66f8\u3092\u6301\u3063\u3066", "cp932"),
+    ],
+)
+def test_the_owner_can_choose_another_windows_code_page(text: str, fallback: str) -> None:
+    data = text.encode(fallback)
+
+    assert decode(data, fallback) == (text, codecs.lookup(fallback).name)
+    assert extract(data, markdown=False, fallback=fallback).encoding == codecs.lookup(fallback).name
+    # Without the choice the same bytes are not this text (the reason detection matters).
+    with pytest.raises(NotTextError) if fallback == "cp932" else _no_error():
+        assert decode(data)[0] != text
+
+
+def test_utf8_and_marked_text_ignore_the_fallback() -> None:
+    assert decode(WORDS.encode(), "cp1251") == (WORDS, "utf-8")
+    assert decode(b"\xef\xbb\xbf" + WORDS.encode(), "cp1251") == (WORDS, "utf-8")
+
+
+@pytest.mark.parametrize(
+    "fallback", ["utf-16", "latin-1", "iso-8859-1", "CP1252", "cp1252 ", "cp1252\n", "", "koi8_r"]
+)
+def test_only_a_windows_code_page_is_a_fallback(fallback: str) -> None:
+    with pytest.raises(ValueError, match="FALLBACK_ENCODINGS"):
+        decode(b"text", fallback)
+
+
+def test_every_fallback_is_a_python_codec() -> None:
+    assert FALLBACK_ENCODING in FALLBACK_ENCODINGS
+    for fallback in FALLBACK_ENCODINGS:
+        assert bytes(range(32, 127)).decode(fallback) == bytes(range(32, 127)).decode("ascii")
 
 
 def test_a_file_that_mixes_encodings_is_read_as_windows_1252_as_a_whole() -> None:
