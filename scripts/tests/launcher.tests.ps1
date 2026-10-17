@@ -427,29 +427,27 @@ $commandParameter = (Get-Command $launcher).Parameters['Command']
 $allowed = @($commandParameter.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })[0].ValidValues
 Assert-That 'check is one of the commands' ($allowed -contains 'check')
 
-# A stand-in for the backend's Python: it records its arguments and exits with the code asked for.
-$fakeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("vault-check-tests-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $fakeDir | Out-Null
-try {
-    $script:FakePython = Join-Path $fakeDir 'python.cmd'
-    Set-Content -LiteralPath $script:FakePython -Encoding ASCII -Value @('@echo %*> "%~dp0args.txt"', '@exit /b %VAULT_FAKE_CODE%')
-    function Get-BackendPython { return $script:FakePython }
-    $env:VAULT_FAKE_CODE = '0'
-    Assert-That 'check passes when the backend finds nothing' ($null -eq (Get-ThrownMessage { Invoke-Check }))
-    $passed = (Get-Content -LiteralPath (Join-Path $fakeDir 'args.txt') -Raw).Trim()
-    Assert-That 'check runs the backend module vault.check with no other argument' ($passed -ceq '-m vault.check')
-    $env:VAULT_FAKE_CODE = '1'
-    $message = Get-ThrownMessage { Invoke-Check }
-    Assert-That 'check fails when the backend finds a problem' (($null -ne $message) -and ($message -match 'found problems'))
-    $env:VAULT_FAKE_CODE = '2'
-    $message = Get-ThrownMessage { Invoke-Check }
-    Assert-That 'check fails when the backend cannot run' (($null -ne $message) -and ($message -match 'could not run'))
-    Assert-That 'check returns to the folder it was called from' ((Get-Location).Path -ne $script:BackendDir)
+# A stand-in for the backend's Python: it records its arguments and sets the exit code asked for.
+# That the real interpreter's exit code reaches the launcher is the CI job's end-to-end step.
+$script:checkArguments = $null
+$script:checkCode = 0
+$standIn = {
+    $script:checkArguments = $args -join ' '
+    $global:LASTEXITCODE = $script:checkCode
 }
-finally {
-    Remove-Item -LiteralPath Env:\VAULT_FAKE_CODE -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $fakeDir -Recurse -Force -ErrorAction SilentlyContinue
-}
+$startedIn = (Get-Location).Path
+$message = Get-ThrownMessage { Invoke-Check -Python $standIn }
+if ($null -ne $message) { Write-Host "     (check said: $message)" }
+Assert-That 'check passes when the backend finds nothing' ($null -eq $message)
+Assert-That 'check runs the backend module vault.check with no other argument' ($script:checkArguments -ceq '-m vault.check')
+Assert-That 'check returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+$script:checkCode = 1
+$message = Get-ThrownMessage { Invoke-Check -Python $standIn }
+Assert-That 'check fails when the backend finds a problem' (($null -ne $message) -and ($message -match 'found problems'))
+$script:checkCode = 2
+$message = Get-ThrownMessage { Invoke-Check -Python $standIn }
+Assert-That 'check fails when the backend cannot run' (($null -ne $message) -and ($message -match 'could not run'))
+Assert-That 'and still returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
 
 # --- how the script is called ------------------------------------------------------------------
 $shell = (Get-Process -Id $PID).Path

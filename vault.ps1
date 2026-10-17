@@ -617,11 +617,13 @@ function Get-CheckVerdict {
 function Invoke-Check {
     <# Run the backend's read-only integrity check (backend/src/vault/check.py) in the backend
        folder, so it reads the same settings as the server. It takes no lock and touches no
-       record: it starts nothing and only reads the vault, so it can run beside the server. #>
-    $python = Get-BackendPython
+       record: it starts nothing and only reads the vault, so it can run beside the server.
+       -Python replaces the backend's interpreter, for the tests. #>
+    param([object]$Python)
+    if ($null -eq $Python) { $Python = Get-BackendPython }
     Push-Location -LiteralPath $script:BackendDir
     try {
-        & $python -m vault.check
+        & $Python -m vault.check
         $code = $LASTEXITCODE
     }
     finally {
