@@ -147,9 +147,9 @@ def markdown_headings(text: str) -> tuple[Heading, ...]:
         if _THEMATIC_BREAK.fullmatch(line):
             paragraph, lazy = None, False
             continue
-        opened = _FENCE_OPEN.fullmatch(line)
-        if opened and not (opened.group(1)[0] == "`" and "`" in opened.group(2)):
-            fence = (opened.group(1)[0], len(opened.group(1)))
+        opened = _fence_open(line)
+        if opened:
+            fence = opened
             paragraph, lazy = None, False
             continue
         atx = _ATX.fullmatch(line)
@@ -189,9 +189,16 @@ def _opens_paragraph(line: str) -> bool:
     item = _list_item(line)
     if item:
         return bool(item.group(4)) and _opens_paragraph(line[item.start(4) :])
-    return not (
-        _ATX.fullmatch(line) or _THEMATIC_BREAK.fullmatch(line) or _FENCE_OPEN.fullmatch(line)
-    )
+    return not (_ATX.fullmatch(line) or _THEMATIC_BREAK.fullmatch(line) or _fence_open(line))
+
+
+def _fence_open(line: str) -> tuple[str, int] | None:
+    """The fence character and length if ``line`` opens fenced code. A backtick fence whose info
+    string holds a backtick is not one (CommonMark): that line is paragraph text."""
+    opened = _FENCE_OPEN.fullmatch(line)
+    if opened is None or (opened.group(1)[0] == "`" and "`" in opened.group(2)):
+        return None
+    return opened.group(1)[0], len(opened.group(1))
 
 
 def _list_item(line: str) -> re.Match[str] | None:

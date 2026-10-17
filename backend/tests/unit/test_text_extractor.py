@@ -304,7 +304,7 @@ def test_a_quote_or_list_item_that_holds_no_paragraph_takes_no_lazy_line(opening
 
 @pytest.mark.parametrize(
     "opening",
-    ["> text", "> > text", "> - text", "- text", "- > text", "1. text"],
+    ["> text", "> > text", "> - text", "- text", "- > text", "1. text", "> ``` bad`info"],
 )
 def test_a_quote_or_list_item_that_holds_a_paragraph_takes_lazy_lines(opening: str) -> None:
     assert titles(f"{opening}\nlazy\n===\n") == []
