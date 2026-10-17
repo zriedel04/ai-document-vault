@@ -417,6 +417,40 @@ finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- check: the backend's exit code becomes the launcher's ---------------------------------------
+Assert-That 'a clean check is no error' ($null -eq (Get-CheckVerdict 0))
+$verdict = Get-CheckVerdict 1
+Assert-That 'a check that found problems stops with a message' (($null -ne $verdict) -and ($verdict -match 'found problems'))
+$verdict = Get-CheckVerdict 2
+Assert-That 'a check that could not run says so' (($null -ne $verdict) -and ($verdict -match 'could not run'))
+$commandParameter = (Get-Command $launcher).Parameters['Command']
+$allowed = @($commandParameter.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })[0].ValidValues
+Assert-That 'check is one of the commands' ($allowed -contains 'check')
+
+# A stand-in for the backend's Python: it records its arguments and exits with the code asked for.
+$fakeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("vault-check-tests-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $fakeDir | Out-Null
+try {
+    $script:FakePython = Join-Path $fakeDir 'python.cmd'
+    Set-Content -LiteralPath $script:FakePython -Encoding ASCII -Value @('@echo %*> "%~dp0args.txt"', '@exit /b %VAULT_FAKE_CODE%')
+    function Get-BackendPython { return $script:FakePython }
+    $env:VAULT_FAKE_CODE = '0'
+    Assert-That 'check passes when the backend finds nothing' ($null -eq (Get-ThrownMessage { Invoke-Check }))
+    $passed = (Get-Content -LiteralPath (Join-Path $fakeDir 'args.txt') -Raw).Trim()
+    Assert-That 'check runs the backend module vault.check with no other argument' ($passed -ceq '-m vault.check')
+    $env:VAULT_FAKE_CODE = '1'
+    $message = Get-ThrownMessage { Invoke-Check }
+    Assert-That 'check fails when the backend finds a problem' (($null -ne $message) -and ($message -match 'found problems'))
+    $env:VAULT_FAKE_CODE = '2'
+    $message = Get-ThrownMessage { Invoke-Check }
+    Assert-That 'check fails when the backend cannot run' (($null -ne $message) -and ($message -match 'could not run'))
+    Assert-That 'check returns to the folder it was called from' ((Get-Location).Path -ne $script:BackendDir)
+}
+finally {
+    Remove-Item -LiteralPath Env:\VAULT_FAKE_CODE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $fakeDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- how the script is called ------------------------------------------------------------------
 $shell = (Get-Process -Id $PID).Path
 $null = & $shell -NoProfile -File $launcher
