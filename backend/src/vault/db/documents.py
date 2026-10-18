@@ -18,7 +18,9 @@ logged.
 
 A document moves to the trash and back without losing anything (ADR 0005, plan section 13): the
 trash is a state, the state it had is kept in ``state_before_trash``, and its versions, imports,
-blob and jobs stay as they are. Removing it for good is a separate, later operation.
+blob and jobs stay as they are. Only a document in the trash can be deleted for good
+(``delete_permanently``), which removes its rows; ``vault.storage.purge`` then removes the blobs
+that no row uses any more.
 """
 
 from __future__ import annotations
@@ -29,10 +31,10 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Connection, Engine, Row, func, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, Row, delete, exists, func, select, update
 
 from vault.db import ids
-from vault.db.engine import read_snapshot
+from vault.db.engine import read_snapshot, write_transaction
 from vault.db.schema import (
     JOB_STAGES,
     TRASHED,
@@ -41,6 +43,7 @@ from vault.db.schema import (
     documents,
     import_sources,
     jobs,
+    pages,
 )
 
 MAX_PAGE: Final = 100
@@ -400,4 +403,86 @@ def restore(engine: Engine, document_id: str) -> bool:
 
 def _exists(connection: Connection, document_id: str) -> bool:
     found = connection.execute(select(documents.c.id).where(documents.c.id == document_id))
+    return found.first() is not None
+
+
+class DeleteRefusal(StrEnum):
+    """Why a permanent delete changed nothing."""
+
+    NOT_FOUND = "not_found"  # no such document (or not an id at all)
+    NOT_IN_TRASH = "not_in_trash"  # the document is in use: it must go to the trash first
+
+
+@dataclass(frozen=True)
+class DeletedRows:
+    """What a permanent delete removed from the database. ``blobs`` are the hashes whose ``blobs``
+    row went with it because no other version uses them: their files are to be removed next."""
+
+    blobs: tuple[str, ...]
+
+
+# Every table whose rows belong to one document, in the order they are removed (children first).
+# ``pages`` hangs off a version, the others off the document. A test compares this with every
+# foreign key in the schema that points at ``documents`` or ``document_versions``, so a table
+# added later cannot be left out.
+DOCUMENT_ROWS: Final = ("pages", "jobs", "import_sources", "document_versions", "documents")
+
+
+def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | DeleteRefusal:
+    """Remove a document in the trash and every row that belongs to it, in one transaction: its
+    pages, jobs, import sources and versions, then the ``blobs`` row of each of its blobs that no
+    remaining version uses (another document can hold the same bytes only through its own version,
+    so a shared blob keeps its row).
+
+    The transaction holds the write lock from its first statement (``write_transaction``), so a
+    restore, a move to the trash or an import that brings the document back comes wholly before it
+    (and it is then refused, or finds no document) or wholly after it. Nothing on disk is touched.
+    """
+    if not ids.is_ulid(document_id):
+        return DeleteRefusal.NOT_FOUND
+    with write_transaction(engine) as connection:
+        state = connection.execute(
+            select(documents.c.state).where(documents.c.id == document_id)
+        ).scalar_one_or_none()
+        if state is None:
+            return DeleteRefusal.NOT_FOUND
+        if state != TRASHED:
+            return DeleteRefusal.NOT_IN_TRASH
+        versions = select(document_versions.c.id).where(
+            document_versions.c.document_id == document_id
+        )
+        hashes = set(
+            connection.execute(
+                select(document_versions.c.blob_sha256).where(
+                    document_versions.c.document_id == document_id
+                )
+            ).scalars()
+        )
+        connection.execute(delete(pages).where(pages.c.version_id.in_(versions)))
+        connection.execute(delete(jobs).where(jobs.c.document_id == document_id))
+        connection.execute(
+            delete(import_sources).where(import_sources.c.document_id == document_id)
+        )
+        # The document points at its current version, so that link goes before the versions.
+        connection.execute(
+            update(documents).where(documents.c.id == document_id).values(current_version_id=None)
+        )
+        connection.execute(
+            delete(document_versions).where(document_versions.c.document_id == document_id)
+        )
+        connection.execute(delete(documents).where(documents.c.id == document_id))
+        unused = connection.execute(
+            delete(blobs)
+            .where(
+                blobs.c.sha256.in_(hashes),
+                ~exists().where(document_versions.c.blob_sha256 == blobs.c.sha256),
+            )
+            .returning(blobs.c.sha256)
+        ).scalars()
+        return DeletedRows(blobs=tuple(sorted(unused)))
+
+
+def blob_recorded(connection: Connection, sha256: str) -> bool:
+    """Does a ``blobs`` row name this hash? Every version's blob has one (a foreign key)."""
+    found = connection.execute(select(blobs.c.sha256).where(blobs.c.sha256 == sha256))
     return found.first() is not None

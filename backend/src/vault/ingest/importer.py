@@ -12,6 +12,11 @@ section 7).
    with two sources. A document in the trash that is imported again comes out of the trash, with
    the state it had before: the import is the owner saying they want it.
 
+A permanent delete of a document with the same bytes can remove the blob's file after step 2
+found it in the store. The transaction of step 4 checks, under the write lock, that the file is
+still there, and the import copies the source again if it is not (``vault.storage.purge`` explains
+the two sides).
+
 Two imports of the same bytes at the same moment must not both create a document. The
 transaction's first statement writes (the blob row), which takes SQLite's write lock, so the
 second import waits and then finds the first one's document.
@@ -44,9 +49,17 @@ from vault.db.schema import (
 )
 from vault.ingest.validate import DEFAULT_LIMITS, Limits, Reason, validate_file
 from vault.jobs.queue import JobQueue, utc_now
-from vault.storage.blobs import BlobIntegrityError, BlobStore, BlobTooLargeError
+from vault.storage.blobs import (
+    BlobIntegrityError,
+    BlobNotFoundError,
+    BlobStore,
+    BlobTooLargeError,
+    FileIdentity,
+)
 
 FIRST_STAGE: Final = "extract"
+# Copies of one import made again when a permanent delete removed its blob in between.
+STORE_TRIES: Final = 3
 
 
 class Outcome(StrEnum):
@@ -79,6 +92,10 @@ class ImportResult:
     outcome: Outcome
     document_id: str | None = None
     reason: Reason | None = None
+
+
+class _BlobGoneError(Exception):
+    """The blob's file was removed (by a permanent delete) between the copy and the record."""
 
 
 class SourceReadError(Exception):
@@ -157,38 +174,65 @@ class Importer:
         except OSError:
             return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
         with source:
-            try:
-                stored = self._store.put(
-                    cast("BinaryIO", _SourceReader(source)),
-                    first.extension,
-                    max_bytes=self._limits.max_bytes,
-                )
-            except BlobTooLargeError:
-                return ImportResult(Outcome.REFUSED, reason=Reason.TOO_LARGE)
-            except SourceReadError:
-                return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
+            for _attempt in range(STORE_TRIES):
+                try:
+                    return self._store_and_record(request, source, first.extension)
+                except _BlobGoneError:
+                    # A permanent delete removed the file after the copy found it in the store
+                    # and before the rows were written: copy the source again.
+                    try:
+                        source.seek(0)
+                    except OSError:
+                        return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
+        msg = "the stored copy kept disappearing while it was being recorded"
+        raise BlobNotFoundError(msg)
+
+    def _store_and_record(
+        self, request: ImportRequest, source: BinaryIO, extension: str
+    ) -> ImportResult:
+        try:
+            stored = self._store.put(
+                cast("BinaryIO", _SourceReader(source)),
+                extension,
+                max_bytes=self._limits.max_bytes,
+            )
+        except BlobTooLargeError:
+            return ImportResult(Outcome.REFUSED, reason=Reason.TOO_LARGE)
+        except SourceReadError:
+            return ImportResult(Outcome.REFUSED, reason=Reason.UNREADABLE)
         # A blob that was already there was copied by an earlier import and has not been read
         # since. Its name claims these bytes; re-hash it, or a hand edit or damage that kept the
         # file's type would be recorded as the source's bytes. Damage is the vault's fault, not
         # the file's, so it raises.
-        if not stored.created and not self._store.verify(stored.sha256):
+        try:
+            intact = stored.created or self._store.verify(stored.sha256)
+        except BlobNotFoundError:
+            raise _BlobGoneError from None  # removed by a permanent delete since the copy
+        if not intact:
             msg = "the stored copy of these bytes no longer matches its hash"
             raise BlobIntegrityError(msg)
         verdict = validate_file(stored.path, self._limits)
         if not verdict.ok or verdict.extension is None or verdict.mime is None:
+            # A refusal counts only if it judged the blob: the file the copy returned, still the
+            # blob after the check. A permanent delete can remove it while it is read (the verdict
+            # is then about a missing file) and another import can store the same bytes again
+            # under the same name, so the name alone does not say which file was judged.
+            if stored.identity is None or self._store.identity(stored.sha256) != stored.identity:
+                raise _BlobGoneError
             if stored.created:
-                self._forget_unused_blob(stored.sha256)
+                self._forget_unused_blob(stored.sha256, stored.identity)
             return ImportResult(Outcome.REFUSED, reason=verdict.reason)
         return self._record(request, stored.sha256, stored.size, verdict.extension, verdict.mime)
 
-    def _forget_unused_blob(self, sha256: str) -> None:
-        """Remove a blob this import created, unless a row already uses it."""
+    def _forget_unused_blob(self, sha256: str, identity: FileIdentity) -> None:
+        """Remove a blob this import created, unless a row already uses it or it is no longer the
+        file this import created (the store decides that under its claim on the hash)."""
         with self._engine.connect() as connection:
             used = connection.execute(
                 select(blobs.c.sha256).where(blobs.c.sha256 == sha256)
             ).first()
         if used is None:
-            self._store.delete(sha256)
+            self._store.delete(sha256, only=identity)
 
     def _record(
         self, request: ImportRequest, sha256: str, size: int, extension: str, mime: str
@@ -201,6 +245,11 @@ class Importer:
                 .values(sha256=sha256, size=size, ext=extension, mime=mime, created_at=now)
                 .on_conflict_do_nothing(index_elements=["sha256"])
             )
+            # A permanent delete removes a blob's file while it holds this same lock, after it
+            # found no row for the hash (vault.storage.purge). Holding the lock now, the file is
+            # either still here, and stays (the row is about to name it), or already gone.
+            if not self._store.exists(sha256):
+                raise _BlobGoneError
             existing = connection.execute(
                 select(documents.c.id)
                 .join(document_versions, documents.c.current_version_id == document_versions.c.id)
