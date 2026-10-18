@@ -22,8 +22,11 @@ otherwise), which bounds the work one request can ask of the index.
 documents not in the trash, and only the chunks of each document's current version), ranks the
 chunks by BM25 over the text, title and section path, and returns one result per document: its
 best chunk, with a snippet of that chunk's text and the number of the document's chunks that match.
-Results are sorted by the best chunk's score, then by document id, so the order is total and the
-same request on unchanged data gives the same page. Counting, ranking and snippets are read from
+A document scores as its best chunk does, and results are sorted by that score, then by document
+id, so the order is total and the same request on unchanged data gives the same page. Which chunk
+is the best is decided by BM25 with the title's weight at 0: every chunk of a document carries the
+same title, but BM25 normalises by the length of the whole row, so with the title counted a match
+by name alone would pick whichever chunk is shortest. Counting, ranking and snippets are read from
 one snapshot.
 
 The snippet marks the matched words with markers made at random for each request, so a document's
@@ -32,7 +35,7 @@ page to render as text, never as markup. The name and the section titles are sea
 they come back marked the same way (``name_highlight``, ``section_highlight``): a result found
 only by its file name or its section shows where the words matched. Its snippet is then the start
 of the chosen chunk's text; for a match by name alone that is the document's first chunk, because
-every chunk scores the same and equal scores fall back to the lowest chunk id.
+without the title every chunk scores 0 and equal scores fall back to the lowest chunk id.
 
 The query, the snippets and the names are the owner's: they go back to the page that asked and
 are never logged, and no error here quotes them.
@@ -193,15 +196,19 @@ class SearchPage:
 # Fixed text: the expression and the extensions are bound parameters.
 _SCOPED = """
 WITH hits AS (
-    SELECT rowid AS chunk_id, bm25(chunks_fts) AS score
+    SELECT
+        rowid AS chunk_id,
+        bm25(chunks_fts) AS score,
+        bm25(chunks_fts, 1.0, 0.0, 1.0) AS passage_score
     FROM chunks_fts WHERE chunks_fts MATCH :match
 ),
 scoped AS (
     SELECT
-        hits.chunk_id, hits.score, chunks.document_id, chunks.page_start, chunks.char_start,
+        hits.chunk_id, chunks.document_id, chunks.page_start, chunks.char_start,
         chunks.char_end, chunks.section_path, blobs.ext,
+        min(hits.score) OVER (PARTITION BY chunks.document_id) AS score,
         row_number() OVER (
-            PARTITION BY chunks.document_id ORDER BY hits.score, hits.chunk_id
+            PARTITION BY chunks.document_id ORDER BY hits.passage_score, hits.chunk_id
         ) AS rank_in_document,
         count(*) OVER (PARTITION BY chunks.document_id) AS matches
     FROM hits

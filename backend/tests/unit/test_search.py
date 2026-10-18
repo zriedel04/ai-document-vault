@@ -320,6 +320,29 @@ def test_one_result_per_document_with_its_best_chunk_and_match_count(
     assert first["page"] == 2
 
 
+def test_a_match_by_name_alone_points_at_the_first_chunk(
+    client: TestClient, library: Library
+) -> None:
+    # BM25 normalises by the length of the whole row, so a shorter later chunk would score better
+    # on the name, which every chunk of the document carries alike.
+    first_page = "An opening page with a good deal of text. " * 12
+    document_id = add(library, "Quarterly-Report.txt", first_page, "Short.", "Tiny.")
+    item = find(client, "quarterly")["items"][0]
+    assert item["document_id"] == document_id
+    assert (item["page"], item["char_start"], item["matches"]) == (1, 0, 3)
+    # When the text matches too, the passage that holds the words is chosen, not the first one.
+    item = find(client, "quarterly short")["items"][0]
+    assert (item["page"], marked(item)) == (2, ["Short"])
+
+
+def test_documents_are_ranked_by_their_best_match_over_text_name_and_section(
+    client: TestClient, library: Library
+) -> None:
+    named = add(library, "budget.txt", "Nothing about money here. " * 10)
+    plain = add(library, "notes.txt", "A budget line in a long text " + "filler " * 40)
+    assert found(client, "budget") == [named, plain]
+
+
 def test_paging_is_stable_and_counts_documents(client: TestClient, library: Library) -> None:
     for number in range(5):
         add(library, f"memo-{number}.txt", f"Quarterly memo number {number} about the move.")
