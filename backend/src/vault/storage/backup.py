@@ -165,7 +165,9 @@ def check_target(target: Path, vault_root: Path) -> Path:
                 # The backup's blobs/ and snapshots/ would sit among the vault's own files.
                 msg = "the vault folder is inside the backup target; choose a folder beside it"
                 raise BackupError(msg)
-    if git_root_containing(target) is not None:
+    # Every spelling, as for the vault: a subst drive mapped into a working tree names a folder
+    # inside the repository by a path that is outside it.
+    if any(git_root_containing(spelling) is not None for spelling in targets):
         msg = "the backup target is inside a Git repository; choose a folder outside every one"
         raise BackupError(msg)
     return target

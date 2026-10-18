@@ -728,6 +728,59 @@ class TestTheTargetIsChecked:
         with pytest.raises(BackupError, match="Git repository"):
             check_target(repository / "backups", vault)
 
+    @staticmethod
+    def _resolving(given: Path, system: Path) -> Any:
+        """Make ``Path.resolve`` give ``system`` for ``given``, as Windows does for a subst drive.
+
+        A real link cannot stand in here: the target path check refuses a link before the Git
+        check runs, while a subst drive or an 8.3 name is no link and still resolves elsewhere.
+        """
+        real_resolve = Path.resolve
+
+        def resolve(self: Path, strict: bool = False) -> Path:
+            if self == given:
+                return system
+            return real_resolve(self, strict=strict)
+
+        return mock.patch.object(Path, "resolve", resolve)
+
+    def test_a_target_that_resolves_into_a_git_repository_is_refused(
+        self, vault: Path, tmp_path: Path
+    ) -> None:
+        repository = tmp_path / "repo"
+        (repository / ".git").mkdir(parents=True)
+        drive = tmp_path / "drive"  # the subst drive: outside every repository by its spelling
+        drive.mkdir()
+        with (
+            self._resolving(drive / "backups", repository / "backups"),
+            pytest.raises(BackupError, match="Git repository"),
+        ):
+            check_target(drive / "backups", vault)
+
+    def test_a_target_inside_a_git_repository_only_by_its_spelling_is_refused(
+        self, vault: Path, tmp_path: Path
+    ) -> None:
+        repository = tmp_path / "repo"
+        (repository / ".git").mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        with (
+            self._resolving(repository / "backups", elsewhere / "backups"),
+            pytest.raises(BackupError, match="Git repository"),
+        ):
+            check_target(repository / "backups", vault)
+
+    def test_a_target_outside_every_repository_by_both_spellings_is_accepted(
+        self, vault: Path, tmp_path: Path
+    ) -> None:
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        drive = tmp_path / "drive"
+        drive.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        with self._resolving(drive / "backups", elsewhere / "backups"):
+            assert check_target(drive / "backups", vault) == drive / "backups"
+
     def test_a_file_in_the_target_path_is_refused(self, vault: Path, tmp_path: Path) -> None:
         (tmp_path / "a-file").write_text("x")
         with pytest.raises(BackupError, match="not a folder"):
