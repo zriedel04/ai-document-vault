@@ -57,6 +57,7 @@ from vault.core import security
 from vault.storage import acl
 from vault.storage.blobs import (
     EXTENSION,
+    IS_WINDOWS,
     READ_ONLY,
     SHA256,
     WRITABLE,
@@ -87,6 +88,16 @@ STAMP: Final = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z")  # always ``fullmatch``
 SQLITE_TIMEOUT_SECONDS: Final = 30.0
 
 
+def _sealed(mode: int) -> int:
+    """The permission bits a file given ``mode`` reports: Windows keeps only a read-only
+    attribute, which ``stat`` shows as ``0o444`` whichever read-only mode was set."""
+    return READ_ONLY if IS_WINDOWS else mode
+
+
+# Every file a snapshot publishes, and the exact mode it ends with.
+SNAPSHOT_FILES: Final = {DATABASE: READ_ONLY, CONFIG: READ_ONLY, TOKEN: OWNER_ONLY}
+
+
 class BackupError(Exception):
     """The backup cannot go on. The message is fixed text and names no file or folder."""
 
@@ -101,7 +112,7 @@ class BackupResult:
     unreadable: int  # blobs that could not be read (another program may hold them), not copied
     mismatched: int  # blobs already in the target whose size differs from the record, kept
     incomplete: int  # earlier snapshot folders without a vault.db
-    cleaned: int  # leftovers of an interrupted copy removed from the target, or blobs re-sealed
+    cleaned: int  # leftovers of an interrupted run removed, or blobs and snapshot files re-sealed
     private: bool | None  # Windows: is the target, all of it, owner-only? None elsewhere
     token_missing: bool  # the vault had no local-token yet, so the snapshot has none
 
@@ -328,6 +339,57 @@ def _undo(folder: Path, created: list[Path]) -> None:
         folder.rmdir()
 
 
+def _seal_snapshots(snapshots: Path) -> int:
+    """Finish what a killed run left half done in the files it had published, and return how
+    many files needed it. A file is published (linked to its final name), its temporary name is
+    removed and only then is it made read-only, so a run killed in between leaves a published
+    ``vault.db`` (and so a snapshot that looks complete), ``config.toml`` or ``local-token`` that
+    is still writable, and perhaps still linked to its temporary name. Every run, under the target
+    lock and before it writes, removes such a second name and gives every published file of every
+    snapshot exactly its mode (``SNAPSHOT_FILES``), as the blob store's ``seal`` does for blobs.
+
+    Only real snapshot folders are entered. A link, a junction or anything but a real file where a
+    snapshot's file belongs, or a file that has another name elsewhere (a hard link: changing its
+    mode would change the other file), is refused and nothing is changed through it."""
+    repaired = 0
+    for entry in sorted(snapshots.iterdir()):
+        if not (STAMP.fullmatch(entry.name) and _is_real_dir(_lstat(entry))):
+            continue
+        for name, mode in SNAPSHOT_FILES.items():
+            final = entry / name
+            status = _lstat(final)
+            if status is None:
+                continue  # never published: the folder is an incomplete snapshot, counted
+            if not _is_real_file(status):
+                msg = "something that is not a file (or a link) is where a snapshot's file belongs"
+                raise BackupError(msg)
+            fixed = False
+            temp = entry / (name + PARTIAL)
+            temp_status = _lstat(temp)
+            if (
+                temp_status is not None
+                and _is_real_file(temp_status)
+                and (temp_status.st_dev, temp_status.st_ino) == (status.st_dev, status.st_ino)
+            ):
+                # Killed between linking and removing the temporary name. Windows cannot remove a
+                # name of a read-only file, so it is made writable first; the mode is set below.
+                temp.chmod(stat.S_IMODE(temp_status.st_mode) | WRITABLE)
+                temp.unlink()
+                status = os.lstat(final)
+                fixed = True
+            if status.st_nlink != 1:
+                msg = (
+                    "a file of an earlier snapshot has another name outside it (a hard link); "
+                    "nothing was changed"
+                )
+                raise BackupError(msg)
+            if stat.S_IMODE(status.st_mode) != _sealed(mode):
+                final.chmod(mode)
+                fixed = True
+            repaired += int(fixed)
+    return repaired
+
+
 def _count_incomplete(snapshots: Path, mine: Path) -> int:
     return sum(
         1
@@ -464,6 +526,7 @@ def run_backup(
         except BlobIntegrityError:
             msg = "the backup's blob folder holds a link or something else out of place"
             raise BackupError(msg) from None
+        cleaned += _seal_snapshots(snapshots)
         name = now().astimezone(UTC).strftime(STAMP_FORMAT)
         folder = snapshots / name
         try:

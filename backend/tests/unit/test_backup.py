@@ -43,6 +43,7 @@ from vault.storage.blobs import (
     BlobStore,
 )
 from vault.storage.blobs import _lstat as blobs_lstat
+from vault.storage.blobs import publish_new as publish_new_blob
 
 DOCUMENTS = {
     "syllabus.txt": b"Course syllabus\nWeek 1: introduction\nWeek 2: sources\n",
@@ -681,6 +682,144 @@ class TestAnInterruptedBackup:
         backup(vault, target)
         with backup_module._target_lock(target), pytest.raises(BackupError, match="still running"):
             backup(vault, target, now=clock(START + timedelta(hours=1)))
+
+
+class _Killed(BaseException):
+    """Stands for the process being killed: raised at a crash window, with ``_undo`` patched out so
+    nothing tidies up after it, as nothing would after a real kill."""
+
+
+SNAPSHOT_MODES = {
+    "vault.db": backup_module._sealed(0o444),
+    "config.toml": backup_module._sealed(0o444),
+    "local-token": backup_module._sealed(0o400),
+}
+
+
+def mode_of(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+class TestAKillAfterPublishing:
+    """Each file of a snapshot is linked to its final name, its temporary name is removed and only
+    then is it made read-only. A kill in either window leaves a published file that is writable;
+    the next run must give it its mode and remove a second name it left."""
+
+    def kill(self, vault: Path, target: Path, config_file: Path, name: str, window: str) -> Path:
+        real_publish = publish_new_blob
+        real_chmod = Path.chmod
+
+        def publish_new(temp: Path, final: Path) -> bool:
+            published = real_publish(temp, final)
+            if window == "linked" and final.name == name:
+                raise _Killed  # the temporary name is still a second name of the file
+            return published
+
+        def chmod(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+            if (
+                window == "published"
+                and self.name == name
+                and self.parent.parent.name == "snapshots"
+            ):
+                raise _Killed  # published, temporary name removed, not yet read-only
+            real_chmod(self, mode, follow_symlinks=follow_symlinks)
+
+        with (
+            mock.patch.object(backup_module, "publish_new", publish_new),
+            mock.patch.object(Path, "chmod", chmod),
+            mock.patch.object(backup_module, "_undo", return_value=None),
+            pytest.raises(_Killed),
+        ):
+            backup(vault, target, config_file=config_file)
+        (killed,) = (target / "snapshots").iterdir()
+        return killed
+
+    @pytest.mark.parametrize("window", ["linked", "published"])
+    @pytest.mark.parametrize("name", sorted(SNAPSHOT_MODES))
+    def test_the_next_run_seals_what_a_kill_left_writable(
+        self, vault: Path, target: Path, config_file: Path, name: str, window: str
+    ) -> None:
+        killed = self.kill(vault, target, config_file, name, window)
+        assert not is_read_only(killed / name)  # the state the finding describes
+        if window == "linked":
+            assert os.lstat(killed / name).st_nlink == 2  # the temporary name is kept
+        result = backup(
+            vault, target, config_file=config_file, now=clock(START + timedelta(hours=1))
+        )
+        assert result.cleaned == 1
+        assert result.problems == 0
+        assert mode_of(killed / name) == SNAPSHOT_MODES[name]
+        assert os.lstat(killed / name).st_nlink == 1
+        assert not (killed / (name + ".partial")).exists()
+        # vault.db is published last: a kill before it leaves a snapshot counted as incomplete.
+        assert result.incomplete == (0 if name == "vault.db" else 1)
+        for file in (killed / "vault.db", killed / "config.toml", killed / "local-token"):
+            if file.exists():
+                assert mode_of(file) == SNAPSHOT_MODES[file.name]
+
+    def test_every_mode_but_the_exact_one_is_repaired(
+        self, vault: Path, target: Path, config_file: Path
+    ) -> None:
+        first = backup(vault, target, config_file=config_file)
+        folder = target / "snapshots" / first.snapshot
+        (folder / "vault.db").chmod(0o446)  # writable by anyone, not by the owner
+        (folder / "config.toml").chmod(0o555)  # an execute bit
+        (folder / "local-token").chmod(0o440)  # readable by the group
+        result = backup(
+            vault, target, config_file=config_file, now=clock(START + timedelta(hours=1))
+        )
+        # Windows keeps only the read-only attribute, which each of these modes sets.
+        expected = 0 if acl.IS_WINDOWS else 3
+        assert result.cleaned == expected
+        for name, mode in SNAPSHOT_MODES.items():
+            assert mode_of(folder / name) == mode
+        again = backup(
+            vault, target, config_file=config_file, now=clock(START + timedelta(hours=2))
+        )
+        assert again.cleaned == 0
+
+    def test_a_snapshot_file_with_another_name_is_refused_and_left_alone(
+        self, vault: Path, target: Path, tmp_path: Path
+    ) -> None:
+        first = backup(vault, target)
+        database = target / "snapshots" / first.snapshot / "vault.db"
+        database.chmod(0o644)
+        outside = tmp_path / "outside-copy"
+        os.link(database, outside)
+        before = mode_of(outside)
+        with pytest.raises(BackupError, match="hard link"):
+            backup(vault, target, now=clock(START + timedelta(hours=1)))
+        assert mode_of(outside) == before
+
+    def test_a_link_where_a_snapshot_file_belongs_is_refused(
+        self, vault: Path, target: Path, tmp_path: Path
+    ) -> None:
+        first = backup(vault, target)
+        outside = tmp_path / "outside-file"
+        outside.write_text("not a backup")
+        outside.chmod(0o644)
+        token = target / "snapshots" / first.snapshot / "local-token"
+        token.chmod(0o600)
+        token.unlink()
+        link(outside, token)
+        before = mode_of(outside)
+        with pytest.raises(BackupError, match="snapshot's file"):
+            backup(vault, target, now=clock(START + timedelta(hours=1)))
+        assert mode_of(outside) == before
+
+    def test_a_linked_snapshot_folder_is_not_entered(
+        self, vault: Path, target: Path, tmp_path: Path
+    ) -> None:
+        backup(vault, target)
+        outside = tmp_path / "outside-folder"
+        outside.mkdir()
+        (outside / "vault.db").write_text("not a backup")
+        (outside / "vault.db").chmod(0o644)
+        link(outside, target / "snapshots" / "2026-01-01T000000Z")
+        before = mode_of(outside / "vault.db")
+        result = backup(vault, target, now=clock(START + timedelta(hours=1)))
+        assert result.cleaned == 0
+        assert mode_of(outside / "vault.db") == before
 
 
 class TestTheTargetIsChecked:
