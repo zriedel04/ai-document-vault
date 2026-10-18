@@ -38,7 +38,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Final
+from typing import BinaryIO, Final, Literal
+
+StrayKind = Literal["link", "hard_link", "duplicate", "other"]
 
 # Always use ``fullmatch`` with these (``$`` also matches before a trailing newline).
 SHA256: Final = re.compile(r"[0-9a-f]{64}")
@@ -569,6 +571,31 @@ class BlobStore:
                         # One hash under two names: none of them is known to be the real one.
                         strays.extend(entries)
         return Scan(tuple(blobs), tuple(strays))
+
+    def stray_kind(self, path: Path) -> StrayKind | None:
+        """What kind of damage an entry that ``scan`` reported is, looked at again now, or None if
+        it is gone or has since become a well-formed blob (an import that was publishing it while
+        the scan ran). For the integrity check, which reports kinds and counts, never names.
+
+        - ``link``: a symbolic link, junction or other reparse point, whatever it points at.
+        - ``hard_link``: a file named and placed like a blob that has another name as well.
+        - ``duplicate``: a real blob whose hash is also stored under another name.
+        - ``other``: anything else (a file out of place or misnamed, a folder that is not part
+          of the layout, a folder where a blob belongs).
+        """
+        status = _lstat(path)
+        if status is None:
+            return None
+        if _is_link(status):
+            return "link"
+        match = BLOB_NAME.fullmatch(path.name)
+        if not (match and _is_real_file(status) and path.parent == self.folder_for(match.group(1))):
+            return "other"
+        if _blob_status(path) is None:
+            return "hard_link"
+        if len(self._blobs_for(match.group(1))) > 1:
+            return "duplicate"
+        return None
 
     @staticmethod
     def _entries(folder: Path) -> list[Path]:

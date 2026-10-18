@@ -18,10 +18,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Connection, Engine, select
 
 from vault.db.schema import blobs
-from vault.storage.blobs import BlobError, BlobStore
+from vault.storage.blobs import BlobError, BlobStore, Scan
 
 
 @dataclass(frozen=True)
@@ -31,15 +31,24 @@ class OrphanSweep:
     strays: int  # entries that are not blobs, left alone and reported
 
 
+def recorded_hashes(connection: Connection) -> set[str]:
+    """The hash of every ``blobs`` row."""
+    return set(connection.execute(select(blobs.c.sha256)).scalars())
+
+
+def unrecorded(scan: Scan, recorded: set[str]) -> list[str]:
+    """The hashes of the scanned blobs that no row records, compared by hash (the key the store
+    and the table share), never by file name or extension. The integrity check uses it too."""
+    return [sha256 for sha256, _ in scan.blobs if sha256 not in recorded]
+
+
 def sweep_orphans(engine: Engine, store: BlobStore) -> OrphanSweep:
     """Move every blob that no ``blobs`` row names into ``blobs/orphans/``. Start-up only."""
     scan = store.scan()
     with engine.connect() as connection:
-        recorded: set[str] = set(connection.execute(select(blobs.c.sha256)).scalars())
+        recorded = recorded_hashes(connection)
     moved = failed = 0
-    for sha256, _ in scan.blobs:
-        if sha256 in recorded:
-            continue
+    for sha256 in unrecorded(scan, recorded):
         try:
             store.set_aside(sha256)
         except (OSError, BlobError):

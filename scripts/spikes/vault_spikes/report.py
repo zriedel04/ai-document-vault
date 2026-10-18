@@ -13,18 +13,20 @@ conclusion left for the owner's review.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import platform
 import re
+import sys
 import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from importlib import metadata
 from pathlib import Path
-from typing import Final, NamedTuple, cast
+from typing import Final, NamedTuple, TextIO, cast
 
 from vault_spikes.errors import OwnTypeError, OwnValueError
 
@@ -596,7 +598,9 @@ class Report:
         A measurement can cost an hour on the owner's PC, so an existing file is never
         overwritten silently: ``overwrite`` is for a file that is only derived from others (a
         merged report). The CLI calls :func:`require_free` before a run starts, so a name clash
-        is found before the hour is spent, not after."""
+        is found before the hour is spent, not after. Without ``overwrite`` each file is also
+        created exclusively (mode ``x``), so a report or a link that appears after that check is
+        neither replaced nor followed, and the first file is removed if the second is refused."""
         stem = self.spike if stem is None else stem
         if not overwrite:
             require_free(directory, stem)
@@ -605,9 +609,87 @@ class Report:
         directory.mkdir(parents=True, exist_ok=True)
         json_path = directory / f"{stem}.json"
         md_path = directory / f"{stem}.md"
-        json_path.write_text(json.dumps(self.to_json(), indent=2) + "\n", encoding="utf-8")
-        md_path.write_text(self.to_markdown(), encoding="utf-8")
+        contents = [
+            (json_path, json.dumps(self.to_json(), indent=2) + "\n"),
+            (md_path, self.to_markdown()),
+        ]
+        if overwrite:
+            for path, text in contents:
+                path.write_text(text, encoding="utf-8")
+            return json_path, md_path
+        # Each file stays open until both are written, so the cleanup can tell whether a name
+        # still holds the file this call made (see :func:`remove_own`).
+        opened: list[tuple[Path, TextIO]] = []
+        try:
+            for path, text in contents:
+                stream = path.open("x", encoding="utf-8")
+                opened.append((path, stream))
+                stream.write(text)
+                stream.flush()
+        except FileExistsError:
+            _remove(opened)
+            raise OwnValueError(_APPEARED_MESSAGE) from None
+        except BaseException:
+            _remove(opened)
+            raise
+        for _, written in opened:
+            written.close()
         return json_path, md_path
+
+
+_APPEARED_MESSAGE = (
+    "a report with this name appeared in the output folder during the run; it is not replaced"
+)
+
+
+def _remove(opened: list[tuple[Path, TextIO]]) -> None:
+    for path, stream in reversed(opened):
+        with contextlib.suppress(OSError, ValueError):
+            stream.flush()  # so that closing has nothing left to write
+        remove_own(path, stream.fileno(), stream.close)
+
+
+# Whether this process runs on Windows, where a file open here cannot be removed or renamed. It is
+# fixed at import and read from ``sys.platform``, so a test that switches another branch by
+# patching ``os.name`` cannot change how open files are handled.
+WINDOWS: Final = sys.platform == "win32"
+
+
+def same_file(path: Path, identity: os.stat_result) -> bool:
+    """Whether ``path`` itself (a link is not followed) is the file ``identity`` describes, by
+    device and file number."""
+    try:
+        now = path.lstat()
+    except OSError:
+        return False
+    return (now.st_dev, now.st_ino) == (identity.st_dev, identity.st_ino)
+
+
+def remove_own(path: Path, handle: int, close: Callable[[], object]) -> None:
+    """Remove ``path`` only if it still is the file open on ``handle`` (which this process
+    created), and close that file with ``close``, the one call that owns the descriptor, so it
+    is never closed twice (an error from it is ignored, as the file is being discarded). Another
+    process may have moved or removed the file and put its own at the name, or a link; that one
+    is left alone.
+
+    The comparison is made while ``handle`` is open, so the file number cannot have gone to a new
+    file (a removed file's number is reused at once on Linux). Elsewhere than Windows the name is
+    removed while the file is still open. Windows refuses to remove a file that is open here, so
+    it is closed first; while it was open no other process could move or remove it either, so the
+    name still held this file when it was compared."""
+    try:
+        own = same_file(path, os.fstat(handle))
+    except OSError:
+        own = False
+    if WINDOWS:
+        with contextlib.suppress(OSError, ValueError):
+            close()
+    if own:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    if not WINDOWS:
+        with contextlib.suppress(OSError, ValueError):
+            close()
 
 
 _STEM = re.compile(r"[a-z0-9][a-z0-9._-]{0,80}")

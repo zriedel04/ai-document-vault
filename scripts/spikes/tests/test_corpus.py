@@ -13,6 +13,7 @@ from unittest import mock
 from xml.sax.saxutils import escape
 
 from vault_spikes import corpus as c
+from vault_spikes import manifest as m
 from vault_spikes import retrieval as rv
 
 QUESTIONS = """
@@ -408,6 +409,64 @@ class ReadingTest(unittest.TestCase):
             {"path": "a/z.txt", "exact_duplicate_of": "a/y.txt"},
         )
         self.assertEqual(len(c.load_manifest(chain)), 3)
+
+    def test_the_manifest_refuses_a_duplicate_mark_across_readers(self) -> None:
+        # Equal bytes read another way are another document: the mark would drop the copy and
+        # score its questions against a file that gives other text, or none.
+        def manifest(*rows: Mapping[str, object]) -> Path:
+            documents = [{"kind": "text", "pages": None, "needs_ocr": False, **row} for row in rows]
+            return self.write_manifest_of({"documents": documents})
+
+        refused: dict[str, list[dict[str, object]]] = {
+            "text of a picture": [
+                {"path": "a/x.png", "needs_ocr": True},
+                {"path": "a/y.txt", "exact_duplicate_of": "a/x.png"},
+            ],
+            "text of a docx": [
+                {"path": "a/x.docx"},
+                {"path": "a/y.txt", "exact_duplicate_of": "a/x.docx"},
+            ],
+            "a scan of a text pdf": [
+                {"path": "a/x.pdf"},
+                {"path": "a/y.pdf", "needs_ocr": True, "exact_duplicate_of": "a/x.pdf"},
+            ],
+            "a png of a jpg": [
+                {"path": "a/x.jpg", "needs_ocr": True},
+                {"path": "a/y.png", "needs_ocr": True, "exact_duplicate_of": "a/x.jpg"},
+            ],
+        }
+        for name, rows in refused.items():
+            with self.subTest(name), self.assertRaises(c.SpikeInputError) as caught:
+                c.load_manifest(manifest(*rows))
+            self.assertNotIn("a/", str(caught.exception), "a path is not quoted")
+        accepted = manifest(
+            {"path": "a/x.txt"},
+            {"path": "a/y.MD", "exact_duplicate_of": "a/x.txt"},
+            {"path": "a/z.csv", "exact_duplicate_of": "a/y.MD"},
+            {"path": "a/p.jpg", "needs_ocr": True},
+            {"path": "a/q.jpeg", "needs_ocr": True, "exact_duplicate_of": "a/p.jpg"},
+            {"path": "a/r.tif", "needs_ocr": True},
+            {"path": "a/s.TIFF", "needs_ocr": True, "exact_duplicate_of": "a/r.tif"},
+        )
+        self.assertEqual(len(c.load_manifest(accepted)), 7)
+
+    def test_files_with_one_reader_give_the_same_pages_from_the_same_bytes(self) -> None:
+        # Ties reader_of to read_pages: every suffix make-manifest lists, and any two that
+        # reader_of puts together are read alike from equal bytes.
+        data = b"PK\x03\x04 the same bytes"
+        suffixes = [*m.KIND_BY_SUFFIX, m.PDF_SUFFIX]
+        pages: dict[tuple[str, bool], list[str] | None] = {}
+        for suffix in suffixes:
+            for needs_ocr in (False, True):
+                path = self.root / f"same{suffix}"
+                path.write_bytes(data)
+                doc = c.Document(path.name, "kind", None, needs_ocr, None)
+                pages[(suffix, needs_ocr)] = c.read_pages(path, doc, lambda p: [f"pdf {p.name}"])
+        for first, first_pages in pages.items():
+            for second, second_pages in pages.items():
+                if c.reader_of(f"x{first[0]}", first[1]) == c.reader_of(f"x{second[0]}", second[1]):
+                    with self.subTest(first=first, second=second):
+                        self.assertEqual(first_pages, second_pages)
 
     def test_a_listed_duplicate_that_is_missing_is_still_refused(self) -> None:
         (self.root / "a" / "copy.txt").unlink()
