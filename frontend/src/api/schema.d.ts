@@ -43,7 +43,17 @@ export interface paths {
         get: operations["read_document_api_documents__document_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Document
+         * @description Delete a document in the trash for good: its versions, imports, pages and jobs, and each
+         *     stored file that no other document uses. It cannot be undone. A document in use is refused
+         *     (409) and left as it is; it must be moved to the trash first. An unknown id is a 404, also when
+         *     the document was deleted by an earlier request.
+         *
+         *     The answer is 204 once the rows are gone, even if a file could not be removed now: the start-up
+         *     sweep moves such a file to ``blobs/orphans/`` (``vault.storage.purge``).
+         */
+        delete: operations["delete_document_api_documents__document_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -500,6 +510,49 @@ export interface operations {
             };
             /** @description No such document */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_document_api_documents__document_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such document */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The document is not in the trash */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
