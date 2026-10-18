@@ -184,6 +184,15 @@ def _decodes_as_text(data: bytes, encoding: str, *, complete: bool) -> bool:
         text = codecs.getincrementaldecoder(encoding)("strict").decode(data, final=complete)
     except UnicodeDecodeError:
         return False
+    return reads_as_text(text)
+
+
+def reads_as_text(text: str) -> bool:
+    """Is decoded ``text`` free of NUL and of more than a few control characters?
+
+    The rule for every text the vault accepts: the head checked here at import and the whole file
+    decoded by the text extractor (``vault.ingest.extractors.text``) both use it.
+    """
     if "\x00" in text:
         return False
     controls = sum(1 for char in text if ord(char) in BINARY_BYTES)
