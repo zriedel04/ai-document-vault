@@ -10,7 +10,7 @@ Pre-alpha. There is nothing to use day to day yet. The plan has phases 0 to 11 p
 
 **Phase 0, foundations and spikes: nearly done** ([milestone](https://github.com/zriedel04/ai-document-vault/milestone/1)). Built:
 
-- the backend skeleton ([`backend/`](backend/README.md)): FastAPI, settings, deny-by-default logging, SQLite with Alembic migrations, and Host, Origin and token checks on every request;
+- the backend skeleton ([`backend/`](backend/README.md)): FastAPI, settings, deny-by-default logging, SQLite with Alembic migrations, and request checks (`LocalSecurityMiddleware`). The `Host` header is checked on every HTTP request, and `Origin` on every request that can change something (any method but GET, HEAD and OPTIONS). The token is required on every `/api` path except `GET /api/health`; the static files of the UI need no token;
 - the frontend shell ([`frontend/`](frontend/README.md)): navigation, light and dark mode, a typed API client generated from the backend's OpenAPI schema;
 - the Windows launcher [`vault.ps1`](docs/launcher.md) and CI on Linux and Windows;
 - a synthetic demo corpus (44 fictional documents) and a 60-question public evaluation set;
@@ -32,10 +32,11 @@ One Python process owns everything: the HTTP API, the background workers, the da
 
 ```
 Browser (React)  --HTTP/JSON-->  vault-server (FastAPI, 127.0.0.1:8765)
-                                   |-- API: Host, Origin and token checks
+                                   |-- Host check on every request, Origin on writes,
+                                   |   token on /api (except GET /api/health)
                                    |-- job queue + worker pool (same process)
                                    v
-                                 vault folder (outside the repository)
+                                 vault folder (outside every Git repository)
                                    blobs/     originals, content-addressed, read-only
                                    vault.db   SQLite: documents, versions, jobs
                                    index.db   SQLite + sqlite-vec (planned, Phase 4)
@@ -62,7 +63,7 @@ The app manages personal documents, so privacy is designed in rather than added 
 
 - **Logging is deny by default.** A value reaches the log only if the code marks it as safe (an id the app generated, a count it computed); every other string and number is written as `[redacted]`, including one parsed from a document. Third-party log messages are omitted apart from the server's start-up and error lines, and exceptions are logged by type, never by message ([`backend/src/vault/core/logging.py`](backend/src/vault/core/logging.py)).
 - **The API token never travels in a cookie or a URL the server sees** ([ADR 0016](docs/decisions/0016-local-api-token-delivery.md)). The launcher opens the browser with the token in the address fragment, which is never sent to a server; the page moves it into `sessionStorage`, removes it from the address bar and sends it only as a bearer header to its own origin. A cookie was tried first and dropped, because cookies are scoped by host and not by port, so another local program on `localhost` would have received it. The ADR also records the exposure that remains: while the browser starts, the token is on its command line.
-- **The vault folder is private and outside the repository.** The server refuses a vault folder inside a Git working tree, and on Windows it sets and then verifies an access list that admits only the current user.
+- **The vault folder is outside every Git repository, and on Windows only you, the system and administrators can open it.** The server refuses to start with a vault folder inside any Git working tree or repository. On Windows it sets an access list on the vault folder and checks it, and the files below it, before going on. Access may be granted only to the current user, SYSTEM, the Builtin Administrators group and the Creator/Owner placeholders. An administrator account on the PC can therefore read the vault: an administrator can take ownership of any folder anyway, so leaving the group out would protect nothing. Any other account or group is refused.
 - **A repository safety check** ([`scripts/check_repo_safety.py`](scripts/check_repo_safety.py)) blocks databases, documents, images, archives, keys, model files, local configuration and oversized files by name, and databases, documents, images and archives also by their content signature, whatever the file is called (the synthetic fixture folders may hold documents, images and archives). It checks staged files, every tracked file and the whole Git history, in pre-commit and in CI, beside gitleaks.
 - **Test data is synthetic only.** Tests, CI and the demo use the generated corpus in [`demo/corpus/`](demo/generate/README.md) and the public questions in [`eval/public/`](eval/README.md). Private questions stay in the vault folder.
 
@@ -92,7 +93,7 @@ The extension loaded, and its exact search gave the same ranked ten neighbours a
 
 ## Quick start
 
-You need Windows, [uv](https://docs.astral.sh/uv/) and Node.js 22.13 or newer on an even-numbered line (22.13+, 24 or 26+, the range `frontend/package.json` requires). The backend runs on Python 3.12 only (`backend/pyproject.toml`); uv installs it if it is missing. Copy `config.example.toml` to `backend\config.toml`, set `vault.path` to a folder outside this repository, then run `.\vault.ps1 install` and `.\vault.ps1 run`. The launcher builds the app, starts the server and opens the browser; `.\vault.ps1 stop` stops it and `.\vault.ps1 dev` runs the development servers. Details: [docs/launcher.md](docs/launcher.md).
+You need Windows, [uv](https://docs.astral.sh/uv/) and Node.js 22.13 or newer on an even-numbered line (22.13+, 24 or 26+, the range `frontend/package.json` requires). The backend runs on Python 3.12 only (`backend/pyproject.toml`); uv installs it if it is missing. Copy `config.example.toml` to `backend\config.toml`, set `vault.path` to an absolute folder outside every Git repository (the server refuses to start otherwise), then run `.\vault.ps1 install` and `.\vault.ps1 run`. The launcher builds the app, starts the server and opens the browser; `.\vault.ps1 stop` stops it and `.\vault.ps1 dev` runs the development servers. Details: [docs/launcher.md](docs/launcher.md).
 
 ## Repository layout
 
