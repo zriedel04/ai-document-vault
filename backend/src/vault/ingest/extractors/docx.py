@@ -28,13 +28,26 @@ What the text holds:
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
   a box twice (a DrawingML shape and a VML copy for old readers, in ``mc:AlternateContent``), so
   only the first ``mc:Choice`` is read and the ``mc:Fallback`` copy is not.
-- Field results are kept and field codes are not (``PAGE``, ``HYPERLINK "..."``); hyperlink text is
-  kept.
+- Inside a paragraph, every element is read through unless ``EXCLUDED`` names it, so text inside a
+  container is kept whatever the container: hyperlinks, smart tags, custom XML, inline content
+  controls, simple fields, insertions and moves (``w:ins``, ``w:moveTo``), text direction
+  (``w:dir``, ``w:bdo``), the base text of ruby (``w:rubyBase``), and any wrapper not listed here.
+  Text comes from ``w:t``; tabs (``w:tab``, ``w:ptab``) become a tab, breaks (``w:br``, ``w:cr``) a
+  line break, a non-breaking hyphen a hyphen, and a soft hyphen nothing.
+- Field results are kept and field codes are not (``w:instrText``, and everything between a
+  complex field's ``begin`` and ``separate``, a field nested in the code included).
+- Ruby's pronunciation guide (``w:rt``, the small kana over Japanese text) is left out, so the base
+  text reads as written.
+- A symbol (``w:sym``) is left out: it names a glyph in a symbol font (Wingdings, Symbol), usually a
+  private-use code point, not a character.
 - Hidden text (``w:vanish`` set on the run) is left out. Text hidden through a style is not
   detected and is kept.
 - Left out: headers and footers (letterhead and page numbers repeated on every page), footnotes,
-  endnotes and comments (separate parts, not the body), equations (Office Math has no ``w:t``) and
-  the document's properties (title, author, dates: the metadata stage reads those later).
+  endnotes and comments (separate parts, not the body), equations (``m:oMath``: their linear text
+  would lose the structure that gives it meaning), content control properties, and the document's
+  properties (title, author, dates: the metadata stage reads those later). Runs placed directly in
+  the body or a cell, outside any paragraph (allowed by the schema for tracked changes, not written
+  by Word), are not read.
 
 Headings are paragraphs in the body (not in a table or a text box) whose paragraph style is one of
 the built-in ``Heading 1`` to ``Heading 9`` (levels 1 to 9) or ``Title`` (level 1), matched by the
@@ -75,19 +88,45 @@ CELL_SEPARATOR: Final = "\t"
 ROW_SEPARATOR: Final = "\n"
 
 _MC: Final = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+_M: Final = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 _DOCUMENT, _BODY = qn("w:document"), qn("w:body")
 _P, _TBL, _TR, _TC, _R = qn("w:p"), qn("w:tbl"), qn("w:tr"), qn("w:tc"), qn("w:r")
 _SDT, _SDT_CONTENT, _CUSTOM_XML = qn("w:sdt"), qn("w:sdtContent"), qn("w:customXml")
-_DEL, _MOVE_FROM = qn("w:del"), qn("w:moveFrom")
-_T, _TAB, _PTAB, _BR, _CR = qn("w:t"), qn("w:tab"), qn("w:ptab"), qn("w:br"), qn("w:cr")
-_NO_BREAK_HYPHEN, _TXBX_CONTENT = qn("w:noBreakHyphen"), qn("w:txbxContent")
+_DEL, _T, _TXBX_CONTENT = qn("w:del"), qn("w:t"), qn("w:txbxContent")
+_FLD_CHAR, _FLD_CHAR_TYPE = qn("w:fldChar"), qn("w:fldCharType")
 _RPR, _VANISH, _VAL = qn("w:rPr"), qn("w:vanish"), qn("w:val")
 _PPR, _PSTYLE, _TRPR = qn("w:pPr"), qn("w:pStyle"), qn("w:trPr")
 _STYLE, _STYLE_ID, _NAME, _TYPE = qn("w:style"), qn("w:styleId"), qn("w:name"), qn("w:type")
 _ALTERNATE, _CHOICE = f"{_MC}AlternateContent", f"{_MC}Choice"
-# Inline content whose text is not part of the document as accepted: deleted and moved-out runs.
-_NOT_TEXT: Final = frozenset({_DEL, _MOVE_FROM})
-_RUN_TEXT: Final = {_T: None, _TAB: "\t", _PTAB: "\t", _BR: "\n", _CR: "\n", _NO_BREAK_HYPHEN: "-"}
+# Inside a paragraph every element is read through unless it is named here, so text in a container
+# this module does not list (``w:smartTag``, ``w:hyperlink``, the base of ``w:ruby``, a wrapper a
+# later Word adds) is kept rather than lost. Each of these is left out on purpose (see the module
+# docstring).
+EXCLUDED: Final = frozenset(
+    {
+        _PPR,  # paragraph properties
+        _RPR,  # run properties
+        _DEL,  # tracked deletion
+        qn("w:moveFrom"),  # tracked move, the old place
+        qn("w:delText"),  # deleted text
+        qn("w:delInstrText"),  # deleted field code
+        qn("w:instrText"),  # field code
+        qn("w:rt"),  # ruby pronunciation guide
+        qn("w:sdtPr"),  # content control properties
+        qn("w:sdtEndPr"),  # content control end properties
+        qn("w:sym"),  # a glyph from a symbol font
+        f"{_M}oMath",  # equation
+        f"{_M}oMathPara",  # equation paragraph
+    }
+)
+# Run content that stands for a character.
+CHARACTERS: Final = {
+    qn("w:tab"): "\t",
+    qn("w:ptab"): "\t",
+    qn("w:br"): "\n",
+    qn("w:cr"): "\n",
+    qn("w:noBreakHyphen"): "-",
+}
 _OFF: Final = frozenset({"0", "false", "off"})
 _HEADING_LEVELS: Final = {"title": 1, **{f"heading {n}": n for n in range(1, 10)}}
 _LINE_BREAK: Final = re.compile(r"\r\n?")
@@ -196,10 +235,11 @@ def _segments(
         if block.tag == _TBL:
             yield _table_text(block, levels), None
             continue
-        boxes: list[BaseOxmlElement] = []
-        text = _LINE_BREAK.sub("\n", "".join(_inline_text(block, boxes)))
+        inline = _Inline()
+        inline.walk(block)
+        text = _LINE_BREAK.sub("\n", "".join(inline.parts))
         yield text, _heading_level(block, levels) if top else None
-        for box in boxes:
+        for box in inline.boxes:
             yield from _segments(box, levels, top=False)
 
 
@@ -234,47 +274,59 @@ def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
     return ROW_SEPARATOR.join(rows)
 
 
-def _inline_text(element: BaseOxmlElement, boxes: list[BaseOxmlElement]) -> Iterator[str]:
-    """The text of the runs under ``element`` as accepted; text boxes found are added to ``boxes``.
-    Recursion is bounded: libxml2 refuses a document nested deeper than 256 elements."""
-    for child in element.iterchildren():
-        tag = child.tag
-        if tag == _R:
-            yield from _run_text(child, boxes)
-        elif tag == _ALTERNATE:
-            choice = child.find(_CHOICE)
-            if choice is not None:
-                yield from _inline_text(choice, boxes)
-        elif tag not in _NOT_TEXT and tag != _PPR:
-            yield from _inline_text(child, boxes)  # insertions, hyperlinks, fields, controls
+class _Inline:
+    """The text of one paragraph as accepted and shown, and the text boxes it anchors.
+
+    A complex field's code runs from ``begin`` to ``separate`` and its result, the part shown, from
+    ``separate`` to ``end``; text is kept only outside every open field's code, so a field nested in
+    another field's code is left out too. The field state is kept per paragraph. Recursion is
+    bounded: libxml2 refuses a document nested deeper than 256 elements.
+    """
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+        self.boxes: list[BaseOxmlElement] = []
+        self._fields: list[bool] = []  # one per open field: True while in its code
+
+    def walk(self, element: BaseOxmlElement) -> None:
+        for child in element.iterchildren():
+            tag = child.tag
+            if tag in EXCLUDED:
+                continue
+            if tag == _T:
+                self._add(child.text or "")
+            elif tag in CHARACTERS:
+                self._add(CHARACTERS[tag])
+            elif tag == _FLD_CHAR:
+                self._field(child.get(_FLD_CHAR_TYPE))
+            elif tag == _TXBX_CONTENT:
+                self.boxes.append(child)
+            elif tag == _ALTERNATE:
+                # Word writes some content twice (a text box as DrawingML and again as VML for old
+                # readers): the first choice is read and the fallback never is.
+                choice = child.find(_CHOICE)
+                if choice is not None:
+                    self.walk(choice)
+            elif tag != _R or not _hidden(child):
+                self.walk(child)
+
+    def _add(self, text: str) -> None:
+        if not any(self._fields):
+            self.parts.append(text)
+
+    def _field(self, kind: str | None) -> None:
+        if kind == "begin":
+            self._fields.append(True)
+        elif kind == "separate" and self._fields:
+            self._fields[-1] = False
+        elif kind == "end" and self._fields:
+            self._fields.pop()
 
 
-def _run_text(run: BaseOxmlElement, boxes: list[BaseOxmlElement]) -> Iterator[str]:
+def _hidden(run: BaseOxmlElement) -> bool:
     properties = run.find(_RPR)
-    if properties is not None:
-        vanish = properties.find(_VANISH)
-        if vanish is not None and (vanish.get(_VAL) or "true").lower() not in _OFF:
-            return
-    for child in run.iterchildren():
-        if child.tag in _RUN_TEXT:
-            yield _RUN_TEXT[child.tag] or child.text or ""
-        elif child.tag != _RPR:
-            boxes.extend(_text_boxes(child))
-
-
-def _text_boxes(element: BaseOxmlElement) -> Iterator[BaseOxmlElement]:
-    """The outermost text box contents under ``element`` (a drawing, a VML picture or an alternate
-    block), reading only the first choice of an alternate block."""
-    if element.tag == _TXBX_CONTENT:
-        yield element
-        return
-    if element.tag == _ALTERNATE:
-        choice = element.find(_CHOICE)
-        if choice is not None:
-            yield from _text_boxes(choice)
-        return
-    for child in element.iterchildren():
-        yield from _text_boxes(child)
+    vanish = properties.find(_VANISH) if properties is not None else None
+    return vanish is not None and (vanish.get(_VAL) or "true").lower() not in _OFF
 
 
 def _heading_level(paragraph: BaseOxmlElement, levels: dict[str, int]) -> int | None:

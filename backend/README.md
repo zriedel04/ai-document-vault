@@ -92,7 +92,10 @@ What the text holds:
 - A table is one block: one line per row, cells separated by a tab. Inside a cell, paragraphs, breaks and tabs become spaces, and a nested table is flattened into its cell. A merged cell appears once, and rows whose cells are all empty are left out.
 - Tracked changes as if accepted: insertions and moved-in text kept, deletions, moved-out text and deleted table rows left out.
 - Text boxes kept, after the paragraph that anchors them, read once (Word writes each box twice, as DrawingML and as a VML copy for old readers; only the first `mc:Choice` is read).
-- Field results and hyperlink text kept, field codes left out.
+- Inside a paragraph every element is read through unless the extractor's `EXCLUDED` set names it, so text in any container is kept: hyperlinks, smart tags, custom XML, inline content controls, simple fields, insertions and moves, text direction, the base text of ruby, and any wrapper the extractor does not know. A test runs every pair of containers nested in each other, and one per excluded element, tied to the set.
+- Field results kept; field codes (`w:instrText`, and everything between a complex field's `begin` and `separate`, nested fields included) left out.
+- Ruby's pronunciation guide (`w:rt`) left out, so Japanese text reads as written. Symbols (`w:sym`, a glyph in a symbol font) left out.
+- Runs placed directly in the body or a cell, outside a paragraph (the schema allows it for tracked changes; Word does not write it), are not read.
 - Hidden text (`w:vanish` on the run) left out. Text hidden through a style is not detected and is kept.
 - Left out: headers and footers (repeated letterhead and page numbers), footnotes, endnotes, comments, equations, and the document's properties. Title, author and dates are the metadata stage's (plan section 7, step 9), which reads them later.
 

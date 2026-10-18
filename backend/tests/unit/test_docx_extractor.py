@@ -21,6 +21,8 @@ from vault.ingest.extractors import Extraction, ExtractionError
 from vault.ingest.extractors import docx as extractor
 from vault.ingest.extractors.docx import (
     CELL_SEPARATOR,
+    CHARACTERS,
+    EXCLUDED,
     PARAGRAPH_BREAK,
     VERSION,
     NotDocxError,
@@ -36,6 +38,8 @@ W = nsdecls("w")
 MC = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
 WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
 VML = 'xmlns:v="urn:schemas-microsoft-com:vml"'
+MATH = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
+FUTURE = 'xmlns:x="urn:example:future-wrapper"'
 
 
 def build(fill: Callable[[DocumentObject], object] | None = None) -> bytes:
@@ -496,6 +500,217 @@ def test_alternate_content_in_a_paragraph_is_read_from_the_first_choice_only() -
         )
 
     assert text_of(build(fill)) == "new form"
+
+
+# Every container of run text, decided one by one
+
+
+def run(text: str) -> str:
+    return f"<w:r><w:t>{text}</w:t></w:r>"
+
+
+def ruby(base: str, guide: str) -> str:
+    return (
+        f'<w:r><w:ruby><w:rubyPr><w:rubyAlign w:val="center"/></w:rubyPr>'
+        f"<w:rt><w:r><w:t>{guide}</w:t></w:r></w:rt>"
+        f"<w:rubyBase><w:r><w:t>{base}</w:t></w:r></w:rubyBase></w:ruby></w:r>"
+    )
+
+
+# (what it is, the paragraph's content, the text it must give). CANARY marks text left out on
+# purpose; every other word must come through.
+INCLUDED_CONTAINERS = [
+    ("ruby base", ruby("\u6f22\u5b57", f"{CANARY}-kana"), "\u6f22\u5b57"),
+    ("hyperlink", f"<w:hyperlink>{run('linked')}</w:hyperlink>", "linked"),
+    (
+        "smart tag",
+        f'<w:smartTag w:uri="urn:x" w:element="place">{run("Tempe")}</w:smartTag>',
+        "Tempe",
+    ),
+    ("inline custom XML", f'<w:customXml w:element="x">{run("tagged")}</w:customXml>', "tagged"),
+    (
+        "inline content control",
+        f'<w:sdt><w:sdtPr><w:alias w:val="{CANARY}"/></w:sdtPr><w:sdtContent>{run("ctrl")}'
+        "</w:sdtContent></w:sdt>",
+        "ctrl",
+    ),
+    ("simple field", f'<w:fldSimple w:instr=" PAGE {CANARY} ">{run("7")}</w:fldSimple>', "7"),
+    ("insertion", f'<w:ins w:id="1" w:author="A">{run("added")}</w:ins>', "added"),
+    ("move, new place", f'<w:moveTo w:id="2" w:author="A">{run("moved")}</w:moveTo>', "moved"),
+    ("text direction", f'<w:dir w:val="rtl">{run("rtl")}</w:dir>', "rtl"),
+    ("bidirectional override", f'<w:bdo w:val="ltr">{run("ltr")}</w:bdo>', "ltr"),
+    (
+        "alternate content in a paragraph",
+        f'<mc:AlternateContent><mc:Choice Requires="w14">{run("choice")}</mc:Choice>'
+        f"<mc:Fallback>{run(CANARY)}</mc:Fallback></mc:AlternateContent>",
+        "choice",
+    ),
+    (
+        "alternate content in a run",
+        f'<w:r><mc:AlternateContent><mc:Choice Requires="w14"><w:t>in run</w:t></mc:Choice>'
+        f"<mc:Fallback><w:t>{CANARY}</w:t></mc:Fallback></mc:AlternateContent></w:r>",
+        "in run",
+    ),
+    ("a wrapper this module does not know", f"<x:later>{run('kept')}</x:later>", "kept"),
+    (
+        "characters",
+        '<w:r><w:t>a</w:t><w:tab/><w:t>b</w:t><w:ptab w:relativeTo="margin" w:alignment="right"'
+        ' w:leader="none"/><w:t>c</w:t><w:br/><w:t>d</w:t><w:cr/><w:t>e</w:t><w:noBreakHyphen/>'
+        "<w:t>f</w:t><w:softHyphen/><w:t>g</w:t></w:r>",
+        "a\tb\tc\nd\ne-fg",
+    ),
+    (
+        "markers with no text",
+        '<w:bookmarkStart w:id="0" w:name="m"/><w:proofErr w:type="spellStart"/>'
+        f'{run("marked")}<w:commentRangeStart w:id="5"/><w:bookmarkEnd w:id="0"/>'
+        '<w:r><w:footnoteReference w:id="1"/><w:lastRenderedPageBreak/></w:r>',
+        "marked",
+    ),
+]
+EXCLUDED_CONTAINERS = [
+    ("tracked deletion", f'<w:del w:id="3" w:author="A">{run(CANARY)}</w:del>', "w:del"),
+    ("deleted text", f"<w:r><w:delText>{CANARY}</w:delText></w:r>", "w:delText"),
+    (
+        "move, old place",
+        f'<w:moveFrom w:id="4" w:author="A">{run(CANARY)}</w:moveFrom>',
+        "w:moveFrom",
+    ),
+    ("field code", f"<w:r><w:instrText>{CANARY}</w:instrText></w:r>", "w:instrText"),
+    (
+        "deleted field code",
+        f"<w:r><w:delInstrText>{CANARY}</w:delInstrText></w:r>",
+        "w:delInstrText",
+    ),
+    ("ruby guide", ruby("", CANARY), "w:rt"),
+    (
+        "content control properties",
+        f"<w:sdt><w:sdtPr>{run(CANARY)}</w:sdtPr><w:sdtEndPr>{run(CANARY)}</w:sdtEndPr>"
+        "<w:sdtContent/></w:sdt>",
+        "w:sdtPr w:sdtEndPr",
+    ),
+    ("symbol", '<w:r><w:sym w:font="Wingdings" w:char="F0E0"/></w:r>', "w:sym"),
+    (
+        "equation",
+        f"<m:oMathPara><m:oMath><m:r><m:t>x</m:t></m:r>{run(CANARY)}</m:oMath></m:oMathPara>",
+        "m:oMathPara m:oMath",
+    ),
+    ("properties", f"<w:pPr><w:rPr>{run(CANARY)}</w:rPr></w:pPr>", "w:pPr w:rPr"),
+]
+
+
+def paragraph(content: str) -> str:
+    return f"<w:p {W} {MC} {MATH} {FUTURE}>{content}</w:p>"
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [pytest.param(content, expected, id=name) for name, content, expected in INCLUDED_CONTAINERS],
+)
+def test_text_inside_each_container_is_kept(content: str, expected: str) -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, paragraph(f"{run('[')}{content}{run(']')}"))
+
+    assert text_of(build(fill)) == f"[{expected}]"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [pytest.param(content, id=name) for name, content, _ in EXCLUDED_CONTAINERS],
+)
+def test_text_inside_each_excluded_element_is_left_out(content: str) -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, paragraph(f"{run('[')}{content}{run(']')}"))
+
+    assert text_of(build(fill)) == "[]"
+
+
+def test_every_excluded_element_has_a_test() -> None:
+    prefixes = {
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    }
+    tested = {
+        "{%s}%s" % (prefixes[name.split(":")[0]], name.split(":")[1])  # noqa: UP031
+        for _, _, names in EXCLUDED_CONTAINERS
+        for name in names.split()
+    }
+    assert tested == set(EXCLUDED)
+    # The "characters" case above writes each of these.
+    assert {tag.split("}")[1] for tag in CHARACTERS} == {"tab", "ptab", "br", "cr", "noBreakHyphen"}
+
+
+def test_included_containers_nested_in_each_other_still_give_their_text() -> None:
+    # Every pair of containers, one inside the other: no combination may lose the text.
+    wrappers = [
+        ("<w:hyperlink>", "</w:hyperlink>"),
+        ('<w:smartTag w:element="x">', "</w:smartTag>"),
+        ('<w:customXml w:element="x">', "</w:customXml>"),
+        ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+        ('<w:fldSimple w:instr=" X ">', "</w:fldSimple>"),
+        ('<w:ins w:id="1" w:author="A">', "</w:ins>"),
+        ('<w:moveTo w:id="2" w:author="A">', "</w:moveTo>"),
+        ('<w:dir w:val="rtl">', "</w:dir>"),
+        ('<w:bdo w:val="ltr">', "</w:bdo>"),
+        ('<mc:AlternateContent><mc:Choice Requires="w14">', "</mc:Choice></mc:AlternateContent>"),
+        ("<x:later>", "</x:later>"),
+    ]
+    pairs = [(outer, inner) for outer in wrappers for inner in wrappers]
+
+    def fill(document: DocumentObject) -> None:
+        for number, ((open_a, close_a), (open_b, close_b)) in enumerate(pairs):
+            add_xml(document, paragraph(f"{open_a}{open_b}{run(f'w{number}')}{close_b}{close_a}"))
+
+    text = text_of(build(fill))
+
+    assert text.split(PARAGRAPH_BREAK) == [f"w{number}" for number in range(len(pairs))]
+
+
+def test_a_field_nested_in_another_fields_code_is_left_out() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            paragraph(
+                '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                '<w:r><w:instrText xml:space="preserve"> IF </w:instrText></w:r>'
+                '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                "<w:r><w:instrText> DATE </w:instrText></w:r>"
+                '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                f"{run(CANARY)}"
+                '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+                '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                f"{run('shown')}"
+                '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+                f"{run(' after')}"
+            ),
+        )
+
+    assert text_of(build(fill)) == "shown after"
+
+
+def test_a_field_left_open_ends_with_its_paragraph() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, paragraph(f'<w:r><w:fldChar w:fldCharType="begin"/></w:r>{run(CANARY)}'))
+        add_xml(document, paragraph(f'<w:r><w:fldChar w:fldCharType="end"/></w:r>{run("next")}'))
+
+    assert text_of(build(fill)) == "next"
+
+
+def test_japanese_text_with_ruby_reads_as_written() -> None:
+    # A heading with furigana over each kanji: the heading's title is the base text alone.
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f'<w:p {W}><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+            + ruby("\u65e5\u672c", "\u306b\u307b\u3093")
+            + run("\u306e")
+            + ruby("\u6b74\u53f2", "\u308c\u304d\u3057")
+            + "</w:p>",
+        )
+
+    page = extract(build(fill)).pages[0]
+
+    assert page.text == "\u65e5\u672c\u306e\u6b74\u53f2"
+    assert [(h.level, h.title) for h in page.headings] == [(1, page.text)]
 
 
 # Text boxes
