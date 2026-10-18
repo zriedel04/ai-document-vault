@@ -458,6 +458,77 @@ Assert-That 'check fails when the backend cannot run' (($null -ne $message) -and
 Assert-That 'and still returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
 Remove-Item -LiteralPath $checkDir -Recurse -Force -ErrorAction SilentlyContinue
 
+# --- backup: the folder reaches the backend in the environment, never on its command line ------
+$message = Get-ThrownMessage { Invoke-Backup '' }
+Assert-That 'backup without a folder says how to name one' (($null -ne $message) -and ($message -match '-To'))
+# A stand-in for the backend's Python, run in this process: it records its arguments, the folder
+# it was handed and where it ran, prints a line and sets the exit code asked for. No batch file
+# or file read is involved, so nothing here can end the test run early. That the real
+# interpreter's exit code reaches the launcher is the CI job's end-to-end step. The tests above
+# leave BackendDir pointing into the removed work folder, so backup gets a folder of its own.
+$backupDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vault-backup-tests-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $backupDir
+$script:BackendDir = $backupDir
+$script:backupArguments = $null
+$script:backupTarget = $null
+$script:backupFolder = $null
+$script:backupCode = 0
+$backupStandIn = {
+    $script:backupArguments = $args -join ' '
+    $script:backupTarget = [Environment]::GetEnvironmentVariable('VAULT_BACKUP_TO', 'Process')
+    $script:backupFolder = (Get-Location).Path
+    Write-Output 'line from the stand-in'
+    $global:LASTEXITCODE = $script:backupCode
+}
+function Invoke-BackupLines {
+    <# Run backup with the stand-in and return its printed lines, or $null if it threw (the
+       message is shown), so a failure is a failed check and not the end of the run. #>
+    param([string]$Target)
+    try {
+        return , @(Invoke-Backup $Target -Python $backupStandIn 6>&1 | ForEach-Object { [string]$_ })
+    }
+    catch {
+        Write-Host "     (backup said: $($_.Exception.Message))"
+        return $null
+    }
+}
+try {
+    $relativeBase = Join-Path $backupDir 'here'
+    $null = New-Item -ItemType Directory -Path $relativeBase
+    Push-Location -LiteralPath $relativeBase
+    try {
+        $lines = Invoke-BackupLines 'my backups'
+    }
+    finally {
+        Pop-Location
+    }
+    Assert-That 'backup passes when the backend succeeds' ($null -ne $lines)
+    Assert-That 'a relative backup folder is taken from the current location' `
+        ($script:backupTarget -ceq (Join-Path $relativeBase 'my backups'))
+    Assert-That 'the folder is not on the backend command line' ($script:backupArguments -ceq '-m vault.backup')
+    Assert-That 'backup runs in the backend folder' ($script:backupFolder -eq $backupDir)
+    Assert-That "the backend's lines are passed on" (($null -ne $lines) -and ($lines -contains 'line from the stand-in'))
+    $startedIn = (Get-Location).Path
+    $spaced = Join-Path $backupDir 'My Backups'
+    $lines = Invoke-BackupLines ($spaced + '\')
+    $shape = '\A' + [regex]::Escape($spaced) + '\\?\z'
+    Assert-That 'a folder with a space and a trailing backslash arrives intact' `
+        (($script:backupTarget -is [string]) -and ($script:backupTarget -match $shape))
+    Assert-That 'the folder is taken out of the environment afterwards' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_BACKUP_TO', 'Process'))
+    Assert-That 'backup returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+    $script:backupCode = 1
+    $message = Get-ThrownMessage { Invoke-Backup (Join-Path $backupDir 'VaultBackups') -Python $backupStandIn 6>&1 }
+    Assert-That 'a backup that fails stops with its exit code' (($null -ne $message) -and ($message -match 'exit code 1'))
+    Assert-That 'and does not repeat the folder' (($null -ne $message) -and (-not $message.Contains('VaultBackups')))
+    Assert-That 'and takes the folder out of the environment too' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_BACKUP_TO', 'Process'))
+    Assert-That 'and still returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+}
+finally {
+    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- how the script is called ------------------------------------------------------------------
 $shell = (Get-Process -Id $PID).Path
 $null = & $shell -NoProfile -File $launcher
@@ -469,6 +540,11 @@ $null = & $shell -NoProfile -File $launcher 'bogus' 2>&1
 $bogusExit = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 Assert-That 'an unknown command is refused' ($bogusExit -ne 0)
+$ErrorActionPreference = 'Continue'
+$null = & $shell -NoProfile -File $launcher 'backup' 2>&1
+$backupExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Assert-That 'backup without -To is refused' ($backupExit -eq 1)
 
 # --- the token is never printed -----------------------------------------------------------------
 $printing = Select-String -LiteralPath $launcher -Pattern '^\s*(Write-Host|Write-Output|Write-Warning|Write-Verbose|Write-Information|\[Console\])' |

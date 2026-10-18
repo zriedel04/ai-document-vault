@@ -136,14 +136,17 @@ class Settings(BaseSettings):
         return (env_settings, init_settings)
 
 
+def resolve_config_file(config_file: Path | None = None) -> tuple[Path, bool]:
+    """The file :func:`load_settings` reads, and whether it was named (then it must exist):
+    ``config_file``, ``$AIVAULT_CONFIG`` or ``./config.toml``. The backup copies the same file."""
+    if config_file is None and (from_env := os.environ.get(CONFIG_ENV_VAR)):
+        return Path(from_env), True
+    return config_file or Path(DEFAULT_CONFIG_FILE), config_file is not None
+
+
 def load_settings(config_file: Path | None = None) -> Settings:
     """Load settings from ``config_file``, ``$AIVAULT_CONFIG`` or ``./config.toml`` if present."""
-    if config_file is None and (from_env := os.environ.get(CONFIG_ENV_VAR)):
-        config_file = Path(from_env)
-        explicit = True
-    else:
-        explicit = config_file is not None
-        config_file = config_file or Path(DEFAULT_CONFIG_FILE)
+    config_file, explicit = resolve_config_file(config_file)
 
     data: dict[str, object] = {}
     if config_file.is_file():
