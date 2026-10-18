@@ -45,9 +45,14 @@ the child caps its own address space with
 ``RLIMIT_AS`` before it reads the input, and asks the kernel to kill it when the parent dies
 (``PR_SET_PDEATHSIG``). Address space is larger than committed memory (libraries reserve more
 than they use), so the same number is stricter on Linux; the Linux path is for development and
-CI, the product runs on Windows. An allocation that fails raises ``MemoryError`` in the child,
-which reports it; a library that aborts instead shows up as :class:`SandboxCrashError`. Other
-systems are not supported (:class:`SandboxUnavailableError`).
+CI, the product runs on Windows. An allocation that fails raises ``MemoryError`` in the child on
+both systems, and the child reports it as :class:`SandboxMemoryLimitError` at every step that grows
+with the input or the result: reading the input (into one ``bytes`` of the length given on its
+command line, so it is held once), importing and running the target, pickling the result and
+writing the answer. A library that aborts instead shows up as :class:`SandboxCrashError`. The
+parent passes the input as a view and reads the answer into one buffer bounded by
+``max_result_bytes``, unpickling from a view of it, so neither is copied again. Other systems are
+not supported (:class:`SandboxUnavailableError`).
 
 **Timeout.** The timeout covers the whole run, the child's start included. On expiry the parent
 ends the child's whole process group (Linux, ``start_new_session``) or job (Windows), then reaps
@@ -63,7 +68,6 @@ nothing; the worker logs the job's outcome.
 from __future__ import annotations
 
 import contextlib
-import io
 import os
 import pickle
 import re
@@ -222,7 +226,7 @@ class SandboxLimits:
 class _ResultUnpickler(pickle.Unpickler):
     """Resolves only the classes an entry point lists; plain values need no global lookup."""
 
-    def __init__(self, file: IO[bytes], allowed: frozenset[str]) -> None:
+    def __init__(self, file: _ViewReader, allowed: frozenset[str]) -> None:
         super().__init__(file)
         self._allowed = allowed
 
@@ -233,9 +237,42 @@ class _ResultUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 
-def _load_result(payload: bytes, allowed: frozenset[str]) -> object:
+class _ViewReader:
+    """The file interface the unpickler reads from, over a view: ``io.BytesIO`` would copy it."""
+
+    def __init__(self, view: memoryview) -> None:
+        self._view = view
+        self._position = 0
+
+    def read(self, size: int = -1) -> bytes:
+        end = len(self._view) if size < 0 else min(len(self._view), self._position + size)
+        chunk = bytes(self._view[self._position : end])
+        self._position = end
+        return chunk
+
+    def readinto(self, buffer: memoryview) -> int:
+        target = memoryview(buffer).cast("B")
+        chunk = self._view[self._position : self._position + len(target)]
+        target[: len(chunk)] = chunk
+        self._position += len(chunk)
+        return len(chunk)
+
+    def readline(self) -> bytes:
+        """Up to and including the next newline (old pickle protocols have text lines)."""
+        start = scan = self._position
+        while scan < len(self._view):
+            found = bytes(self._view[scan : scan + 4096]).find(b"\n")
+            if found >= 0:
+                return self.read(scan + found + 1 - start)
+            scan += 4096
+        return self.read()
+
+
+def _load_result(payload: memoryview, allowed: frozenset[str]) -> object:
+    """Unpickle the result. A failure, running out of the server's memory included, is a
+    :class:`SandboxResultError`; the answer itself is already bounded by ``max_result_bytes``."""
     try:
-        return _ResultUnpickler(io.BytesIO(payload), allowed).load()
+        return _ResultUnpickler(_ViewReader(payload), allowed).load()
     except Exception:
         raise SandboxResultError from None
 
@@ -268,7 +305,9 @@ def run(
         raise TypeError(msg)
     if sys.platform not in SUPPORTED_PLATFORMS:
         raise SandboxUnavailableError
-    answer, exit_code, timed_out, overflow = _Child(point.target, limits).run(bytes(data))
+    # A view, not a copy: the input can be hundreds of MiB.
+    view = memoryview(data).cast("B")
+    answer, exit_code, timed_out, overflow = _Child(point.target, limits).run(view)
     if timed_out:
         raise SandboxTimeoutError
     if overflow:
@@ -278,12 +317,13 @@ def run(
     return _interpret(answer, point.result_types)
 
 
-def _interpret(answer: bytes, allowed: frozenset[str]) -> object:
-    status, payload = answer[:1], answer[1:]
+def _interpret(answer: bytes | bytearray, allowed: frozenset[str]) -> object:
+    # A view of the payload, so a result near the cap is not copied again before unpickling.
+    status, payload = bytes(answer[:1]), memoryview(answer)[1:]
     if status == child.OK:
         return _load_result(payload, allowed)
     if status == child.ERROR:
-        name = payload.decode("ascii", errors="replace")
+        name = bytes(payload[:101]).decode("ascii", errors="replace")
         raise SandboxChildError(name if child.ERROR_NAME.fullmatch(name) else child.UNNAMED_ERROR)
     if payload:
         raise SandboxResultError
@@ -308,9 +348,11 @@ class _Child:
         self._limits = limits
         self._answer = bytearray()
         self._overflow = threading.Event()
+        self._input_bytes = 0
 
-    def run(self, data: bytes) -> tuple[bytes, int | None, bool, bool]:
+    def run(self, data: memoryview) -> tuple[bytearray, int | None, bool, bool]:
         """Returns the answer, the exit code, whether it timed out and whether it overflowed."""
+        self._input_bytes = data.nbytes
         deadline = time.monotonic() + self._limits.timeout_seconds
         guard = _Guard(self._limits.memory_bytes)
         try:
@@ -352,7 +394,7 @@ class _Child:
                     with contextlib.suppress(OSError):
                         stream.close()
             guard.close()
-        return bytes(self._answer), exit_code, timed_out, self._overflow.is_set()
+        return self._answer, exit_code, timed_out, self._overflow.is_set()
 
     def _start(self) -> subprocess.Popen[bytes]:
         command = [
@@ -363,6 +405,7 @@ class _Child:
             self._target,
             str(self._limits.memory_bytes),
             str(os.getpid()),
+            str(self._input_bytes),
         ]
         if sys.platform == "win32":  # pragma: no cover - Windows only
             # Suspended until it is in the job: in a virtual environment ``sys.executable`` is a
@@ -404,7 +447,7 @@ class _Child:
             pass
 
 
-def _feed(stream: IO[bytes] | None, data: bytes) -> None:
+def _feed(stream: IO[bytes] | None, data: memoryview) -> None:
     """Write the input and close the pipe, so the child sees its end. A child that stops reading
     (it crashed, or never reads) breaks the pipe; that is its outcome to report, not ours."""
     if stream is None:  # pragma: no cover - always a pipe

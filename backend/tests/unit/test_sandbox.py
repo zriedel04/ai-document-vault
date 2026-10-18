@@ -7,6 +7,8 @@ memory limit, ``TerminateJobObject`` and kill-on-close. The limits are small so 
 
 from __future__ import annotations
 
+import importlib
+import io
 import logging
 import os
 import subprocess
@@ -41,6 +43,7 @@ PROBES = "vault.jobs.sandbox_probes"
 RESULT_TYPE = f"{PROBES}:ProbeResult"
 NAMES = (
     "echo",
+    "length",
     "describe",
     "fail",
     "fail_with_memory",
@@ -60,6 +63,11 @@ ENTRIES = {name: EntryPoint(f"{PROBES}:{name}") for name in NAMES}
 ENTRIES["describe_allowed"] = EntryPoint(f"{PROBES}:describe", frozenset({RESULT_TYPE}))
 LIMITS = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB)
 SHORT = SandboxLimits(timeout_seconds=1.5, memory_bytes=256 * MIB)
+
+
+def answer(target: str, data: bytes) -> bytes:
+    """The child's whole answer, as it writes it: the status byte, then the payload."""
+    return b"".join(sandbox_child.respond(target, data))
 
 
 def run(
@@ -257,6 +265,69 @@ def test_an_allocation_under_the_cap_succeeds() -> None:
     assert run("allocate", str(64 * MIB).encode()) == 64 * MIB
 
 
+def test_an_input_is_held_once_while_it_is_read() -> None:
+    """128 MiB under a 256 MiB cap: two copies would not fit (with the interpreter beside them)."""
+    assert run("length", bytes(128 * MIB)) == 128 * MIB
+
+
+def test_an_input_that_does_not_fit_while_it_is_read_is_a_memory_error() -> None:
+    limits = SandboxLimits(timeout_seconds=30, memory_bytes=128 * MIB)
+    with pytest.raises(SandboxMemoryLimitError):
+        run("length", bytes(200 * MIB), limits)
+
+
+def test_a_result_that_does_not_fit_while_it_is_pickled_is_a_memory_error() -> None:
+    """The input (128 MiB) fits and the target returns it; its pickled copy does not fit."""
+    with pytest.raises(SandboxMemoryLimitError):
+        run("echo", bytes(128 * MIB))
+
+
+def test_running_out_while_importing_the_target_is_a_memory_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def exhausted(name: str) -> None:
+        raise MemoryError
+
+    monkeypatch.setattr(importlib, "import_module", exhausted)
+    assert sandbox_child.respond(f"{PROBES}:echo", b"") == (sandbox_child.MEMORY, b"")
+
+
+def test_read_input_reads_exactly_the_announced_length(tmp_path: Path) -> None:
+    source = tmp_path / "input"
+    source.write_bytes(b"0123456789")
+    with io.FileIO(source) as stream:
+        assert sandbox_child.read_input(stream, 10) == b"0123456789"
+    with io.FileIO(source) as stream:
+        assert sandbox_child.read_input(stream, 11) is None  # shorter than announced
+    with io.FileIO(source) as stream:
+        assert sandbox_child.read_input(stream, 0) == b""
+
+
+def test_write_answer_writes_the_status_then_the_payload() -> None:
+    reader, writer = os.pipe()
+    try:
+        sandbox_child.write_answer(writer, sandbox_child.OK, b"payload")
+        os.close(writer)
+        writer = -1
+        assert os.read(reader, 100) == b"Rpayload"
+    finally:
+        os.close(reader)
+        if writer >= 0:
+            os.close(writer)
+
+
+@pytest.mark.parametrize("protocol", [0, 2, 5])
+def test_results_of_every_pickle_protocol_are_read_from_a_view(protocol: int) -> None:
+    import pickle
+
+    # No bytes: protocols below 3 pickle them through a global (``_codecs.encode``), which the
+    # unpickler rightly refuses; the child always uses protocol 5.
+    value = [1, "a" * 5000 + "\nline", 2.5, {"k": (None, True)}]
+    payload = pickle.dumps(value, protocol=protocol)
+    assert sandbox._interpret(sandbox_child.OK + payload, frozenset()) == value
+    assert sandbox._interpret(bytearray(sandbox_child.OK + payload), frozenset()) == value
+
+
 def test_a_memory_error_raised_by_the_target_is_a_memory_error() -> None:
     with pytest.raises(SandboxMemoryLimitError) as caught:
         run("fail_with_memory", SECRET.encode())
@@ -374,7 +445,7 @@ def test_the_production_allowlist_is_empty_until_extraction_is_wired() -> None:
 def test_an_entry_point_outside_vault_or_malformed_is_refused(target: str) -> None:
     with pytest.raises(ValueError, match="entry point"):
         EntryPoint(target)
-    assert sandbox_child.respond(target, b"") == sandbox_child.REFUSED
+    assert answer(target, b"") == sandbox_child.REFUSED
 
 
 @pytest.mark.parametrize(
@@ -388,7 +459,7 @@ def test_an_entry_point_outside_vault_or_malformed_is_refused(target: str) -> No
     ],
 )
 def test_the_child_refuses_what_is_not_a_function_of_that_module(target: str) -> None:
-    assert sandbox_child.respond(target, b"") == sandbox_child.REFUSED
+    assert answer(target, b"") == sandbox_child.REFUSED
 
 
 def test_the_child_refuses_on_its_side_too() -> None:
@@ -478,21 +549,22 @@ def test_a_timeout_does_not_disturb_runs_beside_it() -> None:
 
 
 def test_respond_in_process() -> None:
-    assert sandbox_child.respond(f"{PROBES}:echo", b"ab") == sandbox_child.OK + __import__(
-        "pickle"
-    ).dumps(b"ab", protocol=5)
-    assert sandbox_child.respond(f"{PROBES}:fail", SECRET.encode()) == b"EValueError"
-    assert sandbox_child.respond(f"{PROBES}:fail_with_memory", b"x") == sandbox_child.MEMORY
-    assert sandbox_child.respond(f"{PROBES}:unpicklable", b"") == sandbox_child.UNPICKLABLE
-    assert sandbox_child.respond(f"{PROBES}:exit_system", b"x") == b"ESystemExit"
-    assert sandbox_child.respond(f"{PROBES}:large", b"3")[:1] == sandbox_child.OK
-    assert sandbox_child.respond(f"{PROBES}:describe", b"abcdef")[:1] == sandbox_child.OK
-    assert sandbox_child.respond(f"{PROBES}:environment_names", b"")[:1] == sandbox_child.OK
+    assert sandbox_child.respond(f"{PROBES}:echo", b"ab") == (
+        sandbox_child.OK,
+        __import__("pickle").dumps(b"ab", protocol=5),
+    )
+    assert answer(f"{PROBES}:fail", SECRET.encode()) == b"EValueError"
+    assert answer(f"{PROBES}:fail_with_memory", b"x") == sandbox_child.MEMORY
+    assert answer(f"{PROBES}:unpicklable", b"") == sandbox_child.UNPICKLABLE
+    assert answer(f"{PROBES}:exit_system", b"x") == b"ESystemExit"
+    assert answer(f"{PROBES}:large", b"3")[:1] == sandbox_child.OK
+    assert answer(f"{PROBES}:describe", b"abcdef")[:1] == sandbox_child.OK
+    assert answer(f"{PROBES}:environment_names", b"")[:1] == sandbox_child.OK
 
 
 def test_noisy_probe_in_process(capfd: pytest.CaptureFixture[str]) -> None:
     # The probe really writes to both streams, so the child-process test above proves something.
-    assert sandbox_child.respond(f"{PROBES}:noisy", b"loud")[:1] == sandbox_child.OK
+    assert answer(f"{PROBES}:noisy", b"loud")[:1] == sandbox_child.OK
     out, err = capfd.readouterr()
     assert "loud" in out
     assert "loud" in err

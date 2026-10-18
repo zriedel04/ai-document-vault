@@ -1,17 +1,23 @@
 """The child side of the sandbox runner (:mod:`vault.jobs.sandbox`).
 
-The parent starts ``python -I -m vault.jobs.sandbox_child TARGET MEMORY_BYTES PARENT_PID``: the
-command line holds only the target's name (fixed in code), the memory cap and the parent's process
-id, never document content. The child then
+The parent starts ``python -I -m vault.jobs.sandbox_child TARGET MEMORY_BYTES PARENT_PID
+INPUT_BYTES``: the command line holds only the target's name (fixed in code), the memory cap, the
+parent's process id and the input's length, never document content. The child then
 
 1. keeps its standard output for the answer and points file descriptors 1 and 2 at the null
    device, so nothing a library prints or logs reaches the server's console (the parent starts it
    with standard error on the null device too);
 2. on Linux, asks to be killed when the parent dies and caps its address space with
    ``RLIMIT_AS`` (on Windows the parent puts it in a Job Object instead, before sending input);
-3. reads the input bytes from standard input until the end;
+3. reads the input bytes from standard input into one ``bytes`` object of the announced length
+   (one allocation, no second copy: the input may be close to the memory cap);
 4. calls the target and writes one answer: a status byte followed by the pickled result, or by
    the exception's class name, and nothing else.
+
+Running out of memory at any step that grows with the input or the result (reading the input,
+importing and running the target, pickling the result, writing the answer) is reported as
+``MEMORY``, never as a crash or a refusal. Only if even that byte cannot be written does the child
+end without an answer (:class:`~vault.jobs.sandbox.SandboxCrashError`).
 
 Only the class name of an exception leaves the child, never its message or traceback, which can
 quote the document. Standard library only, and nothing else of the package is imported, so a
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import io
 import os
 import pickle
 import re
@@ -63,6 +70,8 @@ def resolve(target: str) -> object | None:
     try:
         module = importlib.import_module(module_name)
         function = getattr(module, name)
+    except MemoryError:
+        raise  # out of memory is not a refusal: respond() reports it
     except Exception:
         return None
     if (
@@ -74,38 +83,57 @@ def resolve(target: str) -> object | None:
     return function
 
 
-def respond(target: str, data: bytes) -> bytes:
-    """Run ``target`` on ``data`` and return the answer: a status byte and its payload."""
-    function = resolve(target)
+def respond(target: str, data: bytes) -> tuple[bytes, bytes]:
+    """Run ``target`` on ``data`` and return the answer: a status byte and its payload.
+
+    They are kept apart so that the payload, as large as the result, is never copied again to put
+    the status byte in front of it.
+    """
+    try:
+        function = resolve(target)
+    except MemoryError:
+        return MEMORY, b""
     if function is None:
-        return REFUSED
+        return REFUSED, b""
     try:
         result = function(data)  # type: ignore[operator]
     except MemoryError:
-        return MEMORY
+        return MEMORY, b""
     except BaseException as error:  # everything, SystemExit too: report it, never its message
-        return ERROR + error_name(error).encode("ascii")
+        return ERROR, error_name(error).encode("ascii")
     try:
         payload = pickle.dumps(result, protocol=PICKLE_PROTOCOL)
     except MemoryError:
-        return MEMORY
+        return MEMORY, b""
     except BaseException:
-        return UNPICKLABLE
-    return OK + payload
+        return UNPICKLABLE, b""
+    return OK, payload
 
 
-def _write_all(fd: int, data: bytes) -> None:  # pragma: no cover - runs in the child process
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        view = view[written:]
+def read_input(stream: io.RawIOBase, length: int) -> bytes | None:
+    """Read exactly ``length`` bytes into one ``bytes`` object, or None if the input is shorter.
+
+    ``BufferedReader.read(n)`` allocates its result once and reads into it, so the input is held
+    once; joining chunks would hold it twice, and the input may be close to the memory cap.
+    Raises ``MemoryError`` when even one copy does not fit.
+    """
+    if not length:
+        return b""
+    reader = io.BufferedReader(stream, buffer_size=_READ_CHUNK)
+    try:
+        data = reader.read(length)
+    finally:
+        reader.detach()  # the caller owns the stream; closing the reader would close it
+    return data if len(data) == length else None
 
 
-def _read_all(fd: int) -> bytes:  # pragma: no cover - runs in the child process
-    parts = []
-    while chunk := os.read(fd, _READ_CHUNK):
-        parts.append(chunk)
-    return b"".join(parts)
+def write_answer(fd: int, status: bytes, payload: bytes) -> None:
+    """Write the status byte, then the payload from a view of it (no copy)."""
+    for part in (status, payload):
+        view = memoryview(part)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
 
 
 def _silence_output() -> int:  # pragma: no cover - runs in the child process
@@ -171,16 +199,25 @@ def main(argv: list[str]) -> None:  # pragma: no cover - runs in the child proce
     answer_fd = _silence_output()
     _prepare_windows(answer_fd)
     try:
-        target, memory, parent = argv
-        memory_bytes, parent_pid = int(memory), int(parent)
+        target, memory, parent, size = argv
+        memory_bytes, parent_pid, length = int(memory), int(parent), int(size)
     except ValueError:
-        _write_all(answer_fd, SETUP)
+        write_answer(answer_fd, SETUP, b"")
         os._exit(2)
     if sys.platform == "linux" and not _limit_linux(memory_bytes, parent_pid):
-        _write_all(answer_fd, SETUP)
+        write_answer(answer_fd, SETUP, b"")
         os._exit(0)
-    data = _read_all(0)
-    _write_all(answer_fd, respond(target, data))
+    try:
+        data = read_input(io.FileIO(0, closefd=False), length)
+        if data is None:  # the parent stopped sending: no answer, so the parent sees a crash
+            os._exit(3)
+        status, payload = respond(target, data)
+        del data
+        write_answer(answer_fd, status, payload)
+    except MemoryError:
+        # Nothing has been written yet when reading or respond() runs out; a failure part way
+        # through writing the answer leaves bytes the parent refuses as malformed.
+        write_answer(answer_fd, MEMORY, b"")
     os.close(answer_fd)
     # Skip interpreter shutdown: a library's exit hook could print or wait on its own threads.
     os._exit(0)

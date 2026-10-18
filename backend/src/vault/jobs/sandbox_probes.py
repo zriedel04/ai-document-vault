@@ -28,6 +28,10 @@ def echo(data: bytes) -> bytes:
     return data
 
 
+def length(data: bytes) -> int:
+    return len(data)
+
+
 def describe(data: bytes) -> ProbeResult:
     return ProbeResult(size=len(data), head=data[:4])
 
