@@ -1,4 +1,5 @@
-"""Command line: ``python -m vault_spikes <check|vec|fetch-model|embedding|ocr|pdf|merge>``.
+"""Command line: ``python -m vault_spikes <command>``, one of check, vec, fetch-model,
+embedding, make-manifest, ocr, pdf and merge.
 
 Run from ``scripts/spikes`` on the owner's Windows PC. Console output and reports hold numbers
 only, never document text or file names.
@@ -32,6 +33,8 @@ from vault_spikes.corpus import (
     overlap_for,
 )
 from vault_spikes.errors import OwnMessage, OwnValueError
+from vault_spikes.manifest import MANIFEST as MANIFEST_NAME
+from vault_spikes.manifest import build_manifest, check_target, write_manifest
 from vault_spikes.report import (
     Report,
     SpikeSchema,
@@ -135,6 +138,15 @@ def parser() -> argparse.ArgumentParser:
     emb.add_argument("--batch-size", type=positive_int, default=adapters.DEFAULT_BATCH_SIZE)
     emb.add_argument("--vault-chunks", type=positive_int, default=100_000)
 
+    listing = commands.add_parser(
+        "make-manifest",
+        help="write manifest.json for a folder of your own files, for embedding --corpus",
+    )
+    listing.add_argument(
+        "--corpus", type=Path, required=True, help="folder of documents, subfolders included"
+    )
+    listing.add_argument("--force", action="store_true", help="replace an existing manifest.json")
+
     fetch = commands.add_parser(
         "fetch-model",
         help="download an embedding model, or RapidOCR's model files, before it is measured",
@@ -210,7 +222,8 @@ def require_embedding_inputs(corpus: Path, questions: Path) -> None:
         what
         for what, ok in (
             (
-                "the corpus manifest (--corpus FOLDER with manifest.json)",
+                "the corpus manifest (--corpus FOLDER with manifest.json, which make-manifest "
+                "writes)",
                 (corpus / "manifest.json").is_file(),
             ),
             ("the eval questions (--questions FILE)", questions.is_file()),
@@ -237,6 +250,24 @@ def show(report: Report, written: tuple[Path, Path]) -> None:
         for name, value in row.metrics.items():
             print(f"  {name}: {value}")
     print(f"report: {written[0].name} and {written[1].name}, in the --out folder")
+
+
+def make_manifest(corpus: Path, *, force: bool) -> None:
+    """List ``corpus`` into its ``manifest.json`` and print the counts, never a name or path.
+
+    Everything that can stop the command is checked before the folder is read: an existing
+    manifest (without ``--force``) and pypdfium2, which tells a text PDF from a scan.
+    """
+    check_target(corpus, force=force)
+    adapters.require_installed("pypdfium2", "embedding")
+    manifest, tally = build_manifest(corpus, adapters.pdf_pages_for_corpus)
+    for line in tally.lines():
+        print(line)
+    if not tally.listed:
+        msg = "no file of a kind the spikes read was found; no manifest was written"
+        raise OwnValueError(msg)
+    write_manifest(corpus, manifest, force=force)
+    print(f"manifest: {MANIFEST_NAME} written in the --corpus folder")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -273,6 +304,10 @@ def run(args: argparse.Namespace) -> int:
         adapters.fetch_model(args.candidate)
         revision = adapters.model_revision(args.candidate)
         print(f"{args.candidate}: downloaded" + (f" (revision {revision})" if revision else ""))
+        return 0
+
+    if args.command == "make-manifest":
+        make_manifest(args.corpus, force=args.force)
         return 0
 
     if args.command == "embedding":

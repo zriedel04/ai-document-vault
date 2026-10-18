@@ -25,6 +25,23 @@ import yaml
 from vault_spikes.errors import OwnMessage, OwnValueError
 
 TEXT_SUFFIXES = frozenset({".txt", ".md", ".csv"})
+# Suffixes that name one format, so a file is read the same way under either spelling.
+_SAME_FORMAT = {".jpeg": ".jpg", ".tif": ".tiff"}
+
+
+def reader_of(path: str, needs_ocr: bool) -> str:
+    """How the spikes read a file: by its suffix (``read_pages`` picks the parser from it, and the
+    three text suffixes share one), and whether it goes to OCR instead.
+
+    Identical bytes are one document only when they are also read the same way: a PNG and a
+    ``.txt`` holding the same bytes give no text and a decoded text, so marking one as the
+    other's exact duplicate would drop the readable one with the other. ``make-manifest`` marks
+    copies only within one reader, and the loader refuses a mark across readers."""
+    suffix = posixpath.splitext(path.replace("\\", "/"))[1].lower()
+    group = "text" if suffix in TEXT_SUFFIXES else _SAME_FORMAT.get(suffix, suffix)
+    return f"{group}+ocr" if needs_ocr else group
+
+
 MAX_FILE_BYTES = 20 * 1024 * 1024
 """Skip anything bigger: a spike input is a small file, and a zip can expand enormously."""
 _WORD_TEXT = re.compile(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", re.DOTALL)
@@ -346,7 +363,8 @@ def _optional[T](row: Mapping[str, object], key: str, kind: type[T]) -> T | None
 def _check_duplicate_references(documents: list[Document]) -> None:
     """Refuse an ``exact_duplicate_of`` that names nothing, itself, or a loop. The mark makes the
     spike drop the copy and score its questions against the original, so a mark that points
-    nowhere would drop a document on nothing but a claim. (That the bytes really are the same is
+    nowhere would drop a document on nothing but a claim, and so would a mark to a file that is
+    read another way (:func:`reader_of`). (That the bytes really are the same is
     checked when the files are read, by ``build_corpus``.)"""
     listed = {doc.path: doc for doc in documents}
     for doc in documents:
@@ -354,6 +372,10 @@ def _check_duplicate_references(documents: list[Document]) -> None:
             continue
         if doc.duplicate_of == doc.path or doc.duplicate_of not in listed:
             msg = "a document is marked as a duplicate of one the manifest does not list"
+            raise SpikeInputError(msg)
+        original = listed[doc.duplicate_of]
+        if reader_of(doc.path, doc.needs_ocr) != reader_of(original.path, original.needs_ocr):
+            msg = "a document is marked as a duplicate of one that is read another way"
             raise SpikeInputError(msg)
         seen = {doc.path}
         current = doc
