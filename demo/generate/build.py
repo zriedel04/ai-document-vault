@@ -1,7 +1,7 @@
 """Build the synthetic demo corpus, its manifest and the public eval set.
 
-    uv run python build.py            write demo/corpus/, demo/corpus/manifest.json and
-                                      eval/public/questions.yaml
+    uv run python build.py            write demo/corpus/, demo/corpus/manifest.json,
+                                      demo/corpus/references/ and eval/public/questions.yaml
     uv run python build.py --check    build in memory and fail if the committed files differ
                                       (used by CI on Linux, where the pinned libraries give
                                       byte-identical output)
@@ -23,6 +23,7 @@ import content_courses
 import content_extra
 import content_media
 import content_project
+import references
 from model import Document
 from questions import Question, build_questions
 from render import render_docx, render_image, render_pdf_scan, render_pdf_text
@@ -112,6 +113,10 @@ def build_outputs() -> dict[str, bytes]:
         data = render(doc)
         files[f"demo/corpus/{doc.path}"] = data
         entries.append(manifest_entry(doc, data))
+        # Reference texts for the OCR and PDF spikes. They are not documents: the manifest does
+        # not list them (see references.py).
+        for path, text in references.reference_files(doc).items():
+            files[f"demo/corpus/{path}"] = text.encode("utf-8")
     manifest = {
         "description": "Synthetic demo corpus. Every person, course and document is fictional.",
         "generated_by": "demo/generate/build.py",

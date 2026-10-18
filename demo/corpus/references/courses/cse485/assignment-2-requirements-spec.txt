@@ -1,0 +1,10 @@
+Assignment 2: Requirements Specification
+Due Friday, October 9, 2026 at 11:59 PM. Worth 15 percent of the final grade.
+Task
+Each team writes a requirements specification for its product. The specification must contain at least 12 functional requirements and at least 5 non-functional requirements.
+Every requirement is written as a numbered statement that uses the word shall, and each one must be testable.
+Traceability
+Include a traceability table that links each functional requirement to the user need it satisfies.
+Format
+Submit the specification as a DOCX or PDF file through the course portal. Keep a version number and a date on the first page.
+Teams may revise the specification after feedback. The version that is graded is the one submitted by the deadline.
