@@ -31,7 +31,12 @@ redirect. The child answers on its standard output, which the parent reads up to
 descriptors 1 and 2 there too, so nothing a library prints reaches the server's console. The
 result is unpickled by an unpickler that resolves only the classes listed for the entry point
 (plain values such as ``str``, ``bytes``, numbers, lists, tuples, dicts and sets need none), so a
-child that a hostile file took over cannot make the server run code through the pickle. The child
+child that a hostile file took over cannot make the server run code through the pickle. Nor can it
+make the server build more than it should: before unpickling, the parent reads the answer's
+opcodes without building anything and refuses an answer whose objects would cost more than
+``max_result_memory_bytes`` (1 GiB by default) or that has more than ``max_result_opcodes``
+opcodes (4 million), because a pickle of 256 MiB made of one-byte "empty list" opcodes would
+otherwise build about 20 GiB in the server. The child
 gets a reduced environment (:data:`CHILD_ENV`), without API keys or other secrets.
 
 **Memory cap.** On Windows the child is put in a Job Object with a process and a job memory limit
@@ -76,6 +81,7 @@ from __future__ import annotations
 import contextlib
 import os
 import pickle
+import pickletools
 import re
 import signal
 import subprocess
@@ -85,7 +91,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import IO, TYPE_CHECKING, Final
+from typing import IO, TYPE_CHECKING, Final, cast
 
 from vault.jobs import sandbox_child as child
 
@@ -95,6 +101,20 @@ if TYPE_CHECKING:
 MIB: Final = 1024 * 1024
 MIN_MEMORY_BYTES: Final = 64 * MIB  # the child's interpreter alone takes most of this on Linux
 DEFAULT_MAX_RESULT_BYTES: Final = 256 * MIB
+# What the server may spend to unpickle one answer, and how many pickle opcodes it reads to judge
+# that first (see _check_expansion): far above a real extraction, whose answer is a few large
+# strings, and far below what a hostile answer of 256 MiB of one-byte opcodes would build.
+DEFAULT_MAX_RESULT_MEMORY_BYTES: Final = 4 * DEFAULT_MAX_RESULT_BYTES
+DEFAULT_MAX_RESULT_OPCODES: Final = 4_000_000
+# Bytes the unpickler can allocate for one opcode besides the bytes of its argument, measured on
+# CPython 3.12 with tracemalloc and rounded up: an empty set 241, a dict 89, a list 80 (the parent
+# list's growth and a memo entry included), so 256 for the opcodes that make a set and 128 for any
+# other opcode.
+_SET_OPCODE_BYTES: Final = 256
+_OPCODE_BYTES: Final = 128
+_SET_OPCODES: Final = frozenset({"EMPTY_SET", "FROZENSET"})
+# Opcodes that make nothing.
+_FREE_OPCODES: Final = frozenset({"MARK", "STOP", "PROTO", "FRAME", "POP", "POP_MARK"})
 RESULT_TYPE: Final = re.compile(r"vault(?:\.[a-z_][a-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*")
 SUPPORTED_PLATFORMS: Final = frozenset({"win32", "linux"})
 # The variables a Python child needs to start and find its temporary folder; nothing else of the
@@ -204,20 +224,31 @@ class SandboxLimits:
     timeout_seconds: float
     memory_bytes: int
     max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES
+    max_result_memory_bytes: int = DEFAULT_MAX_RESULT_MEMORY_BYTES
+    max_result_opcodes: int = DEFAULT_MAX_RESULT_OPCODES
 
     def __post_init__(self) -> None:
-        numbers = (self.timeout_seconds, self.memory_bytes, self.max_result_bytes)
+        numbers = (
+            self.timeout_seconds,
+            self.memory_bytes,
+            self.max_result_bytes,
+            self.max_result_memory_bytes,
+            self.max_result_opcodes,
+        )
         if any(isinstance(n, bool) or not isinstance(n, int | float) for n in numbers):
             msg = "sandbox limits are numbers"
             raise TypeError(msg)
-        if not isinstance(self.memory_bytes, int) or not isinstance(self.max_result_bytes, int):
-            msg = "sandbox byte limits are whole numbers"
+        if not all(isinstance(n, int) for n in numbers[1:]):
+            msg = "sandbox byte and opcode limits are whole numbers"
             raise TypeError(msg)
         if not 0 < self.timeout_seconds < float("inf"):
             msg = "the sandbox timeout must be a positive, finite number of seconds"
             raise ValueError(msg)
         if self.memory_bytes < MIN_MEMORY_BYTES or self.max_result_bytes < 1:
             msg = f"the sandbox memory cap must be at least {MIN_MEMORY_BYTES // MIB} MiB"
+            raise ValueError(msg)
+        if self.max_result_memory_bytes < 1 or self.max_result_opcodes < 1:
+            msg = "the limits on unpickling a result must be positive"
             raise ValueError(msg)
 
     @classmethod
@@ -274,10 +305,49 @@ class _ViewReader:
         return self.read()
 
 
-def _load_result(payload: memoryview, allowed: frozenset[str]) -> object:
-    """Unpickle the result. A failure, running out of the server's memory included, is a
-    :class:`SandboxResultError`; the answer itself is already bounded by ``max_result_bytes``."""
+def _check_expansion(payload: memoryview, max_memory: int, max_opcodes: int) -> int:
+    """Refuse an answer whose unpickling would cost the server more than ``max_memory`` bytes.
+
+    The answer's size is capped, but a pickle is a program that builds objects, and one byte can
+    build an empty list of 80 bytes: 256 MiB of such opcodes would build gigabytes in the server,
+    which the sandbox exists to protect. So the opcodes are read first, without building anything
+    (``pickletools.genops``, over the same view, so the answer is not copied), and each is charged
+    what the unpickler can allocate for it (``_OPCODE_BYTES``, ``_SET_OPCODE_BYTES``) plus the size
+    of its decoded argument (a string, bytes or a number, as Python holds it). The read stops at the
+    first opcode past ``max_opcodes`` or the first byte past ``max_memory``, so judging a hostile
+    answer costs a bounded time too. Objects the unpickler would share (memo lookups, ``DUP``) are
+    charged as if new, which only errs on the safe side. No global is resolved here; the unpickler
+    still checks every class it is asked for. Returns the bytes charged."""
+    charged = 0
+    for count, (opcode, argument, _position) in enumerate(
+        # genops calls only read and readline (and tell, which the reader has not got).
+        pickletools.genops(cast("IO[bytes]", _ViewReader(payload))),
+        start=1,
+    ):
+        if count > max_opcodes:
+            raise SandboxResultError
+        if opcode.name in _FREE_OPCODES:
+            continue
+        charged += _SET_OPCODE_BYTES if opcode.name in _SET_OPCODES else _OPCODE_BYTES
+        if isinstance(argument, str | bytes | int):
+            charged += sys.getsizeof(argument)
+        if charged > max_memory:
+            raise SandboxResultError
+    return charged
+
+
+def _load_result(
+    payload: memoryview,
+    allowed: frozenset[str],
+    max_memory: int = DEFAULT_MAX_RESULT_MEMORY_BYTES,
+    max_opcodes: int = DEFAULT_MAX_RESULT_OPCODES,
+) -> object:
+    """Unpickle the result, once :func:`_check_expansion` has shown that building it fits the
+    server's budget. A failure, an answer over the budget or running out of the server's memory
+    included, is a :class:`SandboxResultError`; the answer itself is already bounded by
+    ``max_result_bytes``."""
     try:
+        _check_expansion(payload, max_memory, max_opcodes)
         return _ResultUnpickler(_ViewReader(payload), allowed).load()
     except Exception:
         raise SandboxResultError from None
@@ -320,14 +390,25 @@ def run(
         raise SandboxResultError
     if exit_code != 0:
         raise SandboxCrashError(exit_code)
-    return _interpret(answer, point.result_types)
+    return _interpret(
+        answer,
+        point.result_types,
+        max_memory=limits.max_result_memory_bytes,
+        max_opcodes=limits.max_result_opcodes,
+    )
 
 
-def _interpret(answer: bytes | bytearray, allowed: frozenset[str]) -> object:
+def _interpret(
+    answer: bytes | bytearray,
+    allowed: frozenset[str],
+    *,
+    max_memory: int = DEFAULT_MAX_RESULT_MEMORY_BYTES,
+    max_opcodes: int = DEFAULT_MAX_RESULT_OPCODES,
+) -> object:
     # A view of the payload, so a result near the cap is not copied again before unpickling.
     status, payload = bytes(answer[:1]), memoryview(answer)[1:]
     if status == child.OK:
-        return _load_result(payload, allowed)
+        return _load_result(payload, allowed, max_memory, max_opcodes)
     if status == child.ERROR:
         name = bytes(payload[:101]).decode("ascii", errors="replace")
         raise SandboxChildError(name if child.ERROR_NAME.fullmatch(name) else child.UNNAMED_ERROR)

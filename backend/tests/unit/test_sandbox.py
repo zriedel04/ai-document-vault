@@ -56,6 +56,7 @@ NAMES = (
     "abort",
     "unpicklable",
     "large",
+    "many_lists",
     "exit_system",
     "environment_names",
 )
@@ -432,6 +433,103 @@ def test_a_result_larger_than_the_cap() -> None:
     assert run("large", b"900", limits) == b"x" * 900
 
 
+# One-byte opcodes that each build an object: empty list, dict, set, tuple, None, a memoized list.
+EXPANDING = {
+    "lists": b"]",
+    "dicts": b"}",
+    "sets": b"\x8f",
+    "tuples": b")",
+    "nones": b"N",
+    "memoized lists": b"]\x94",
+}
+
+
+def expanding_pickle(opcode: bytes, count: int) -> bytes:
+    """A protocol 4 pickle of a list of ``count`` objects, each built by ``opcode``."""
+    return b"\x80\x04](" + opcode * count + b"e."
+
+
+@pytest.mark.parametrize("opcode", EXPANDING.values(), ids=EXPANDING.keys())
+def test_the_charge_for_each_opcode_covers_what_unpickling_allocates(opcode: bytes) -> None:
+    """Compared with an independent measure: the peak tracemalloc sees while the real unpickler
+    builds the same answer, so the constants cannot drift below what CPython allocates."""
+    import pickle
+    import tracemalloc
+
+    payload = expanding_pickle(opcode, 50_000)
+    charged = sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40)
+    tracemalloc.start()
+    try:
+        pickle.loads(payload)  # noqa: S301 - a pickle built above, from fixed bytes
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert charged >= peak
+
+
+def test_strings_are_charged_as_python_holds_them() -> None:
+    import pickle
+
+    text = "a" * 10_000 + "\N{GRINNING FACE}"  # one emoji makes every character four bytes
+    payload = pickle.dumps(text, protocol=5)
+    charged = sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40)
+    built = pickle.loads(payload)  # noqa: S301 - a pickle built above
+    # The copy the unpickler builds, not ``text``, which now also caches its UTF-8 form.
+    assert built == text
+    assert charged >= sys.getsizeof(built) > 40_000
+
+
+def test_an_answer_that_would_build_too_much_is_refused_before_it_is_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Small on the wire, large in the server: refused by the opcode count and by the memory
+    budget, without the unpickler ever running."""
+
+    def never(self: object) -> object:
+        raise AssertionError
+
+    payload = sandbox_child.OK + expanding_pickle(b"]", 2_000)
+    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(payload, frozenset(), max_opcodes=1_000)
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(payload, frozenset(), max_memory=100_000)
+    big = sandbox_child.OK + pickle_of("x" * 200_000)
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(big, frozenset(), max_memory=100_000)
+
+
+def test_an_answer_within_the_budget_is_built() -> None:
+    payload = sandbox_child.OK + expanding_pickle(b"]", 2_000)
+    assert sandbox._interpret(payload, frozenset(), max_opcodes=3_000) == [[]] * 2_000
+    assert sandbox._interpret(payload, frozenset(), max_memory=300_000) == [[]] * 2_000
+
+
+def test_the_budget_applies_to_a_real_child() -> None:
+    limits = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB, max_result_opcodes=1_000)
+    with pytest.raises(SandboxResultError):
+        run("many_lists", b"1000", limits)
+    assert run("many_lists", b"100", limits) == [[]] * 100
+
+
+def test_the_default_budget_refuses_a_hostile_answer_of_the_largest_size_quickly() -> None:
+    """256 MiB of one-byte list opcodes would build about 20 GiB; the default limits refuse it
+    after reading 4 million opcodes, in a bounded time."""
+    payload = memoryview(expanding_pickle(b"]", sandbox.DEFAULT_MAX_RESULT_BYTES - 16))
+    started = time.monotonic()
+    with pytest.raises(SandboxResultError):
+        sandbox._check_expansion(
+            payload, sandbox.DEFAULT_MAX_RESULT_MEMORY_BYTES, sandbox.DEFAULT_MAX_RESULT_OPCODES
+        )
+    assert time.monotonic() - started < 30
+
+
+def pickle_of(value: object) -> bytes:
+    import pickle
+
+    return pickle.dumps(value, protocol=5)
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -697,6 +795,12 @@ def test_settings_out_of_range_are_refused(key: str, value: object) -> None:
         ({"timeout_seconds": 1, "memory_bytes": 1 * MIB}, ValueError),
         ({"timeout_seconds": 1, "memory_bytes": 256.0 * MIB}, TypeError),
         ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_bytes": 0}, ValueError),
+        (
+            {"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_memory_bytes": 0},
+            ValueError,
+        ),
+        ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_opcodes": 0}, ValueError),
+        ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_opcodes": 1.5}, TypeError),
         ({"timeout_seconds": "1", "memory_bytes": 256 * MIB}, TypeError),
     ],
 )

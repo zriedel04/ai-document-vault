@@ -101,6 +101,11 @@ def large(data: bytes) -> bytes:
     return b"x" * int(data)
 
 
+def many_lists(data: bytes) -> list[list[object]]:
+    """``int(data)`` empty lists: a small answer that builds many objects when it is unpickled."""
+    return [[] for _ in range(int(data))]
+
+
 def environment_names(data: bytes) -> list[str]:
     return sorted(os.environ)
 
