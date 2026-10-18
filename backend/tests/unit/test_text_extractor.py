@@ -54,10 +54,11 @@ def test_bytes_that_are_not_utf8_are_read_as_windows_1252() -> None:
 @pytest.mark.parametrize(
     ("text", "fallback"),
     [
-        # Russian, Greek and Japanese notes, from code points.
+        # Russian, Greek, Japanese and Korean (Johab) notes, from code points.
         ("\u041f\u0440\u0438\u0432\u0435\u0442, \u043e\u0442\u0447\u0451\u0442", "cp1251"),
         ("\u039a\u03b1\u03bb\u03b7\u03bc\u03ad\u03c1\u03b1", "cp1253"),
         ("\u5831\u544a\u66f8\u3092\u6301\u3063\u3066", "cp932"),
+        ("\ubcf4\uace0\uc11c\ub97c \uac00\uc9c0\uace0", "cp1361"),
     ],
 )
 def test_the_owner_can_choose_another_windows_code_page(text: str, fallback: str) -> None:
@@ -81,6 +82,13 @@ def test_utf8_and_marked_text_ignore_the_fallback() -> None:
 def test_only_a_windows_code_page_is_a_fallback(fallback: str) -> None:
     with pytest.raises(ValueError, match="FALLBACK_ENCODINGS"):
         decode(b"text", fallback)
+
+
+def test_the_fallbacks_are_the_windows_ansi_code_pages() -> None:
+    # Every code page Microsoft's code page identifier table marks ANSI. A missing one would refuse
+    # an owner's valid setting; an extra one (an OEM or ISO page) would not be a Windows ANSI page.
+    ansi = {874, 932, 936, 949, 950, *range(1250, 1259), 1361}
+    assert {f"cp{n}" for n in ansi} == FALLBACK_ENCODINGS
 
 
 def test_every_fallback_is_a_python_codec() -> None:

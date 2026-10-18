@@ -41,9 +41,10 @@ from vault.ingest.validate import TEXT_BOMS, reads_as_text
 
 VERSION: Final = "text-1"
 FALLBACK_ENCODING: Final = "cp1252"
-# The Windows "ANSI" code pages, one of which the owner may choose as the fallback.
+# The Windows "ANSI" code pages, one of which the owner may choose as the fallback: every code page
+# Microsoft's code page table marks ANSI, Korean Johab (1361) included.
 FALLBACK_ENCODINGS: Final = frozenset(
-    {"cp874", "cp932", "cp936", "cp949", "cp950", *(f"cp{n}" for n in range(1250, 1259))}
+    {"cp874", "cp932", "cp936", "cp949", "cp950", "cp1361", *(f"cp{n}" for n in range(1250, 1259))}
 )
 
 _LINE_BREAK: Final = re.compile(r"\r\n?")
