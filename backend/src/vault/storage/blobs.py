@@ -58,6 +58,7 @@ STAGING_MARK: Final = ".incoming"  # a staged upload, not a copy in progress
 LOCK_WAIT_SECONDS: Final = 60.0
 LOCK_POLL_SECONDS: Final = 0.01
 UNLINK_TRIES: Final = 100
+FOLDER_TRIES: Final = 3  # publications retried when a delete removed the empty prefix folders
 IS_WINDOWS: Final = os.name == "nt"
 
 
@@ -84,11 +85,29 @@ class BlobBusyError(BlobError):
 
 
 @dataclass(frozen=True)
+class FileIdentity:
+    """Which file a blob is, not only where: its device, its file number and the time its status
+    last changed (the read-only mark is its last change). A file removed and stored again under
+    the same name is another file, even if the system gives it the same number again."""
+
+    device: int
+    inode: int
+    changed_ns: int
+
+
+def _identity(status: os.stat_result) -> FileIdentity:
+    return FileIdentity(status.st_dev, status.st_ino, status.st_ctime_ns)
+
+
+@dataclass(frozen=True)
 class StoredBlob:
     sha256: str
     size: int
     path: Path
     created: bool  # False if these exact bytes were already in the store
+    # The file that was returned, sealed, as it was under the claim. A caller that looks at the
+    # file later compares ``BlobStore.identity`` with it to know it is still the same file.
+    identity: FileIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -237,9 +256,13 @@ class BlobStore:
             return []
         if folder is None:
             return []
+        try:
+            entries = list(folder.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return []  # removed since the check, by a delete of the last blob it held
         return sorted(
             entry
-            for entry in folder.iterdir()
+            for entry in entries
             if (match := BLOB_NAME.fullmatch(entry.name))
             and match.group(1) == sha256
             and _blob_status(entry) is not None
@@ -257,6 +280,14 @@ class BlobStore:
 
     def exists(self, sha256: str) -> bool:
         return self.find(sha256) is not None
+
+    def identity(self, sha256: str) -> FileIdentity | None:
+        """Which file is the blob for this hash now, or None if there is none. Compare it with
+        ``StoredBlob.identity`` to know whether the file a caller looked at is still the blob (a
+        permanent delete and another import can remove and store it again under the same name)."""
+        path = self.find(sha256)
+        status = None if path is None else _blob_status(path)
+        return None if status is None else _identity(status)
 
     # --- Writing ---------------------------------------------------------------------------
 
@@ -303,10 +334,20 @@ class BlobStore:
         existing = self.find(sha256)
         if existing is not None:
             self._seal_file(existing)  # a crash may have left it writable
-            return StoredBlob(sha256, size, existing, created=False)
+            return StoredBlob(sha256, size, existing, False, self._identity_of(existing))
         final = self.path_for(sha256, suffix)
-        self._safe_folder(sha256, create=True)
-        if not self._publish(temp, final):
+        published = False
+        for attempt in range(FOLDER_TRIES):
+            try:
+                self._safe_folder(sha256, create=True)
+                published = self._publish(temp, final)
+                break
+            except FileNotFoundError:
+                # A delete of another blob with the same prefix removed the folders it left empty
+                # (it holds that blob's claim, not this one): make them again.
+                if attempt == FOLDER_TRIES - 1:
+                    raise
+        if not published:
             # The name is taken. Only a real blob counts as the winner: a folder or another
             # odd entry in its place is not one, and pointing a caller at it would be wrong.
             winner = self.find(sha256)
@@ -314,12 +355,20 @@ class BlobStore:
                 msg = "something that is not a blob occupies the place for this blob"
                 raise BlobIntegrityError(msg)
             self._seal_file(winner)
-            return StoredBlob(sha256, size, winner, created=False)
+            return StoredBlob(sha256, size, winner, False, self._identity_of(winner))
         # Drop the temporary name first: the read-only mark belongs to the file, so on Windows
         # a read-only file cannot be unlinked through any of its names.
         temp.unlink(missing_ok=True)
         _read_only(final)
-        return StoredBlob(sha256, size, final, created=True)
+        return StoredBlob(sha256, size, final, True, self._identity_of(final))
+
+    @staticmethod
+    def _identity_of(path: Path) -> FileIdentity:
+        status = _blob_status(path)
+        if status is None:
+            msg = "something that is not a file held only by the store is where a blob belongs"
+            raise BlobIntegrityError(msg)
+        return _identity(status)
 
     @staticmethod
     def _seal_file(path: Path) -> None:
@@ -459,11 +508,17 @@ class BlobStore:
     # --- Reading and checking --------------------------------------------------------------
 
     def open(self, sha256: str) -> BinaryIO:
+        """The blob's bytes. ``BlobNotFoundError`` if there is none, also when a permanent delete
+        removes it between the look-up and the open (``find`` does not hold the claim)."""
         path = self.find(sha256)
         if path is None:
             msg = "no blob has this hash"
             raise BlobNotFoundError(msg)
-        return path.open("rb")
+        try:
+            return path.open("rb")
+        except FileNotFoundError:
+            msg = "no blob has this hash"
+            raise BlobNotFoundError(msg) from None
 
     def verify(self, sha256: str) -> bool:
         """Re-hash the stored bytes. False if they no longer match their name (damage or edit)."""
@@ -598,16 +653,22 @@ class BlobStore:
 
     # --- Deleting --------------------------------------------------------------------------
 
-    def delete(self, sha256: str) -> bool:
+    def delete(self, sha256: str, *, only: FileIdentity | None = None) -> bool:
         """Permanently remove a blob (the one place a read-only original is ever touched).
 
         Returns False if there was no such blob, and True only when no blob is left under the hash:
         a damaged store that holds the same hash under two names loses both, so a deleted document
         cannot stay readable under the other one. Empty folders it leaves are removed too.
+
+        With ``only``, the blob is removed only if it is still that file, decided under the claim:
+        a caller that stored a blob and wants it gone again must not remove a file that another
+        import has stored under the same name since. Otherwise nothing changes and it returns False.
         """
         with self._claim(sha256):
             paths = self._blobs_for(sha256)
             if not paths:
+                return False
+            if only is not None and (len(paths) != 1 or self._identity_of(paths[0]) != only):
                 return False
             for path in paths:
                 _writable(path)
