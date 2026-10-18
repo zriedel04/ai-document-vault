@@ -115,6 +115,21 @@ _OPCODE_BYTES: Final = 128
 _SET_OPCODES: Final = frozenset({"EMPTY_SET", "FROZENSET"})
 # Opcodes that make nothing.
 _FREE_OPCODES: Final = frozenset({"MARK", "STOP", "PROTO", "FRAME", "POP", "POP_MARK"})
+# Every kind of argument a pickle opcode has (``pickletools.ArgumentDescriptor.name``), and the
+# types ``pickletools.genops`` decodes them to: numbers, strings, bytes and bytearrays, each
+# charged its size as Python holds it. An opcode with an argument of any other kind, or one decoded
+# to any other type, is refused, so an opcode a later Python adds cannot go uncharged; a test ties
+# this list to ``pickletools.opcodes``.
+_ARGUMENT_KINDS: Final = frozenset(
+    {
+        "uint1", "uint2", "int4", "uint4", "uint8", "long1", "long4",
+        "decimalnl_short", "decimalnl_long", "floatnl", "float8",
+        "string1", "string4", "stringnl", "stringnl_noescape", "stringnl_noescape_pair",
+        "unicodestring1", "unicodestring4", "unicodestring8", "unicodestringnl",
+        "bytes1", "bytes4", "bytes8", "bytearray8",
+    }
+)  # fmt: skip
+_ARGUMENT_TYPES: Final = (int, float, str, bytes, bytearray)
 RESULT_TYPE: Final = re.compile(r"vault(?:\.[a-z_][a-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*")
 SUPPORTED_PLATFORMS: Final = frozenset({"win32", "linux"})
 # The variables a Python child needs to start and find its temporary folder; nothing else of the
@@ -313,7 +328,8 @@ def _check_expansion(payload: memoryview, max_memory: int, max_opcodes: int) -> 
     which the sandbox exists to protect. So the opcodes are read first, without building anything
     (``pickletools.genops``, over the same view, so the answer is not copied), and each is charged
     what the unpickler can allocate for it (``_OPCODE_BYTES``, ``_SET_OPCODE_BYTES``) plus the size
-    of its decoded argument (a string, bytes or a number, as Python holds it). The read stops at the
+    of its decoded argument (a number, a string, bytes or a bytearray, as Python holds it; an
+    argument of a kind ``_ARGUMENT_KINDS`` does not list is refused). The read stops at the
     first opcode past ``max_opcodes`` or the first byte past ``max_memory``, so judging a hostile
     answer costs a bounded time too. Objects the unpickler would share (memo lookups, ``DUP``) are
     charged as if new, which only errs on the safe side. No global is resolved here; the unpickler
@@ -329,7 +345,9 @@ def _check_expansion(payload: memoryview, max_memory: int, max_opcodes: int) -> 
         if opcode.name in _FREE_OPCODES:
             continue
         charged += _SET_OPCODE_BYTES if opcode.name in _SET_OPCODES else _OPCODE_BYTES
-        if isinstance(argument, str | bytes | int):
+        if opcode.arg is not None:
+            if opcode.arg.name not in _ARGUMENT_KINDS or not isinstance(argument, _ARGUMENT_TYPES):
+                raise SandboxResultError
             charged += sys.getsizeof(argument)
         if charged > max_memory:
             raise SandboxResultError

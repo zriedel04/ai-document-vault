@@ -530,6 +530,61 @@ def pickle_of(value: object) -> bytes:
     return pickle.dumps(value, protocol=5)
 
 
+# Values of each kind of argument a pickle opcode carries, in the protocols that write it; all
+# different, so the pickler cannot share one object between them.
+SIZED = {
+    "bytearray": ([bytearray(b"x" * 300_000)], 5),
+    "bytes": ([b"x" * 300_000], 5),
+    "short bytes": ([b"%05d" % n + b"x" * 200 for n in range(2_000)], 5),
+    "str": (["x" * 300_000], 5),
+    "str, protocol 0": (["x" * 300_000], 0),
+    "short str": ([f"{n:05}" + "x" * 200 for n in range(2_000)], 5),
+    "int": ([1 << 2_400_000], 5),
+    "ints, protocol 0": ([(1 << 13_000) + n for n in range(200)], 0),
+    "floats": ([1.5 + n for n in range(2_000)], 5),
+    "floats, protocol 0": ([1.5 + n for n in range(2_000)], 0),
+}
+
+
+@pytest.mark.parametrize(("values", "protocol"), SIZED.values(), ids=SIZED.keys())
+def test_every_argument_is_charged_at_least_its_size(values: list[object], protocol: int) -> None:
+    import pickle
+
+    payload = memoryview(pickle.dumps(values, protocol=protocol))
+    built = pickle.loads(payload)  # noqa: S301 - a pickle built above
+    size = sum(sys.getsizeof(value) for value in built)
+    assert sandbox._check_expansion(payload, 1 << 40, 1 << 40) >= size
+    with pytest.raises(SandboxResultError):
+        sandbox._check_expansion(payload, size, 1 << 40)
+
+
+def test_a_large_bytearray_answer_is_refused_by_the_memory_budget() -> None:
+    answer = sandbox_child.OK + pickle_of(bytearray(5 * MIB))
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(answer, frozenset(), max_memory=1_000)
+
+
+def test_the_argument_kinds_are_every_kind_pickletools_knows() -> None:
+    import pickletools
+
+    kinds = {opcode.arg.name for opcode in pickletools.opcodes if opcode.arg is not None}
+    assert kinds == sandbox._ARGUMENT_KINDS
+
+
+def test_an_argument_of_a_kind_or_type_that_is_not_listed_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = memoryview(pickle_of(bytearray(b"abc")))
+    assert sandbox._check_expansion(payload, 1 << 40, 1 << 40) > 0
+    monkeypatch.setattr(sandbox, "_ARGUMENT_KINDS", sandbox._ARGUMENT_KINDS - {"bytearray8"})
+    with pytest.raises(SandboxResultError):
+        sandbox._check_expansion(payload, 1 << 40, 1 << 40)
+    monkeypatch.undo()
+    monkeypatch.setattr(sandbox, "_ARGUMENT_TYPES", (int, float, str, bytes))
+    with pytest.raises(SandboxResultError):
+        sandbox._check_expansion(payload, 1 << 40, 1 << 40)
+
+
 @pytest.mark.parametrize(
     "answer",
     [
