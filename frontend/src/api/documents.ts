@@ -181,3 +181,47 @@ export const MOVE_UNKNOWN_TEXT =
 /** What it says when the document could not be loaded again either. */
 export const MOVE_UNKNOWN_RELOAD_FAILED_TEXT =
   "We could not confirm the change, and the document could not be loaded again, so it may not be shown as it is now.";
+
+/** Why a permanent delete was refused: a load error, or a document that is not in the trash. */
+export type DeleteError = DocumentsError | "not-in-trash";
+
+/**
+ * How a permanent delete ended: deleted (the backend answered 204), refused (a 4xx: nothing was
+ * deleted), or unknown (the request may have reached the backend, but the answer does not prove
+ * what it did; the caller must ask for the document again, and a 404 then shows it is gone).
+ */
+export type DeleteResult =
+  { status: "deleted" } | { status: "error"; error: DeleteError } | { status: "unknown" };
+
+/**
+ * Delete a document in the trash for good (`DELETE /api/documents/{id}`). Only the status code
+ * decides, so nothing the server wrote reaches the page. A 409 is the backend's refusal of a
+ * document that is not in the trash. A 404 is a refusal too, also when an earlier attempt whose
+ * answer was lost had deleted it: the page cannot tell the two apart, and its text says so.
+ */
+export async function deleteDocument(api: Api, documentId: string): Promise<DeleteResult> {
+  try {
+    const { response } = await api.DELETE("/api/documents/{document_id}", {
+      params: { path: { document_id: documentId } },
+    });
+    if (response.status === 409) return { status: "error", error: "not-in-trash" };
+    if (response.status >= 400 && response.status < 500) {
+      return { status: "error", error: errorFor(response.status) };
+    }
+    // Only the backend's own answer for a delete proves it: 204. A 5xx, another 2xx or a 3xx
+    // does not.
+    return response.status === 204 ? { status: "deleted" } : { status: "unknown" };
+  } catch {
+    // The request may have been sent before the connection or the answer failed.
+    return { status: "unknown" };
+  }
+}
+
+/** What a refused delete says. */
+export const DELETE_ERROR_TEXT: Record<DeleteError, string> = {
+  ...ERROR_TEXT,
+  "not-found": "There is no such document. It may have been deleted already.",
+  "not-in-trash":
+    "Only a document in the trash can be deleted permanently. Reload the page to see where it is.",
+  unreachable: "Nothing was deleted. Reload the page and try again.",
+};

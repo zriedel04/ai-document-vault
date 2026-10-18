@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import threading
@@ -19,7 +20,7 @@ from vault.db.migrate import upgrade_to_latest
 from vault.db.schema import blobs, document_versions, documents, import_sources, jobs
 from vault.ingest import importer as importer_module
 from vault.ingest.importer import FIRST_STAGE, Importer, ImportRequest, Outcome
-from vault.ingest.validate import Kind, Limits, Reason, Verdict
+from vault.ingest.validate import Kind, Limits, Reason, Verdict, validate_file
 from vault.jobs.queue import JobQueue
 from vault.storage.blobs import BlobIntegrityError, BlobStore
 
@@ -431,3 +432,36 @@ def test_a_job_queued_in_a_transaction_that_fails_is_not_kept(engine: Engine) ->
         write_then_fail()
     assert rows(engine, jobs) == []
     assert rows(engine, documents) == []
+
+
+# --- a permanent delete and another import while the stored copy is checked --------------------
+
+
+def test_a_check_of_a_copy_removed_and_stored_again_meanwhile_is_tried_again(
+    engine: Engine, store: BlobStore, importer: Importer, incoming: Path, monkeypatch: Any
+) -> None:
+    """A permanent delete removes the copy while it is checked, so the check refuses a missing
+    file, and another import stores the same bytes again under the same name before the import
+    looks. The refusal judged no blob: the import tries again instead of refusing the file, and it
+    never removes the other import's copy."""
+    real = validate_file
+    sha = hashlib.sha256(TEXT).hexdigest()
+    swapped: list[Verdict] = []
+
+    def check_while_swapped(path: Path, limits: Limits) -> Verdict:
+        if swapped or not path.is_relative_to(store.root):
+            return real(path, limits)
+        assert store.delete(sha)  # the permanent delete, during the check
+        verdict = real(path, limits)
+        swapped.append(verdict)
+        store.put(io.BytesIO(TEXT), "txt")  # the other import, before this one looks
+        return verdict
+
+    monkeypatch.setattr(importer_module, "validate_file", check_while_swapped)
+    result = importer.import_file(request(write(incoming, "notes.txt", TEXT)))
+
+    assert [verdict.ok for verdict in swapped] == [False]
+    assert result.outcome is Outcome.IMPORTED
+    assert store.find(sha) is not None
+    assert store.verify(sha)
+    assert [row.sha256 for row in rows(engine, blobs)] == [sha]

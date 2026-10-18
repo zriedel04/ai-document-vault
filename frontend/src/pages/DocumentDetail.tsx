@@ -7,17 +7,20 @@ import {
   Code,
   Group,
   Loader,
+  Modal,
   SimpleGrid,
   Stack,
   Table,
   Text,
   Title,
 } from "@mantine/core";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useRef, useState } from "react";
 
 import { useApi } from "../api/api-context";
 import {
+  DELETE_ERROR_TEXT,
+  type DeleteError,
   type DocumentDetail as Detail,
   type DocumentsError,
   ERROR_TEXT,
@@ -26,6 +29,7 @@ import {
   MOVE_UNKNOWN_TEXT,
   type MoveAction,
   STATE_LABEL,
+  deleteDocument,
   fileName,
   formatDate,
   formatSize,
@@ -34,6 +38,7 @@ import {
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
 import { loadDocument, useDocument } from "../api/useDocuments";
+import { DEFAULT_SEARCH } from "./documents-search";
 
 const METHOD_LABEL: Record<Detail["import_sources"][number]["method"], string> = {
   upload: "Upload",
@@ -124,10 +129,11 @@ const MOVED_TEXT: Record<MoveAction, { title: string; text: string }> = {
   restore: { title: "Restored", text: "The document is back in the library." },
 };
 
-/** How the last move ended, as the page tells it. */
+/** How the last move or delete ended, as the page tells it (a delete that was made leaves). */
 type MoveOutcome =
   | { kind: "done"; action: MoveAction }
   | { kind: "refused"; action: MoveAction; error: DocumentsError }
+  | { kind: "delete-refused"; error: DeleteError }
   | { kind: "unknown" }
   | { kind: "unknown-reload-failed"; error: DocumentsError };
 
@@ -144,23 +150,33 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
   // The document as the last trash or restore returned it; it starts as the page loaded it.
   const [document, setDocument] = useState(loaded);
   const [moving, setMoving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   // Set at once on a click, before React re-renders the disabled button, so a second click that
-  // arrives in between sends nothing.
+  // arrives in between sends nothing. One flag for moves and deletes: only one runs at a time.
   const movingNow = useRef(false);
   const [outcome, setOutcome] = useState<MoveOutcome | null>(null);
   const trashed = document.state === "trashed";
+  const navigate = useNavigate();
+
+  const settle = (next: MoveOutcome, error?: DeleteError) => {
+    movingNow.current = false;
+    setMoving(false);
+    setDeleting(false);
+    setOutcome(next);
+    if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
+  };
+
+  const backToTrash = () => {
+    movingNow.current = false;
+    void navigate({ to: "/documents", search: { ...DEFAULT_SEARCH, trash: true } });
+  };
 
   const move = (action: MoveAction) => {
     if (movingNow.current) return;
     movingNow.current = true;
     setMoving(true);
     setOutcome(null);
-    const settle = (next: MoveOutcome, error?: DocumentsError) => {
-      movingNow.current = false;
-      setMoving(false);
-      setOutcome(next);
-      if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
-    };
     void moveDocument(api, document.id, action).then(async (result) => {
       if (result.status === "ok") {
         setDocument(result.document);
@@ -177,6 +193,34 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
       if (reloaded.status === "ok") {
         setDocument(reloaded.data);
         settle({ kind: "unknown" });
+      } else {
+        settle({ kind: "unknown-reload-failed", error: reloaded.error }, reloaded.error);
+      }
+    });
+  };
+
+  const remove = () => {
+    setConfirming(false);
+    if (movingNow.current) return;
+    movingNow.current = true;
+    setDeleting(true);
+    setOutcome(null);
+    void deleteDocument(api, document.id).then(async (result) => {
+      if (result.status === "deleted") {
+        backToTrash();
+        return;
+      }
+      if (result.status === "error") {
+        settle({ kind: "delete-refused", error: result.error }, result.error);
+        return;
+      }
+      // The delete may have been made: ask for the document again. A 404 says it is gone.
+      const reloaded = await loadDocument(api, document.id);
+      if (reloaded.status === "ok") {
+        setDocument(reloaded.data);
+        settle({ kind: "unknown" });
+      } else if (reloaded.error === "not-found") {
+        backToTrash();
       } else {
         settle({ kind: "unknown-reload-failed", error: reloaded.error }, reloaded.error);
       }
@@ -202,15 +246,28 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
         </Title>
         <Group gap="sm">
           {trashed ? (
-            <Button
-              variant="default"
-              onClick={() => {
-                move("restore");
-              }}
-              loading={moving}
-            >
-              Restore
-            </Button>
+            <>
+              <Button
+                variant="default"
+                onClick={() => {
+                  move("restore");
+                }}
+                loading={moving}
+                disabled={deleting}
+              >
+                Restore
+              </Button>
+              <Button
+                color="red"
+                onClick={() => {
+                  setConfirming(true);
+                }}
+                loading={deleting}
+                disabled={moving}
+              >
+                Delete permanently
+              </Button>
+            </>
           ) : (
             <Button
               variant="light"
@@ -228,6 +285,33 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
           </Button>
         </Group>
       </Group>
+      <Modal
+        opened={confirming}
+        onClose={() => {
+          setConfirming(false);
+        }}
+        title="Delete permanently?"
+      >
+        <Stack>
+          <Text size="sm" style={{ wordBreak: "break-word" }}>
+            {fileName(document)} will be deleted for good: its stored file, its imports and its
+            processing steps. This cannot be undone.
+          </Text>
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                setConfirming(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button color="red" onClick={remove}>
+              Delete permanently
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
       {saveError !== null && (
         <Alert color="red" title="Download failed">
           {ERROR_TEXT[saveError]}
@@ -241,6 +325,11 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
       {outcome?.kind === "refused" && (
         <Alert color="red" title={MOVE_FAILED_TITLE[outcome.action]}>
           {MOVE_ERROR_TEXT[outcome.error]}
+        </Alert>
+      )}
+      {outcome?.kind === "delete-refused" && (
+        <Alert color="red" title="Not deleted">
+          {DELETE_ERROR_TEXT[outcome.error]}
         </Alert>
       )}
       {outcome?.kind === "unknown" && (
