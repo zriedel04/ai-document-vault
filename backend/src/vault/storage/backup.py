@@ -53,6 +53,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Final, cast
 
+from vault.core import security
 from vault.storage import acl
 from vault.storage.blobs import (
     EXTENSION,
@@ -302,6 +303,14 @@ def _read_token(path: Path) -> bytes | None:
         data = handle.read(TOKEN_MAX_BYTES + 1)
     if len(data) > TOKEN_MAX_BYTES:
         msg = "the vault's token file is far larger than a token; it was not copied"
+        raise BackupError(msg)
+    # Start-up's own rule (security.parse_token): a snapshot must never keep a token that a
+    # restored vault would refuse to start with. The bytes are copied as they are.
+    if security.parse_token(data) is None:
+        msg = (
+            "the vault's token file does not hold a valid token, so no snapshot was made; "
+            "delete it and start the server once to create a new one"
+        )
         raise BackupError(msg)
     return data
 

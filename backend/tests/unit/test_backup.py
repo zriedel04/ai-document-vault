@@ -24,6 +24,8 @@ from unittest import mock
 import pytest
 
 from vault import backup as cli
+from vault.core import security
+from vault.core.security import load_or_create_token
 from vault.db import ids
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
@@ -228,6 +230,56 @@ class TestABackup:
         with pytest.raises(BackupError, match="token file"):
             backup(vault, target)
         assert list((target / "snapshots").iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("content", "valid"),
+        [
+            pytest.param(b"", False, id="empty"),
+            pytest.param(TOKEN_TEXT[:20].encode(), False, id="truncated"),
+            pytest.param(("é" * 40).encode(), False, id="not-ascii"),
+            pytest.param(TOKEN_TEXT.encode() + b"\xff", False, id="a-stray-byte"),
+            pytest.param(TOKEN_TEXT.encode() + b"\n", True, id="trailing-newline"),
+            pytest.param(TOKEN_TEXT.encode() + b"\r\n", True, id="windows-line-end"),
+            pytest.param(TOKEN_TEXT.encode(), True, id="valid"),
+        ],
+    )
+    def test_the_backup_judges_the_token_as_start_up_does(
+        self, vault: Path, target: Path, content: bytes, valid: bool
+    ) -> None:
+        """Only a token that start-up would accept is kept: a snapshot with any other would give
+        a restored vault that cannot start (Codex P2 on PR #59)."""
+        (vault / "local-token").write_bytes(content)
+        try:
+            load_or_create_token(vault / "local-token")
+        except ValueError:
+            starts = False
+        else:
+            starts = True
+        assert starts is valid  # what start-up decides, independently of the backup
+        if valid:
+            result = backup(vault, target)
+            copy = target / "snapshots" / result.snapshot / "local-token"
+            assert copy.read_bytes() == content  # copied as it is, line end included
+        else:
+            with pytest.raises(BackupError, match="does not hold a valid token"):
+                backup(vault, target)
+            assert list((target / "snapshots").iterdir()) == []
+
+    def test_the_backup_and_start_up_share_one_token_rule(
+        self, vault: Path, target: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[bytes] = []
+
+        def refuse_all(data: bytes) -> str | None:
+            seen.append(data)
+            return None
+
+        monkeypatch.setattr(security, "parse_token", refuse_all)
+        with pytest.raises(ValueError, match="not a valid token"):
+            load_or_create_token(vault / "local-token")
+        with pytest.raises(BackupError, match="does not hold a valid token"):
+            backup(vault, target)
+        assert seen == [TOKEN_TEXT.encode(), TOKEN_TEXT.encode()]  # start-up, then the backup
 
     def test_a_token_file_far_larger_than_a_token_is_refused(
         self, vault: Path, target: Path
