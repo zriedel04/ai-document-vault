@@ -239,3 +239,55 @@ export const DELETE_ERROR_TEXT: Record<DeleteError, string> = {
     "Only a document in the trash can be deleted permanently. Reload the page to see where it is.",
   unreachable: "Nothing was deleted. Reload the page and try again.",
 };
+
+/** Why a retry was refused: a load error, or a document in the trash. */
+export type RetryError = DocumentsError | "in-trash";
+
+/**
+ * How a retry ended: done (with the document as the backend now has it), refused (a 4xx: nothing
+ * was queued), or unknown (the request may have reached the backend; ask for the document again).
+ */
+export type RetryResult =
+  | { status: "ok"; document: DocumentDetail }
+  | { status: "error"; error: RetryError }
+  | { status: "unknown" };
+
+/**
+ * The jobs a Retry queues again: of each step, the latest job, when it failed. The backend lists a
+ * document's jobs by step and, within a step, oldest first, and retries by the same rule.
+ */
+export function retryableJobs(document: DocumentDetail): DocumentDetail["jobs"] {
+  const latest = new Map<string, DocumentDetail["jobs"][number]>();
+  for (const job of document.jobs) latest.set(job.stage, job);
+  return [...latest.values()].filter((job) => job.status === "failed");
+}
+
+/**
+ * Queue a document's failed processing again (`POST /api/documents/{id}/retry`) and return it as
+ * the backend now has it. Only the status code decides the error. The backend queues before it
+ * reads the document for the answer, so a 5xx, a lost connection or an answer for another
+ * document is "unknown". Pressing again is safe: a retry queues the same work once.
+ */
+export async function retryDocument(api: Api, documentId: string): Promise<RetryResult> {
+  try {
+    const { data, response } = await api.POST("/api/documents/{document_id}/retry", {
+      params: { path: { document_id: documentId } },
+    });
+    if (response.status === 409) return { status: "error", error: "in-trash" };
+    if (response.status >= 400 && response.status < 500) {
+      return { status: "error", error: errorFor(response.status) };
+    }
+    if (!response.ok || data?.id !== documentId) return { status: "unknown" };
+    return { status: "ok", document: data };
+  } catch {
+    // The request may have been sent before the connection or the answer failed.
+    return { status: "unknown" };
+  }
+}
+
+/** What a refused retry says. */
+export const RETRY_ERROR_TEXT: Record<RetryError, string> = {
+  ...ERROR_TEXT,
+  "in-trash": "A document in the trash is not processed. Restore it first.",
+  unreachable: "Nothing was queued. Reload the page and try again.",
+};
