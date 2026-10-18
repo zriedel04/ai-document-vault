@@ -1,0 +1,10 @@
+Team Northwind - Sprint 3 Board
+TO DO
+Write search tests
+Export calendar file
+IN PROGRESS
+Group page layout (Sam)
+Join request endpoint (Jordan)
+DONE
+Account signup (Alex)
+Create group form (Sam)

@@ -884,7 +884,7 @@ Your private eval questions live in the vault folder (`D:\AIVault\eval\questions
 
 ### Demo mode
 
-`.\vault.ps1 demo` creates a throwaway vault in a temp folder, imports `demo/corpus/`, and opens the app with a "Demo vault" banner. Import, keyword, semantic and hybrid search, the viewer, citations into the viewer and the debug trace all work with no API key and no cost, because embeddings and OCR are local. Ask the Vault in demo mode uses an **offline answer mode** that shows the retrieved, cited passages as the answer (no generation), and can optionally replay recorded answers for the scripted example questions. If a key is configured, real providers work normally. The demo also drives the README screenshots and GIFs, so they never show private data.
+`.\vault.ps1 demo` creates a throwaway vault in a temp folder, imports the documents `demo/corpus/manifest.json` lists (not every file: `demo/corpus/references/` holds the Phase 0 spikes' reference texts), and opens the app with a "Demo vault" banner. Import, keyword, semantic and hybrid search, the viewer, citations into the viewer and the debug trace all work with no API key and no cost, because embeddings and OCR are local. Ask the Vault in demo mode uses an **offline answer mode** that shows the retrieved, cited passages as the answer (no generation), and can optionally replay recorded answers for the scripted example questions. If a key is configured, real providers work normally. The demo also drives the README screenshots and GIFs, so they never show private data.
 
 ### Licences
 

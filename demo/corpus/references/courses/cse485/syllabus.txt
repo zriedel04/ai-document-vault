@@ -1,0 +1,37 @@
+CSE 485: Capstone Project - Course Syllabus
+Lakeshore Institute of Technology, Department of Computer Science. Fall 2026.
+Course information
+The course runs from September 1 to December 11, 2026. Class meets on Tuesdays and Thursdays from 2:00 PM to 3:15 PM in Room 214 of Harbor Hall.
+Instructor: Dr. Priya Raman, priya.raman@lit.example. Office hours are on Wednesdays from 10:00 AM to 12:00 PM in Room 318 of Harbor Hall.
+Teaching assistant: Marcus Bell. His office hours are on Fridays from 1:00 PM to 3:00 PM, online.
+Description
+In this course, teams of three or four students design, build and demonstrate a software product for a real or realistic user. The course emphasises requirements, design reviews and working in a team.
+Learning outcomes
+- Write testable requirements and trace them to design decisions.
+- Plan and track work in a small team using an agile board.
+- Present a working prototype and defend design choices.
+Grading
+The final grade is made up of the following parts.
+- Project proposal: 10 percent
+- Requirements specification: 15 percent
+- Design review: 15 percent
+- Prototype demo: 20 percent
+- Final report: 25 percent
+- Peer evaluation: 5 percent
+- Participation: 10 percent
+Late work
+Late work loses 10 percent per day, up to five days. After five days the work is not accepted.
+Extension requests must be sent to the instructor at least 48 hours before the deadline. An extension is granted at the instructor's discretion and does not carry a penalty.
+Academic integrity
+All submitted work must be the team's own. Using code or text from another source without citing it is a violation of the academic integrity policy.
+Schedule of deadlines
+- Project proposal: due Friday, September 18, 2026 at 11:59 PM
+- Requirements specification: due Friday, October 9, 2026 at 11:59 PM
+- Design review: Friday, October 30, 2026
+- Prototype demo: Friday, November 20, 2026
+- Final report: due Friday, December 4, 2026 at 11:59 PM
+There is no final exam in this course.
+Required textbook
+Software Engineering in Practice, 4th edition, by R. Whitfield. The bookstore lists it at 89.95 dollars.
+Course tools
+Teams use the course portal to submit work and an agile board of their choice to track tasks. Source code must be kept in a version-control repository that the instructor can access.
