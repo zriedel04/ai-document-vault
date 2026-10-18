@@ -531,6 +531,51 @@ def test_alternate_content_in_a_paragraph_is_read_from_the_first_choice_only() -
     assert text_of(build(fill)) == "new form"
 
 
+def test_alternate_content_with_only_a_fallback_reads_the_fallback() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f"<w:p {W} {MC}><mc:AlternateContent><mc:Fallback><w:r><w:t>only form</w:t></w:r>"
+            "</mc:Fallback></mc:AlternateContent></w:p>",
+        )
+
+    assert text_of(build(fill)) == "only form"
+
+
+def alternate(choice: str, fallback: str = "") -> str:
+    tail = f"<mc:Fallback>{fallback}</mc:Fallback>" if fallback else ""
+    head = '<mc:AlternateContent><mc:Choice Requires="w14">'
+    return f"{head}{choice}</mc:Choice>{tail}</mc:AlternateContent>"
+
+
+def cell(text: str) -> str:
+    return f"<w:tc><w:p>{run(text)}</w:p></w:tc>"
+
+
+def test_alternate_content_around_blocks_rows_and_cells_is_read_once() -> None:
+    """Alternate content may wrap a paragraph or a table in the body, a row in a table and a cell
+    in a row: the choice is read, as in a paragraph, and the fallback copy is not."""
+    fallback_paragraph = f"<w:p>{run(CANARY)}</w:p>"
+
+    def fill(document: DocumentObject) -> None:
+        body = document.element.body
+        blocks = [
+            f"<w:p>{run('paragraph')}</w:p>",
+            f"<w:tbl><w:tr>{cell('table')}</w:tr></w:tbl>",
+        ]
+        for block in blocks:
+            wrapped = alternate(block, fallback_paragraph)
+            body.insert(len(body) - 1, parse_xml(f"<w:body {W} {MC}>{wrapped}</w:body>")[0])
+        row = alternate(f"<w:tr>{cell('row')}</w:tr>", f"<w:tr>{cell(CANARY)}</w:tr>")
+        cells = f"<w:tr>{cell('a')}{alternate(cell('b'), cell(CANARY))}</w:tr>"
+        table = f"<w:tbl {W} {MC}>{row}{cells}</w:tbl>"
+        body.insert(len(body) - 1, parse_xml(table))
+
+    text = text_of(build(fill))
+    assert text == PARAGRAPH_BREAK.join(["paragraph", "table", "row\na\tb"])
+    assert CANARY not in text
+
+
 # Every container of run text, decided one by one
 
 

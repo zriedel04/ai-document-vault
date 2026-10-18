@@ -28,7 +28,9 @@ What the text holds:
   moved-out text is left out. A deleted paragraph mark still ends its paragraph.
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
   a box twice (a DrawingML shape and a VML copy for old readers, in ``mc:AlternateContent``), so
-  only the first ``mc:Choice`` is read and the ``mc:Fallback`` copy is not.
+  only the first ``mc:Choice`` is read and the ``mc:Fallback`` copy is not; a fallback is read
+  only when there is no choice. The same rule applies wherever alternate content wraps a
+  paragraph, a table, a row or a cell.
 - Inside a paragraph, every element is read through unless ``EXCLUDED`` names it, so text inside a
   container is kept whatever the container: hyperlinks, smart tags, custom XML, inline content
   controls, simple fields, insertions and moves (``w:ins``, ``w:moveTo``), text direction
@@ -99,7 +101,11 @@ _RPR, _VANISH, _VAL = qn("w:rPr"), qn("w:vanish"), qn("w:val")
 _PPR, _PSTYLE, _TRPR = qn("w:pPr"), qn("w:pStyle"), qn("w:trPr")
 _TCPR, _CELL_DEL = qn("w:tcPr"), qn("w:cellDel")
 _STYLE, _STYLE_ID, _NAME, _TYPE = qn("w:style"), qn("w:styleId"), qn("w:name"), qn("w:type")
-_ALTERNATE, _CHOICE = f"{_MC}AlternateContent", f"{_MC}Choice"
+_ALTERNATE, _CHOICE, _FALLBACK = (
+    f"{_MC}AlternateContent",
+    f"{_MC}Choice",
+    f"{_MC}Fallback",
+)
 # Inside a paragraph every element is read through unless it is named here, so text in a container
 # this module does not list (``w:smartTag``, ``w:hyperlink``, the base of ``w:ruby``, a wrapper a
 # later Word adds) is kept rather than lost. Each of these is left out on purpose (see the module
@@ -246,8 +252,8 @@ def _segments(
 
 
 def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[BaseOxmlElement]:
-    """The children of ``container`` with a ``wanted`` tag, looking through content controls and
-    custom XML wrappers."""
+    """The children of ``container`` with a ``wanted`` tag, looking through content controls,
+    custom XML wrappers and alternate content (the representation ``_selected`` picks)."""
     for child in container.iterchildren():
         if child.tag in wanted:
             yield child
@@ -257,6 +263,21 @@ def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[Bas
                 yield from _blocks(content, wanted)
         elif child.tag == _CUSTOM_XML:
             yield from _blocks(child, wanted)
+        elif child.tag == _ALTERNATE:
+            chosen = _selected(child)
+            if chosen is not None:
+                yield from _blocks(chosen, wanted)
+
+
+def _selected(alternate: BaseOxmlElement) -> BaseOxmlElement | None:
+    """The one representation of ``mc:AlternateContent`` that is read: the first ``mc:Choice``,
+    or the ``mc:Fallback`` when there is no choice. Word writes some content twice (a text box
+    as DrawingML and again as VML for old readers), so reading more than one would double it."""
+    choice: BaseOxmlElement | None = alternate.find(_CHOICE)
+    if choice is not None:
+        return choice
+    fallback: BaseOxmlElement | None = alternate.find(_FALLBACK)
+    return fallback
 
 
 def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
@@ -315,9 +336,9 @@ class _Inline:
             elif tag == _ALTERNATE:
                 # Word writes some content twice (a text box as DrawingML and again as VML for old
                 # readers): the first choice is read and the fallback never is.
-                choice = child.find(_CHOICE)
-                if choice is not None:
-                    self.walk(choice)
+                chosen = _selected(child)
+                if chosen is not None:
+                    self.walk(chosen)
             elif tag != _R or not _hidden(child):
                 self.walk(child)
 
