@@ -230,6 +230,71 @@
         "title": "DocumentList",
         "type": "object"
       },
+      "DocumentPages": {
+        "properties": {
+          "extracted": {
+            "title": "Extracted",
+            "type": "boolean"
+          },
+          "extractor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extractor"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/Page"
+            },
+            "title": "Pages",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "extracted",
+          "extractor",
+          "total",
+          "offset",
+          "limit",
+          "pages",
+          "next_offset"
+        ],
+        "title": "DocumentPages",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -241,6 +306,29 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "Heading": {
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "text",
+          "offset"
+        ],
+        "title": "Heading",
         "type": "object"
       },
       "Health": {
@@ -374,6 +462,32 @@
         ],
         "title": "Outcome",
         "type": "string"
+      },
+      "Page": {
+        "properties": {
+          "headings": {
+            "items": {
+              "$ref": "#/components/schemas/Heading"
+            },
+            "title": "Headings",
+            "type": "array"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "text",
+          "headings"
+        ],
+        "title": "Page",
+        "type": "object"
       },
       "Reason": {
         "enum": [
@@ -735,6 +849,79 @@
           }
         },
         "summary": "Download Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{document_id}/pages": {
+      "get": {
+        "description": "The extracted text of the document's current version (in use or in the trash, like the\ndetails), as plain text by page, with each page's headings. A window starts after ``offset``\npages and holds at most ``limit`` pages and about a million characters: a page that would pass\nthat is left for the next window, but the first page of a window is always sent whole.\n``next_offset`` says where the next window starts. A document whose text has not been\nextracted yet answers with ``extracted`` false and no pages, not a 404.",
+        "operationId": "read_document_pages_api_documents__document_id__pages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 1000000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentPages"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "500": {
+            "description": "The stored text of this document breaks the page rules"
+          }
+        },
+        "summary": "Read Document Pages",
         "tags": [
           "documents"
         ]

@@ -34,6 +34,7 @@ import {
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
 import { loadDocument, useDocument } from "../api/useDocuments";
+import { TextView } from "./TextView";
 
 const METHOD_LABEL: Record<Detail["import_sources"][number]["method"], string> = {
   upload: "Upload",
@@ -357,6 +358,8 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
           </Table>
         </Table.ScrollContainer>
       )}
+
+      <TextView documentId={document.id} />
     </Stack>
   );
 }
