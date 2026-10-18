@@ -1251,3 +1251,31 @@ def test_a_copy_gives_up_when_its_folders_keep_disappearing(store: BlobStore) ->
         store.put(io.BytesIO(HELLO), "txt")
     assert store.find(HELLO_SHA) is None
     assert list((store.root / TEMP_FOLDER).iterdir()) == []
+
+
+def test_a_blob_removed_and_stored_again_is_another_file(store: BlobStore) -> None:
+    first = store.put(io.BytesIO(HELLO), "txt")
+    assert first.identity is not None
+    assert store.identity(HELLO_SHA) == first.identity
+    assert store.delete(HELLO_SHA)
+    assert store.identity(HELLO_SHA) is None
+    again = store.put(io.BytesIO(HELLO), "txt")  # the system may reuse the file number
+    assert again.path == first.path
+    assert again.identity == store.identity(HELLO_SHA)
+    assert again.identity != first.identity
+    # A repeated import returns the same file, so the same identity.
+    assert store.put(io.BytesIO(HELLO), "md").identity == again.identity
+
+
+def test_a_delete_of_one_file_leaves_another_stored_under_the_same_name(store: BlobStore) -> None:
+    first = store.put(io.BytesIO(HELLO), "txt")
+    assert first.identity is not None
+    store.delete(HELLO_SHA)
+    again = store.put(io.BytesIO(HELLO), "txt")
+
+    assert not store.delete(HELLO_SHA, only=first.identity)
+    assert store.find(HELLO_SHA) == again.path
+    assert is_read_only(again.path)
+    assert again.identity is not None
+    assert store.delete(HELLO_SHA, only=again.identity)
+    assert store.find(HELLO_SHA) is None

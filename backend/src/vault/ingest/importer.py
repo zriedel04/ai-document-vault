@@ -54,6 +54,7 @@ from vault.storage.blobs import (
     BlobNotFoundError,
     BlobStore,
     BlobTooLargeError,
+    FileIdentity,
 )
 
 FIRST_STAGE: Final = "extract"
@@ -212,21 +213,26 @@ class Importer:
             raise BlobIntegrityError(msg)
         verdict = validate_file(stored.path, self._limits)
         if not verdict.ok or verdict.extension is None or verdict.mime is None:
-            if self._store.find(stored.sha256) is None:
-                raise _BlobGoneError  # judged a file that was being removed, not these bytes
+            # A refusal counts only if it judged the blob: the file the copy returned, still the
+            # blob after the check. A permanent delete can remove it while it is read (the verdict
+            # is then about a missing file) and another import can store the same bytes again
+            # under the same name, so the name alone does not say which file was judged.
+            if stored.identity is None or self._store.identity(stored.sha256) != stored.identity:
+                raise _BlobGoneError
             if stored.created:
-                self._forget_unused_blob(stored.sha256)
+                self._forget_unused_blob(stored.sha256, stored.identity)
             return ImportResult(Outcome.REFUSED, reason=verdict.reason)
         return self._record(request, stored.sha256, stored.size, verdict.extension, verdict.mime)
 
-    def _forget_unused_blob(self, sha256: str) -> None:
-        """Remove a blob this import created, unless a row already uses it."""
+    def _forget_unused_blob(self, sha256: str, identity: FileIdentity) -> None:
+        """Remove a blob this import created, unless a row already uses it or it is no longer the
+        file this import created (the store decides that under its claim on the hash)."""
         with self._engine.connect() as connection:
             used = connection.execute(
                 select(blobs.c.sha256).where(blobs.c.sha256 == sha256)
             ).first()
         if used is None:
-            self._store.delete(sha256)
+            self._store.delete(sha256, only=identity)
 
     def _record(
         self, request: ImportRequest, sha256: str, size: int, extension: str, mime: str
