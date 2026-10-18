@@ -103,7 +103,7 @@ What the text holds:
 
 - Paragraphs and tables of the main body in document order, content controls and custom XML wrappers read through. Paragraphs are separated by a blank line (`\n\n`), a line break inside a paragraph is `\n`, and empty paragraphs are left out.
 - A table is one block: one line per row, cells separated by a tab. Inside a cell, paragraphs, breaks and tabs become spaces, and a nested table is flattened into its cell. A merged cell appears once, and rows whose cells are all empty are left out.
-- Tracked changes as if accepted: insertions and moved-in text kept, deletions, moved-out text and deleted table rows left out.
+- Tracked changes as if accepted: insertions and moved-in text kept, deletions, moved-out text and deleted table rows and deleted table cells (`w:cellDel`, so the next cell moves up a column) left out; inserted cells kept.
 - Text boxes kept, after the paragraph that anchors them, read once (Word writes each box twice, as DrawingML and as a VML copy for old readers; only the first `mc:Choice` is read).
 - Inside a paragraph every element is read through unless the extractor's `EXCLUDED` set names it, so text in any container is kept: hyperlinks, smart tags, custom XML, inline content controls, simple fields, insertions and moves, text direction, the base text of ruby, and any wrapper the extractor does not know. A test runs every pair of containers nested in each other, and one per excluded element, tied to the set.
 - Field results kept; field codes (`w:instrText`, and everything between a complex field's `begin` and `separate`, nested fields included) left out.

@@ -22,7 +22,8 @@ What the text holds:
 - A table is one block: one line per row, cells separated by a tab. Inside a cell, paragraphs,
   line breaks and tabs become single spaces so that a row stays one line, and a nested table is
   flattened into its cell the same way. A row whose cells are all empty, and a row deleted as a
-  tracked change, are left out.
+  tracked change, are left out, and so is a cell deleted as a tracked change (``w:cellDel``), so
+  the cells after it move up a column as they do when the change is accepted.
 - Tracked changes are read as if accepted: inserted and moved-in text is kept, deleted and
   moved-out text is left out. A deleted paragraph mark still ends its paragraph.
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
@@ -96,6 +97,7 @@ _DEL, _T, _TXBX_CONTENT = qn("w:del"), qn("w:t"), qn("w:txbxContent")
 _FLD_CHAR, _FLD_CHAR_TYPE = qn("w:fldChar"), qn("w:fldCharType")
 _RPR, _VANISH, _VAL = qn("w:rPr"), qn("w:vanish"), qn("w:val")
 _PPR, _PSTYLE, _TRPR = qn("w:pPr"), qn("w:pStyle"), qn("w:trPr")
+_TCPR, _CELL_DEL = qn("w:tcPr"), qn("w:cellDel")
 _STYLE, _STYLE_ID, _NAME, _TYPE = qn("w:style"), qn("w:styleId"), qn("w:name"), qn("w:type")
 _ALTERNATE, _CHOICE = f"{_MC}AlternateContent", f"{_MC}Choice"
 # Inside a paragraph every element is read through unless it is named here, so text in a container
@@ -268,10 +270,19 @@ def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
                 " ", " ".join(t for t, _ in _segments(cell, levels, top=False) if t.strip())
             ).strip()
             for cell in _blocks(row, (_TC,))
+            if not _cell_deleted(cell)
         ]
         if any(cells):
             rows.append(CELL_SEPARATOR.join(cells))
     return ROW_SEPARATOR.join(rows)
+
+
+def _cell_deleted(cell: BaseOxmlElement) -> bool:
+    """A cell deleted as a tracked change (``w:tcPr/w:cellDel``) no longer exists once the change
+    is accepted, so its text is not read and the cells after it move up a column. An inserted cell
+    (``w:cellIns``) is kept, like inserted text."""
+    properties = cell.find(_TCPR)
+    return properties is not None and properties.find(_CELL_DEL) is not None
 
 
 class _Inline:

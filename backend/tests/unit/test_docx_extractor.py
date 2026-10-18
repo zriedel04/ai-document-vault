@@ -6,7 +6,7 @@ import tracemalloc
 import zipfile
 import zlib
 from collections.abc import Callable
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import docx
 import pytest
@@ -385,6 +385,35 @@ def test_a_row_deleted_as_a_tracked_change_is_left_out() -> None:
         row.insert(0, parse_xml(f'<w:trPr {W}><w:del w:id="9" w:author="A"/></w:trPr>'))
 
     assert text_of(build(fill)) == "kept row"
+
+
+def test_a_cell_deleted_as_a_tracked_change_is_left_out() -> None:
+    """Accepting a cell deletion removes the cell: its text goes and the next cell moves up. A
+    row left with only deleted cells goes too, an inserted cell stays, and a nested table follows
+    the same rule."""
+
+    def mark(cell: Any, revision: str) -> None:
+        cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:{revision} {W} w:id="7" w:author="A"/>'))
+
+    def fill(document: DocumentObject) -> None:
+        table = document.add_table(rows=3, cols=3)
+        for row, values in enumerate(
+            (("a", CANARY, "c"), (CANARY, CANARY, CANARY), ("x", "y", "z"))
+        ):
+            for column, value in enumerate(values):
+                table.cell(row, column).text = value
+        mark(table.cell(0, 1), "cellDel")
+        for column in range(3):
+            mark(table.cell(1, column), "cellDel")
+        mark(table.cell(2, 2), "cellIns")
+        nested = table.cell(2, 0).add_table(rows=1, cols=2)
+        nested.cell(0, 0).text = CANARY
+        nested.cell(0, 1).text = "inner"
+        mark(nested.cell(0, 0), "cellDel")
+
+    text = text_of(build(fill))
+    assert text == "a\tc\nx inner\ty\tz"
+    assert CANARY not in text
 
 
 # What is left out
