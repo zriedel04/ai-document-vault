@@ -203,7 +203,7 @@ def test_only_the_current_versions_pages_are_shown(
     replace_pages(engine, old_version, [PageText(1, "old words")], "text-1", "utf-8")
     new_version = ids.new_ulid()
     with engine.begin() as connection:
-        blob = connection.execute(
+        blob: str = connection.execute(
             select(document_versions.c.blob_sha256).where(document_versions.c.id == old_version)
         ).scalar_one()
         connection.execute(
@@ -348,9 +348,7 @@ def test_damaged_pages_are_a_500_that_logs_no_text(
     assert not any(document_id in f"{record.getMessage()} {record.__dict__}" for record in own)
 
 
-def test_the_repository_names_damage_by_page_number_only(
-    library: Library, engine: Engine
-) -> None:
+def test_the_repository_names_damage_by_page_number_only(library: Library, engine: Engine) -> None:
     document_id = library.add("damaged.txt", "damaged\n")
     version_id = current_version(engine, document_id)
     with engine.begin() as connection:
