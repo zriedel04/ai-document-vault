@@ -54,3 +54,23 @@ def read_snapshot(engine: Engine) -> Iterator[Connection]:
             yield connection
         finally:
             connection.rollback()
+
+
+@contextmanager
+def write_transaction(engine: Engine) -> Iterator[Connection]:
+    """A connection that holds SQLite's write lock from its first statement to the end.
+
+    ``engine.begin()`` takes the lock only at the first write, so a check made by a read before it
+    can be overtaken by another writer. ``BEGIN IMMEDIATE`` takes the lock at once (waiting up to
+    the busy timeout for another writer to finish), so what the block reads stays true until it
+    ends: no other connection writes in between. Committed when the block ends, rolled back if it
+    raises.
+    """
+    with engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        connection.commit()

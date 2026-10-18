@@ -645,6 +645,46 @@
       }
     },
     "/api/documents/{document_id}": {
+      "delete": {
+        "description": "Delete a document in the trash for good: its versions, imports, pages and jobs, and each\nstored file that no other document uses. It cannot be undone. A document in use is refused\n(409) and left as it is; it must be moved to the trash first. An unknown id is a 404, also when\nthe document was deleted by an earlier request.\n\nThe answer is 204 once the rows are gone, even if a file could not be removed now: the start-up\nsweep moves such a file to ``blobs/orphans/`` (``vault.storage.purge``).",
+        "operationId": "delete_document_api_documents__document_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "409": {
+            "description": "The document is not in the trash"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Document",
+        "tags": [
+          "documents"
+        ]
+      },
       "get": {
         "description": "One document, in use or in the trash: what the list shows, plus its hash, current version,\nevery import (oldest first; the first names the document) and its processing jobs (in the\norder of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message\ndoes not repeat it.",
         "operationId": "read_document_api_documents__document_id__get",

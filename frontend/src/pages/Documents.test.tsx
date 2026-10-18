@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DELETE_ERROR_TEXT,
   type DocumentDetail,
   type DocumentItem,
   ERROR_TEXT,
@@ -742,6 +743,224 @@ describe("trash and restore", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Moved to trash");
     expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
     expect(posts(spy)).toHaveLength(1);
+  });
+});
+
+describe("permanent delete", () => {
+  const inTrash = detail({ state: "trashed", trashed_at: "2026-10-05T09:30:00Z" });
+  const SERVER_TEXT = "Lease agreement.pdf: private server detail";
+
+  /**
+   * A backend holding one trashed document. `answer` gives the delete's response; `applied`
+   * says whether the backend deleted it before answering (the later GET is then a 404).
+   */
+  function deletingBackend(answer: () => Response, applied = true) {
+    let exists = true;
+    let reloadFails = false;
+    const spy = backend((request, url) => {
+      if (url.pathname === "/api/documents") {
+        return jsonResponse({ items: exists ? [item(inTrash)] : [], total: exists ? 1 : 0 });
+      }
+      if (url.pathname !== `/api/documents/${ID}`) return undefined;
+      if (request.method === "DELETE") {
+        if (applied) exists = false;
+        return answer();
+      }
+      if (reloadFails) return jsonResponse({ detail: SERVER_TEXT }, 500);
+      return exists ? jsonResponse(inTrash) : jsonResponse({ detail: SERVER_TEXT }, 404);
+    });
+    return {
+      spy,
+      failReloads: () => {
+        reloadFails = true;
+      },
+    };
+  }
+
+  function deletes(spy: ReturnType<typeof backend>): Request[] {
+    return spy.mock.calls
+      .map(([input]) => input as Request)
+      .filter((request) => request.method === "DELETE");
+  }
+
+  async function confirmDelete() {
+    await userEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete permanently" }));
+    // The confirmation closes at once, whatever the answer.
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  }
+
+  it("is offered only for a document in the trash", async () => {
+    const spy = backend((request, url) =>
+      request.method === "GET" && url.pathname === `/api/documents/${ID}`
+        ? jsonResponse(detail({ state: "ready" }))
+        : undefined,
+    );
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    expect(await screen.findByRole("button", { name: "Move to trash" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
+  });
+
+  it("asks first, says it cannot be undone, and sends nothing when cancelled", async () => {
+    const { spy } = deletingBackend(() => new Response(null, { status: 204 }));
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Delete permanently?");
+    expect(dialog).toHaveTextContent("Lease agreement.pdf");
+    expect(dialog).toHaveTextContent("This cannot be undone.");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(deletes(spy)).toHaveLength(0);
+    expect(screen.getByText("In trash")).toBeInTheDocument();
+  });
+
+  it("deletes after the confirmation and goes back to the trash list", async () => {
+    const { spy } = deletingBackend(() => new Response(null, { status: 204 }));
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await confirmDelete();
+
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.get("trash")).toBe("true");
+    });
+    expect(listRequests(spy).at(-1)?.get("offset")).toBe("0");
+    expect(await screen.findByText("The trash is empty.")).toBeInTheDocument();
+    const [request] = deletes(spy);
+    expect(new URL(request?.url ?? "").pathname).toBe(`/api/documents/${ID}`);
+    expect(request?.headers.get("authorization")).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(deletes(spy)).toHaveLength(1);
+  });
+
+  it.each([
+    ["a 409", 409, DELETE_ERROR_TEXT["not-in-trash"]],
+    ["a 404", 404, DELETE_ERROR_TEXT["not-found"]],
+    ["a 422", 422, DELETE_ERROR_TEXT.unreachable],
+  ])("says the delete was refused after %s, with a fixed text", async (_case, status, text) => {
+    const { spy } = deletingBackend(() => jsonResponse({ detail: SERVER_TEXT }, status), false);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await confirmDelete();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Not deleted");
+    expect(alert).toHaveTextContent(text);
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    // A 4xx is a definite answer: the page stays, nothing is asked again, the button works.
+    expect(screen.getByText("In trash")).toBeInTheDocument();
+    expect(listRequests(spy)).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Delete permanently" })).toBeEnabled();
+  });
+
+  const lost = (): Response => {
+    throw new TypeError(SERVER_TEXT);
+  };
+
+  it.each([
+    ["a 500", () => jsonResponse({ detail: SERVER_TEXT }, 500)],
+    ["a lost connection", lost],
+    ["a 200 with a body", () => jsonResponse(inTrash)],
+  ])("goes back to the trash when %s followed a delete that was made", async (_case, answer) => {
+    const { spy } = deletingBackend(answer, true);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await confirmDelete();
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.get("trash")).toBe("true");
+    });
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+  });
+
+  it.each([
+    ["a 500", () => jsonResponse({ detail: SERVER_TEXT }, 500)],
+    ["a lost connection", lost],
+    ["a 200 with a body", () => jsonResponse(inTrash)],
+  ])("shows the document as it is when %s came before any delete", async (_case, answer) => {
+    const { spy } = deletingBackend(answer, false);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await confirmDelete();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Change not confirmed");
+    expect(alert).toHaveTextContent(MOVE_UNKNOWN_TEXT);
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    expect(screen.getByText("In trash")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete permanently" })).toBeEnabled();
+    expect(listRequests(spy)).toHaveLength(0);
+  });
+
+  it("offers to reload when the document cannot be loaded again either", async () => {
+    let failReloads = () => {};
+    const backendWithFailure = deletingBackend(() => {
+      failReloads();
+      return jsonResponse({ detail: SERVER_TEXT }, 500);
+    }, false);
+    failReloads = backendWithFailure.failReloads;
+    await renderApp({
+      route: `/documents/${ID}`,
+      fetch: backendWithFailure.spy,
+      token: TEST_TOKEN,
+    });
+    await confirmDelete();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(MOVE_UNKNOWN_RELOAD_FAILED_TEXT);
+    expect(alert).toHaveTextContent(ERROR_TEXT.unreachable);
+    expect(within(alert).getByRole("button", { name: "Reload" })).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+  });
+
+  it("brings the token notice back when the delete is refused for the token", async () => {
+    let exists = true;
+    const { spy, accepted } = restartingBackend((request, url) => {
+      if (url.pathname !== `/api/documents/${ID}`) return undefined;
+      if (request.method === "DELETE") {
+        exists = false;
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(inTrash);
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await screen.findByRole("button", { name: "Delete permanently" });
+
+    accepted.token = NEW_TOKEN;
+    await confirmDelete();
+    await pasteToken(NEW_TOKEN);
+
+    expect(await screen.findByRole("button", { name: "Delete permanently" })).toBeEnabled();
+    expect(exists).toBe(true);
+  });
+
+  it("sends one request however often the confirmation is clicked", async () => {
+    const answers: ((response: Response) => void)[] = [];
+    const spy = backend((request, url) => {
+      if (url.pathname === "/api/documents") return jsonResponse({ items: [], total: 0 });
+      if (url.pathname !== `/api/documents/${ID}`) return undefined;
+      if (request.method === "DELETE") {
+        return new Promise<Response>((resolve) => answers.push(resolve));
+      }
+      return jsonResponse(inTrash);
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await confirmDelete();
+    await waitFor(() => {
+      expect(answers).toHaveLength(1);
+    });
+    const button = screen.getByRole("button", { name: "Delete permanently" });
+    expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeDisabled();
+    await userEvent.click(button);
+    expect(deletes(spy)).toHaveLength(1);
+
+    answers[0]?.(new Response(null, { status: 204 }));
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.get("trash")).toBe("true");
+    });
+    expect(deletes(spy)).toHaveLength(1);
   });
 });
 
