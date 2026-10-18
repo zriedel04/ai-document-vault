@@ -1,0 +1,631 @@
+"""The sandbox runner: heavy parsing in a child process with a timeout and a memory cap.
+
+The plan (``docs/architecture.md`` sections 3, 7 and 10) and ADR 0005 run parsing in a child
+process, so a malformed file cannot hang, exhaust or crash the server. :func:`run` calls one named
+function on bytes in a fresh ``python -I -m vault.jobs.sandbox_child`` and returns its result, or
+raises one :class:`SandboxError` subclass that says how it failed:
+
+- :class:`SandboxTimeoutError`: it ran past the timeout; the child and everything it started are
+  killed and reaped;
+- :class:`SandboxMemoryLimitError`: an allocation failed at the memory cap;
+- :class:`SandboxCrashError`: the child ended without an answer (a non-zero exit code, a signal, or
+  ``os._exit(0)``);
+- :class:`SandboxChildError`: the function raised; only the exception's class name comes back
+  (``error_class``), never its message or traceback, which can quote the document;
+- :class:`SandboxResultError`: the result could not be pickled, was larger than the cap, held a
+  type that is not allowed for this entry point, or was not a well-formed answer;
+- :class:`SandboxRefusedError`: the entry point is not on the allowlist (nothing is started);
+- :class:`SandboxUnavailableError`: the child could not be started or limited on this system.
+
+Every message is fixed text, so a job's error (the class name, ``JobQueue.fail``) and any log line
+say what happened without quoting anything.
+
+**Allowlist.** Only entry points in :data:`ENTRY_POINTS` (or a mapping the caller passes) run,
+each a top-level function of a ``vault.`` module, ``vault.ingest.extractors.pdf:extract`` say. The
+child checks again that the name is a plain function defined in that module.
+
+**Input and answer.** The input goes to the child's standard input through a pipe and never
+appears on its command line; no temporary file is written, so there is no file a link could
+redirect. The child answers on its standard output, which the parent reads up to
+``max_result_bytes``; its standard error goes to the null device, and the child points its own
+descriptors 1 and 2 there too, so nothing a library prints reaches the server's console. The
+result is unpickled by an unpickler that resolves only the classes listed for the entry point
+(plain values such as ``str``, ``bytes``, numbers, lists, tuples, dicts and sets need none), so a
+child that a hostile file took over cannot make the server run code through the pickle. The child
+gets a reduced environment (:data:`CHILD_ENV`), without API keys or other secrets.
+
+**Memory cap.** On Windows the child is put in a Job Object with a process and a job memory limit
+(committed memory) and kill-on-close: when the server process ends for any reason, Windows closes
+the job's handle and ends every process in it, so a crash of the server leaves no orphan. The
+child starts suspended and runs only once it is in the job: in a virtual environment
+``sys.executable`` is a launcher that starts the real interpreter as its own child, and a process
+started before its parent joined the job would stay outside it. Processes started inside the job
+are in it too, so the cap and the kill cover the real interpreter and anything it starts. On Linux
+the child caps its own address space with
+``RLIMIT_AS`` before it reads the input, and asks the kernel to kill it when the parent dies
+(``PR_SET_PDEATHSIG``). Address space is larger than committed memory (libraries reserve more
+than they use), so the same number is stricter on Linux; the Linux path is for development and
+CI, the product runs on Windows. An allocation that fails raises ``MemoryError`` in the child,
+which reports it; a library that aborts instead shows up as :class:`SandboxCrashError`. Other
+systems are not supported (:class:`SandboxUnavailableError`).
+
+**Timeout.** The timeout covers the whole run, the child's start included. On expiry the parent
+ends the child's whole process group (Linux, ``start_new_session``) or job (Windows), then reaps
+the child. On Linux the parent notices the exit without reaping (``waitid`` with ``WNOWAIT``), so
+the group's id stays reserved until the group has been killed, also after a normal exit. A
+process the target starts that leaves the group on purpose (``setsid``) escapes that kill on
+Linux; on Windows the job allows no breakaway.
+
+Nothing calls this yet: the extraction stage's handler will be the first caller. The runner logs
+nothing; the worker logs the job's outcome.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import os
+import pickle
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import IO, TYPE_CHECKING, Final
+
+from vault.jobs import sandbox_child as child
+
+if TYPE_CHECKING:
+    from vault.core.config import ProcessingSettings
+
+MIB: Final = 1024 * 1024
+MIN_MEMORY_BYTES: Final = 64 * MIB  # the child's interpreter alone takes most of this on Linux
+DEFAULT_MAX_RESULT_BYTES: Final = 256 * MIB
+RESULT_TYPE: Final = re.compile(r"vault(?:\.[a-z_][a-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*")
+SUPPORTED_PLATFORMS: Final = frozenset({"win32", "linux"})
+# The variables a Python child needs to start and find its temporary folder; nothing else of the
+# server's environment (API keys among it) is passed on.
+CHILD_ENV: Final = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "HOME",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "COMSPEC",
+        "PATHEXT",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    }
+)
+_POLL_SECONDS: Final = 0.01
+_REAP_SECONDS: Final = 5.0
+_READ_CHUNK: Final = 1 << 16
+
+
+class SandboxError(Exception):
+    """The sandboxed call did not return a result. Each subclass names one way it failed."""
+
+    message = "the sandboxed call failed"
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
+
+
+class SandboxRefusedError(SandboxError):
+    message = "the entry point is not one the sandbox may run"
+
+
+class SandboxUnavailableError(SandboxError):
+    message = "the sandbox could not start or limit its child process on this system"
+
+
+class SandboxTimeoutError(SandboxError):
+    message = "the sandboxed call ran past its timeout and was killed"
+
+
+class SandboxMemoryLimitError(SandboxError):
+    message = "the sandboxed call ran out of memory at its cap"
+
+
+class SandboxCrashError(SandboxError):
+    message = "the sandboxed process ended without an answer"
+
+    def __init__(self, exit_code: int | None) -> None:
+        super().__init__()
+        # Negative on Linux for a signal (-6 is SIGABRT), as subprocess reports it.
+        self.exit_code = exit_code
+
+
+class SandboxChildError(SandboxError):
+    message = "the sandboxed call raised an exception"
+
+    def __init__(self, error_class: str) -> None:
+        super().__init__()
+        # A class name only (``[A-Za-z_][A-Za-z0-9_]*``), never the exception's message.
+        self.error_class = error_class
+
+
+class SandboxResultError(SandboxError):
+    message = "the sandboxed call's result could not be passed back"
+
+
+@dataclass(frozen=True)
+class EntryPoint:
+    """A function the sandbox may run: ``vault.module:function``, top-level in its module.
+
+    ``result_types`` lists the classes (``vault.module:Class``) its result may contain besides
+    plain values; the unpickler resolves no other global name.
+    """
+
+    target: str
+    result_types: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, str) or not child.TARGET.fullmatch(self.target):
+            msg = "an entry point is a top-level function of a vault module (vault.x:function)"
+            raise ValueError(msg)
+        if not isinstance(self.result_types, frozenset) or not all(
+            isinstance(name, str) and RESULT_TYPE.fullmatch(name) for name in self.result_types
+        ):
+            msg = "result types are classes of vault modules (vault.x:Class)"
+            raise ValueError(msg)
+
+
+# The extractors register their entry points here when the extraction stage is wired in.
+ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType({})
+
+
+@dataclass(frozen=True)
+class SandboxLimits:
+    timeout_seconds: float
+    memory_bytes: int
+    max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES
+
+    def __post_init__(self) -> None:
+        numbers = (self.timeout_seconds, self.memory_bytes, self.max_result_bytes)
+        if any(isinstance(n, bool) or not isinstance(n, int | float) for n in numbers):
+            msg = "sandbox limits are numbers"
+            raise TypeError(msg)
+        if not isinstance(self.memory_bytes, int) or not isinstance(self.max_result_bytes, int):
+            msg = "sandbox byte limits are whole numbers"
+            raise TypeError(msg)
+        if not 0 < self.timeout_seconds < float("inf"):
+            msg = "the sandbox timeout must be a positive, finite number of seconds"
+            raise ValueError(msg)
+        if self.memory_bytes < MIN_MEMORY_BYTES or self.max_result_bytes < 1:
+            msg = f"the sandbox memory cap must be at least {MIN_MEMORY_BYTES // MIB} MiB"
+            raise ValueError(msg)
+
+    @classmethod
+    def from_settings(cls, settings: ProcessingSettings) -> SandboxLimits:
+        """The limits in ``[processing]`` of ``config.toml``."""
+        return cls(
+            timeout_seconds=float(settings.sandbox_timeout_seconds),
+            memory_bytes=settings.sandbox_memory_mib * MIB,
+        )
+
+
+class _ResultUnpickler(pickle.Unpickler):
+    """Resolves only the classes an entry point lists; plain values need no global lookup."""
+
+    def __init__(self, file: IO[bytes], allowed: frozenset[str]) -> None:
+        super().__init__(file)
+        self._allowed = allowed
+
+    def find_class(self, module: str, name: str, /) -> object:
+        if f"{module}:{name}" not in self._allowed:
+            msg = "the result holds a type this entry point does not allow"
+            raise pickle.UnpicklingError(msg)
+        return super().find_class(module, name)
+
+
+def _load_result(payload: bytes, allowed: frozenset[str]) -> object:
+    try:
+        return _ResultUnpickler(io.BytesIO(payload), allowed).load()
+    except Exception:
+        raise SandboxResultError from None
+
+
+def child_env() -> dict[str, str]:
+    """The environment the child starts with: :data:`CHILD_ENV` only."""
+    return {key: value for key, value in os.environ.items() if key.upper() in CHILD_ENV}
+
+
+def run(
+    entry: str,
+    data: bytes | bytearray | memoryview,
+    limits: SandboxLimits,
+    *,
+    entry_points: Mapping[str, EntryPoint] = ENTRY_POINTS,
+) -> object:
+    """Run the entry point named ``entry`` on ``data`` in a child process and return its result.
+
+    Raises a :class:`SandboxError` subclass when there is no result. Safe to call from several
+    threads at once: each call has its own child (and on Windows its own job).
+    """
+    point = entry_points.get(entry) if isinstance(entry, str) else None
+    if not isinstance(point, EntryPoint):
+        raise SandboxRefusedError
+    if not isinstance(data, bytes | bytearray | memoryview):
+        msg = "the sandbox input is bytes"
+        raise TypeError(msg)
+    if not isinstance(limits, SandboxLimits):
+        msg = "limits must be SandboxLimits"
+        raise TypeError(msg)
+    if sys.platform not in SUPPORTED_PLATFORMS:
+        raise SandboxUnavailableError
+    answer, exit_code, timed_out, overflow = _Child(point.target, limits).run(bytes(data))
+    if timed_out:
+        raise SandboxTimeoutError
+    if overflow:
+        raise SandboxResultError
+    if exit_code != 0:
+        raise SandboxCrashError(exit_code)
+    return _interpret(answer, point.result_types)
+
+
+def _interpret(answer: bytes, allowed: frozenset[str]) -> object:
+    status, payload = answer[:1], answer[1:]
+    if status == child.OK:
+        return _load_result(payload, allowed)
+    if status == child.ERROR:
+        name = payload.decode("ascii", errors="replace")
+        raise SandboxChildError(name if child.ERROR_NAME.fullmatch(name) else child.UNNAMED_ERROR)
+    if payload:
+        raise SandboxResultError
+    if status == child.MEMORY:
+        raise SandboxMemoryLimitError
+    if status == child.UNPICKLABLE:
+        raise SandboxResultError
+    if status == child.REFUSED:
+        raise SandboxRefusedError
+    if status == child.SETUP:
+        raise SandboxUnavailableError
+    if status == b"":
+        raise SandboxCrashError(0)
+    raise SandboxResultError
+
+
+class _Child:
+    """One child process: start, limit, feed, wait, read, and always kill and reap."""
+
+    def __init__(self, target: str, limits: SandboxLimits) -> None:
+        self._target = target
+        self._limits = limits
+        self._answer = bytearray()
+        self._overflow = threading.Event()
+
+    def run(self, data: bytes) -> tuple[bytes, int | None, bool, bool]:
+        """Returns the answer, the exit code, whether it timed out and whether it overflowed."""
+        deadline = time.monotonic() + self._limits.timeout_seconds
+        guard = _Guard(self._limits.memory_bytes)
+        try:
+            process = self._start()
+        except OSError:
+            guard.close()
+            raise SandboxUnavailableError from None
+        pumps: list[threading.Thread] = []
+        timed_out = False
+        try:
+            if not guard.attach(process):
+                raise SandboxUnavailableError
+            pumps = [
+                threading.Thread(target=_feed, args=(process.stdin, data), daemon=True),
+                threading.Thread(target=self._drain, args=(process.stdout,), daemon=True),
+            ]
+            for pump in pumps:
+                pump.start()
+            while not guard.exited(process):
+                if self._overflow.is_set():
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                self._overflow.wait(_POLL_SECONDS)
+        finally:
+            # Kill the group or job even after a normal exit, so nothing the child started
+            # outlives it, then reap the child and let the pumps see the pipes close.
+            guard.kill(process)
+            exit_code: int | None
+            try:
+                exit_code = process.wait(_REAP_SECONDS)
+            except subprocess.TimeoutExpired:  # pragma: no cover - a process that ignores SIGKILL
+                exit_code = None
+            for pump in pumps:
+                pump.join(_REAP_SECONDS)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None:
+                    with contextlib.suppress(OSError):
+                        stream.close()
+            guard.close()
+        return bytes(self._answer), exit_code, timed_out, self._overflow.is_set()
+
+    def _start(self) -> subprocess.Popen[bytes]:
+        command = [
+            sys.executable,
+            "-I",
+            "-m",
+            child.__name__,
+            self._target,
+            str(self._limits.memory_bytes),
+            str(os.getpid()),
+        ]
+        if sys.platform == "win32":  # pragma: no cover - Windows only
+            # Suspended until it is in the job: in a virtual environment ``sys.executable`` is a
+            # launcher that starts the real interpreter as its own child, and a process started
+            # before its parent joined a job would stay outside it.
+            create_suspended, create_no_window = 0x00000004, 0x08000000
+            return subprocess.Popen(  # noqa: S603 - this interpreter and a fixed module
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=child_env(),
+                creationflags=create_suspended | create_no_window,
+            )
+        return subprocess.Popen(  # noqa: S603 - this interpreter and a fixed module
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=child_env(),
+            start_new_session=True,
+        )
+
+    def _drain(self, stream: IO[bytes] | None) -> None:
+        """Read the answer up to the cap (plus the status byte); past it, read and drop."""
+        if stream is None:  # pragma: no cover - always a pipe
+            return
+        limit = self._limits.max_result_bytes + 1
+        try:
+            while chunk := stream.read1(_READ_CHUNK):  # type: ignore[attr-defined]
+                if self._overflow.is_set():
+                    continue
+                if len(self._answer) + len(chunk) > limit:
+                    self._overflow.set()
+                    self._answer.clear()
+                    continue
+                self._answer += chunk
+        except (OSError, ValueError):  # the pipe was closed under us at teardown
+            pass
+
+
+def _feed(stream: IO[bytes] | None, data: bytes) -> None:
+    """Write the input and close the pipe, so the child sees its end. A child that stops reading
+    (it crashed, or never reads) breaks the pipe; that is its outcome to report, not ours."""
+    if stream is None:  # pragma: no cover - always a pipe
+        return
+    try:
+        stream.write(data)
+    except (OSError, ValueError):
+        pass
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            stream.close()
+
+
+if sys.platform == "win32":  # pragma: no cover - Windows only
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_ulonglong)
+            for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )
+        ]
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    _kernel32.TerminateJobObject.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
+    _JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200
+    _JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x0400
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_SET_QUOTA = 0x0100
+    _TH32CS_SNAPTHREAD = 0x0004
+    _THREAD_SUSPEND_RESUME = 0x0002
+    _INVALID_HANDLE = ctypes.c_void_p(-1).value
+    _RESUME_FAILED = 0xFFFFFFFF
+
+    class _ThreadEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    _kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry)]
+    _kernel32.Thread32First.restype = wintypes.BOOL
+    _kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry)]
+    _kernel32.Thread32Next.restype = wintypes.BOOL
+    _kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenThread.restype = wintypes.HANDLE
+    _kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    _kernel32.ResumeThread.restype = wintypes.DWORD
+
+    def _resume(pid: int) -> bool:
+        """Resume the threads of a process started with ``CREATE_SUSPENDED`` (it has one).
+
+        ``subprocess`` closes the thread handle that ``CreateProcess`` returns, so the thread is
+        found again through a Toolhelp snapshot. True if at least one thread was resumed.
+        """
+        snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == _INVALID_HANDLE:
+            return False
+        resumed = 0
+        try:
+            entry = _ThreadEntry()
+            entry.dwSize = ctypes.sizeof(_ThreadEntry)
+            more = _kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.th32OwnerProcessID == pid:
+                    thread = _kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                    if thread:
+                        try:
+                            if _kernel32.ResumeThread(thread) != _RESUME_FAILED:
+                                resumed += 1
+                        finally:
+                            _kernel32.CloseHandle(thread)
+                more = _kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            _kernel32.CloseHandle(snapshot)
+        return resumed > 0
+
+    class _Guard:
+        """A Job Object with a memory limit and kill-on-close, holding the child."""
+
+        def __init__(self, memory_bytes: int) -> None:
+            handle = _kernel32.CreateJobObjectW(None, None)
+            if not handle:
+                raise SandboxUnavailableError
+            info = _ExtendedLimits()
+            info.BasicLimitInformation.LimitFlags = (
+                _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                | _JOB_OBJECT_LIMIT_JOB_MEMORY
+                | _JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+                | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            )
+            info.ProcessMemoryLimit = memory_bytes
+            info.JobMemoryLimit = memory_bytes
+            if not _kernel32.SetInformationJobObject(
+                handle,
+                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
+                _kernel32.CloseHandle(handle)
+                raise SandboxUnavailableError
+            self._job: int | None = handle
+
+        def attach(self, process: subprocess.Popen[bytes]) -> bool:
+            # The Popen object holds the process handle until it is reaped, so the id cannot
+            # name another process here.
+            handle = _kernel32.OpenProcess(
+                _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process.pid
+            )
+            if not handle:
+                return False
+            try:
+                if not _kernel32.AssignProcessToJobObject(self._job, handle):
+                    return False
+            finally:
+                _kernel32.CloseHandle(handle)
+            return _resume(process.pid)
+
+        def exited(self, process: subprocess.Popen[bytes]) -> bool:
+            return process.poll() is not None
+
+        def kill(self, process: subprocess.Popen[bytes]) -> None:
+            # The job holds the child and everything it started. The child itself is also ended
+            # directly, because it is outside the job when attaching failed (and then still
+            # suspended, which closing the job would not end).
+            if self._job is not None:
+                _kernel32.TerminateJobObject(self._job, 1)
+            if process.poll() is None:
+                with contextlib.suppress(OSError):
+                    process.kill()
+
+        def close(self) -> None:
+            if self._job is not None:
+                _kernel32.CloseHandle(self._job)
+                self._job = None
+
+else:
+
+    class _Guard:
+        """The child's process group (it is a session leader). The child limits its own memory."""
+
+        def __init__(self, memory_bytes: int) -> None:
+            self._memory_bytes = memory_bytes
+
+        def attach(self, process: subprocess.Popen[bytes]) -> bool:
+            return True
+
+        def exited(self, process: subprocess.Popen[bytes]) -> bool:
+            """True once the child has ended, without reaping it: until it is reaped, its id
+            (and so its group's id) cannot be given to another process."""
+            try:
+                return (
+                    os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    is not None
+                )
+            except ChildProcessError:  # pragma: no cover - already reaped
+                return True
+
+        def kill(self, process: subprocess.Popen[bytes]) -> None:
+            if process.returncode is not None:  # pragma: no cover - reaped already: the id is free
+                return
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+
+        def close(self) -> None:
+            pass
