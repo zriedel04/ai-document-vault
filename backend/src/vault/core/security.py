@@ -77,6 +77,16 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def parse_token(data: bytes) -> str | None:
+    """The token a token file's bytes hold, or None if they are not one: decoded as ASCII (any
+    other byte becomes a replacement mark, which no token contains), with surrounding whitespace
+    such as the final line break removed, and the whole of it in the token's shape. The one rule
+    for every reader of the file: start-up (:func:`load_or_create_token`) and the backup
+    (``vault.storage.backup``), so a backup never keeps a token that a restore would refuse."""
+    token = data.decode("ascii", errors="replace").strip()
+    return token if TOKEN.fullmatch(token) else None
+
+
 def load_or_create_token(token_file: Path) -> str:
     """Return the install's token, creating the file (owner-only where the OS supports it) once.
 
@@ -86,8 +96,8 @@ def load_or_create_token(token_file: Path) -> str:
     try:
         descriptor = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, TOKEN_FILE_MODE)
     except FileExistsError:
-        token = token_file.read_text(encoding="ascii", errors="replace").strip()
-        if not TOKEN.fullmatch(token):
+        token = parse_token(token_file.read_bytes())
+        if token is None:
             msg = "the token file is not a valid token; delete it to create a new one"
             raise ValueError(msg) from None
         return token
