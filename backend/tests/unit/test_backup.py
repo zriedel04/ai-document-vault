@@ -769,7 +769,7 @@ class TestAKillAfterPublishing:
             vault, target, config_file=config_file, now=clock(START + timedelta(hours=1))
         )
         # Windows keeps only the read-only attribute, which each of these modes sets.
-        expected = 0 if acl.IS_WINDOWS else 3
+        expected = 0 if os.name == "nt" else 3  # not acl.IS_WINDOWS, which conftest patches
         assert result.cleaned == expected
         for name, mode in SNAPSHOT_MODES.items():
             assert mode_of(folder / name) == mode
