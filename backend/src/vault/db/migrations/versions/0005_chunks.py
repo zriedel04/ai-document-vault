@@ -5,8 +5,14 @@ the section path, tokenized by ``porter unicode61`` (plan section 4): words are 
 rules, case and diacritics are folded (``cafe`` finds ``café``), and English words are stemmed.
 Its rowid is the chunk's id. Triggers keep it in step with ``chunks``: every insert adds the row,
 every delete removes it (deletes by a foreign-key cascade too), and an update replaces it. The
-title is the document's name as the library shows it, the file name of its first import (earliest,
-ties by id), read when the chunk is written.
+title is the document's name as the library shows it (``vault.db.documents``): the file name of its
+first import, the earliest by ``imported_at`` with ties broken by id, or empty without one. Which
+import is first can change after the chunks are written (a later import with an earlier or equal
+time and a lower id, a hand edit, a removed import), so triggers on ``import_sources`` set the
+title of the document's index rows again after every insert, update and delete there, touching
+only rows whose title differs. A migration is frozen history and cannot import the application's
+query, so ``_NAME`` repeats its rule in SQL; a test compares the indexed title with the name
+``vault.db.documents`` gives after each kind of change.
 
 Revision ID: 0005
 Revises: 0004
@@ -20,14 +26,29 @@ down_revision = "0004"
 branch_labels = None
 depends_on = None
 
-# The index row of a new chunk, as the insert and update triggers write it. Fixed text only.
-_INDEX_NEW_ROW = (
-    "INSERT INTO chunks_fts (rowid, text, title, section_path) VALUES ("
-    " new.id, new.text,"
-    " coalesce((SELECT original_filename FROM import_sources"
-    " WHERE document_id = new.document_id ORDER BY imported_at, id LIMIT 1), ''),"
-    " new.section_path);"
+# The document's name, as the library shows it, for the document id ``DOC``. Fixed text only:
+# ``DOC`` is replaced by ``new.document_id`` or ``old.document_id``, never by a value.
+_NAME = (
+    "coalesce((SELECT original_filename FROM import_sources"
+    " WHERE document_id = DOC ORDER BY imported_at, id LIMIT 1), '')"
 )
+
+# The index row of a new chunk, as the insert and update triggers on chunks write it.
+_INDEX_NEW_ROW = (
+    "INSERT INTO chunks_fts (rowid, text, title, section_path)"
+    " VALUES (new.id, new.text, NAME, new.section_path);"
+).replace("NAME", _NAME.replace("DOC", "new.document_id"))
+
+# Set the title of every index row of the document ``DOC`` whose title is not its name.
+_RETITLE = (
+    "UPDATE chunks_fts SET title = NAME"
+    " WHERE rowid IN (SELECT id FROM chunks WHERE document_id = DOC) AND title IS NOT NAME;"
+).replace("NAME", _NAME)
+_SOURCE_TRIGGERS = {
+    "chunks_fts_title_after_source_insert": ("INSERT", ("new",)),
+    "chunks_fts_title_after_source_delete": ("DELETE", ("old",)),
+    "chunks_fts_title_after_source_update": ("UPDATE", ("old", "new")),
+}
 
 
 def upgrade() -> None:
@@ -106,9 +127,17 @@ def upgrade() -> None:
         "END",
     )
     op.execute(" ".join((update_trigger[0], _INDEX_NEW_ROW, update_trigger[1])))
+    for name, (event, rows) in _SOURCE_TRIGGERS.items():
+        statements = " ".join(_RETITLE.replace("DOC", f"{row}.document_id") for row in rows)
+        op.execute(
+            " ".join(("CREATE TRIGGER", name, "AFTER", event, "ON import_sources BEGIN"))
+            + " ".join(("", statements, "END"))
+        )
 
 
 def downgrade() -> None:
+    for name in _SOURCE_TRIGGERS:
+        op.execute(" ".join(("DROP TRIGGER", name)))
     op.execute("DROP TRIGGER chunks_fts_update")
     op.execute("DROP TRIGGER chunks_fts_delete")
     op.execute("DROP TRIGGER chunks_fts_insert")

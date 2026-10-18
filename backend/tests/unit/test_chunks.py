@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import random
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,13 +15,21 @@ from alembic import command
 from sqlalchemy import Engine, delete, insert, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 
-from tests.unit.test_documents_schema import add_document
+from tests.unit.test_documents_schema import NOW, add_document, source_row
 from vault.db import ids
 from vault.db.chunks import check_chunks, replace_chunks
+from vault.db.documents import ListQuery, get_document, list_documents
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import alembic_config, upgrade_to_latest
 from vault.db.pages import PageHeading, PageText, VersionNotFoundError, replace_pages
-from vault.db.schema import FTS_TABLES, chunks, document_versions, documents, pages
+from vault.db.schema import (
+    FTS_TABLES,
+    chunks,
+    document_versions,
+    documents,
+    import_sources,
+    pages,
+)
 from vault.ingest.chunking.base import Chunk
 from vault.ingest.chunking.structural_v1 import CHUNKER_VERSION, chunk_pages
 
@@ -434,6 +444,21 @@ def test_the_database_holds_exactly_the_fts_tables_the_comparison_leaves_out(
         ).scalar_one()
     assert names == FTS_TABLES
     assert triggers == {"chunks_fts_insert", "chunks_fts_delete", "chunks_fts_update"}
+    with engine.connect() as connection:
+        source_triggers = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master"
+                    " WHERE type = 'trigger' AND tbl_name = 'import_sources'"
+                )
+            )
+        }
+    assert source_triggers == {
+        "chunks_fts_title_after_source_insert",
+        "chunks_fts_title_after_source_delete",
+        "chunks_fts_title_after_source_update",
+    }
     assert "tokenize = 'porter unicode61'" in definition
     assert "AUTOINCREMENT" in table_sql
 
@@ -459,3 +484,155 @@ def test_the_chunks_table_can_be_undone_with_chunks_in_it(tmp_path: Path) -> Non
     finally:
         engine.dispose()
     upgrade_to_latest(db_file)
+
+
+# --- the indexed title is the name the library shows ---------------------------------------------
+
+
+def assert_titles_are_the_library_names(engine: Engine) -> None:
+    """Every document's index rows carry the name the document list and the detail panel show
+    (``vault.db.documents``, the one definition of a document's name), or nothing without one."""
+    listed = list_documents(engine, ListQuery(limit=100)).items
+    assert listed
+    with engine.connect() as connection:
+        titles = {
+            (row.document_id, row.title)
+            for row in connection.execute(
+                text(
+                    "SELECT chunks.document_id, chunks_fts.title FROM chunks"
+                    " JOIN chunks_fts ON chunks_fts.rowid = chunks.id"
+                )
+            )
+        }
+    expected = set()
+    for summary in listed:
+        detail = get_document(engine, summary.id)
+        assert detail is not None
+        assert detail.summary.name == summary.name
+        expected.add((summary.id, summary.name or ""))
+    with_chunks = {document for document, _ in titles}
+    assert titles == {pair for pair in expected if pair[0] in with_chunks}
+    assert_index_in_step(engine)
+
+
+def chunked_document(engine: Engine) -> str:
+    document, version = add_document(engine)
+    replace_pages(engine, version, course_pages(), "text-1", "utf-8")
+    store(engine, version)
+    return document
+
+
+def first_source(engine: Engine, document: str) -> str:
+    with engine.connect() as connection:
+        return str(
+            connection.execute(
+                select(import_sources.c.id)
+                .where(import_sources.c.document_id == document)
+                .order_by(import_sources.c.imported_at, import_sources.c.id)
+                .limit(1)
+            ).scalar_one()
+        )
+
+
+def add_source(engine: Engine, document: str, **changes: Any) -> str:
+    row = source_row(document, **changes)
+    with engine.begin() as connection:
+        connection.execute(insert(import_sources).values(row))
+    return str(row["id"])
+
+
+def test_a_later_import_with_an_earlier_time_renames_the_index_rows(engine: Engine) -> None:
+    document = chunked_document(engine)
+    add_source(engine, document, original_filename="Earlier.pdf", imported_at=NOW - timedelta(1))
+    assert_titles_are_the_library_names(engine)
+    assert sorted(search(engine, "title:earlier")) == [0, 1, 2]
+    assert search(engine, "title:syllabus") == []
+
+
+def test_a_later_import_with_the_same_time_and_a_lower_id_renames_the_index_rows(
+    engine: Engine,
+) -> None:
+    document = chunked_document(engine)
+    lowest = ids.new_ulid(now_ms=1)  # sorts before every id made now
+    add_source(engine, document, id=lowest, original_filename="Tie.pdf", imported_at=NOW)
+    assert_titles_are_the_library_names(engine)
+    assert sorted(search(engine, "title:tie")) == [0, 1, 2]
+
+
+def test_a_later_import_that_sorts_last_changes_nothing(engine: Engine) -> None:
+    document = chunked_document(engine)
+    before = index_rows(engine)
+    add_source(engine, document, original_filename="Copy.pdf", imported_at=NOW + timedelta(1))
+    assert index_rows(engine) == before
+    assert_titles_are_the_library_names(engine)
+
+
+def test_removing_or_editing_the_first_import_renames_the_index_rows(engine: Engine) -> None:
+    document = chunked_document(engine)
+    add_source(engine, document, original_filename="Second.pdf", imported_at=NOW + timedelta(1))
+    with engine.begin() as connection:
+        connection.execute(
+            update(import_sources)
+            .where(import_sources.c.id == first_source(engine, document))
+            .values(original_filename="Edited.pdf")
+        )
+    assert_titles_are_the_library_names(engine)
+    assert sorted(search(engine, "title:edited")) == [0, 1, 2]
+
+    with engine.begin() as connection:
+        connection.execute(
+            delete(import_sources).where(import_sources.c.id == first_source(engine, document))
+        )
+    assert_titles_are_the_library_names(engine)
+    assert sorted(search(engine, "title:second")) == [0, 1, 2]
+
+    with engine.begin() as connection:
+        connection.execute(delete(import_sources).where(import_sources.c.document_id == document))
+    assert_titles_are_the_library_names(engine)
+    assert {row[2] for row in index_rows(engine)} == {""}
+
+
+def test_moving_an_import_to_another_document_renames_both(engine: Engine) -> None:
+    one = chunked_document(engine)
+    two = chunked_document(engine)
+    moved = add_source(engine, one, original_filename="Moved.pdf", imported_at=NOW - timedelta(1))
+    assert_titles_are_the_library_names(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            update(import_sources).where(import_sources.c.id == moved).values(document_id=two)
+        )
+    assert_titles_are_the_library_names(engine)
+
+
+def test_generated_changes_to_imports_keep_every_title_the_library_name(engine: Engine) -> None:
+    rng = random.Random(57)  # noqa: S311 - seeded test data, not a secret
+    documents_made = [chunked_document(engine) for _ in range(3)]
+    sources: list[str] = []
+    for step in range(60):
+        action = rng.choice(["insert", "insert", "delete", "rename", "retime", "move"])
+        if action == "insert" or not sources:
+            sources.append(
+                add_source(
+                    engine,
+                    rng.choice(documents_made),
+                    id=ids.new_ulid(now_ms=rng.choice([1, 2, 10**12])),
+                    original_filename=f"name{step}.pdf",
+                    imported_at=NOW + timedelta(seconds=rng.choice([-5, 0, 0, 5])),
+                )
+            )
+            continue
+        chosen = rng.choice(sources)
+        all_changes: dict[str, dict[str, Any]] = {
+            "rename": {"original_filename": f"renamed{step}.pdf"},
+            "retime": {"imported_at": NOW + timedelta(seconds=rng.randint(-9, 9))},
+            "move": {"document_id": rng.choice(documents_made)},
+        }
+        changes = all_changes.get(action, {})
+        with engine.begin() as connection:
+            where = import_sources.c.id == chosen
+            if action == "delete":
+                connection.execute(delete(import_sources).where(where))
+                sources.remove(chosen)
+            else:
+                connection.execute(update(import_sources).where(where).values(**changes))
+        assert_titles_are_the_library_names(engine)

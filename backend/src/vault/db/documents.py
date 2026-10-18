@@ -3,7 +3,9 @@ one page of the document list, sorted on the server (section 16: no screen loads
 page of documents).
 
 A document's name is the file name of its first import source (the earliest, ties broken by id),
-because a document has no name of its own until the owner renames it in a later phase. Its size
+because a document has no name of its own until the owner renames it in a later phase. The keyword
+index repeats this rule in SQL for each chunk's title (migration ``0005``, kept in step by triggers
+on ``import_sources``), so a change to it changes both. Its size
 and type are those of its current version's blob. The list holds the documents in use, or with
 ``in_trash`` the documents in the trash, never both.
 
