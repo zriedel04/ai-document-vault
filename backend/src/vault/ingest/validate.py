@@ -7,8 +7,9 @@ allowed (``docs/architecture.md``, section 8); PPTX, XLSX and CSV arrive with Ph
 
 A DOCX is a zip file, so its structure is checked without extracting anything: the entry count, the
 total uncompressed size, the compression ratio, encrypted entries and member names that climb out
-of the archive. The sizes come from the archive's own directory, which a hostile file can
-understate, so the extractor must still bound what it reads. The directory itself is bounded
+of the archive, compression other than stored or deflated, and a name used twice. The sizes come
+from the archive's own directory, which a hostile file can understate, so the extractor must still
+bound what it reads (``vault.ingest.extractors.docx`` does). The directory itself is bounded
 first: ``zipfile`` reads the whole central directory and builds an object for every record before
 anything can be counted, so the end-of-directory record is read on its own (a few kilobytes from
 the end of the file) and a file that claims too many entries or too large a directory is refused
@@ -26,6 +27,8 @@ later is caught when it is extracted, not here.
 from __future__ import annotations
 
 import codecs
+import contextlib
+import io
 import re
 import struct
 import zipfile
@@ -56,6 +59,7 @@ BINARY_BYTES: Final = frozenset(range(32)) - {9, 10, 12, 13} | {127}
 MAX_BINARY_SHARE: Final = 0.05
 DOCX_PARTS: Final = ("[Content_Types].xml", "word/document.xml")
 ZIP_ENCRYPTED_FLAG: Final = 0x1
+ZIP_METHODS: Final = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 # The zip end-of-central-directory record, and the ZIP64 records before it (see ``zipfile``).
 ZIP_END_SIGNATURE: Final = b"PK\x05\x06"
 ZIP64_END_SIGNATURE: Final = b"PK\x06\x06"
@@ -240,7 +244,14 @@ def _zip64_claims(stream: BinaryIO, locator_start: int) -> list[tuple[int, int]]
     return claims
 
 
-def _directory_claims(path: Path, size: int) -> list[tuple[int, int]] | Reason:
+def _opened(source: Path | BinaryIO) -> contextlib.AbstractContextManager[BinaryIO]:
+    """A binary stream for ``source``: the file at a path, opened here, or a stream as it is."""
+    if isinstance(source, Path):
+        return source.open("rb")
+    return contextlib.nullcontext(source)
+
+
+def _directory_claims(source: Path | BinaryIO, size: int) -> list[tuple[int, int]] | Reason:
     """Read only the end records of a zip and return every (entries, directory bytes) claim a
     supported ``zipfile`` might act on, or why the archive cannot be judged.
 
@@ -249,7 +260,7 @@ def _directory_claims(path: Path, size: int) -> list[tuple[int, int]] | Reason:
     except for a field that holds the "see ZIP64" marker when a ZIP64 record exists: some releases
     use the plain record even where a ZIP64 locator is present.
     """
-    with path.open("rb") as stream:
+    with _opened(source) as stream:
         if size < ZIP_END_SIZE:
             return Reason.UNREADABLE_ARCHIVE
         stream.seek(size - ZIP_END_SIZE)
@@ -280,11 +291,11 @@ def _directory_claims(path: Path, size: int) -> list[tuple[int, int]] | Reason:
     return [plain, *wide]
 
 
-def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
+def _directory_size_ok(source: Path | BinaryIO, size: int, limits: Limits) -> Reason | None:
     """Refuse a zip whose end records claim a directory too large to open. None if every claim is
     within the limits. ``zipfile`` reads ``size_cd`` bytes and builds an object for every record in
     them, so the directory size is what is bounded, and the entry count with it."""
-    claims = _directory_claims(path, size)
+    claims = _directory_claims(source, size)
     if isinstance(claims, Reason):
         return claims
     if any(
@@ -295,19 +306,29 @@ def _directory_size_ok(path: Path, size: int, limits: Limits) -> Reason | None:
     return None
 
 
-def _check_docx(path: Path, size: int, limits: Limits) -> Reason | None:
+def _check_docx(source: Path | BinaryIO, size: int, limits: Limits) -> Reason | None:
     """None if the zip is a well-formed DOCX within the limits, else why not."""
     try:
-        reason = _directory_size_ok(path, size, limits)
+        reason = _directory_size_ok(source, size, limits)
         if reason is not None:
             return reason
-        with zipfile.ZipFile(path) as archive:
+        if not isinstance(source, Path):
+            source.seek(0)
+        with zipfile.ZipFile(source) as archive:
             entries = archive.infolist()
             if len(entries) > limits.max_zip_entries:
                 return Reason.UNSAFE_ARCHIVE
             if any(entry.flag_bits & ZIP_ENCRYPTED_FLAG for entry in entries):
                 return Reason.ENCRYPTED_ARCHIVE
             if any(_unsafe_name(entry.filename) for entry in entries):
+                return Reason.UNSAFE_ARCHIVE
+            # Stored and deflated members only: zipfile decompresses bzip2 and LZMA members a whole
+            # read at a time with no bound on the output, and Word writes neither.
+            if any(entry.compress_type not in ZIP_METHODS for entry in entries):
+                return Reason.UNSAFE_ARCHIVE
+            # One name, one member: zipfile reads the last of several, which the checks above
+            # would have judged as separate members.
+            if len({entry.filename for entry in entries}) != len(entries):
                 return Reason.UNSAFE_ARCHIVE
             total = sum(entry.file_size for entry in entries)
             if total > limits.max_zip_uncompressed_bytes or total > limits.max_zip_ratio * size:
@@ -334,6 +355,20 @@ def _unsafe_name(name: str) -> bool:
 
 
 DEFAULT_LIMITS: Final = Limits()
+
+
+def check_docx(data: bytes, limits: Limits = DEFAULT_LIMITS) -> Reason | None:
+    """The DOCX rule of ``validate_file`` on bytes in memory: None if ``data`` is a DOCX within the
+    limits, else why not. The DOCX extractor runs it on the blob before python-docx sees it."""
+    if not data:
+        return Reason.EMPTY
+    if len(data) > limits.max_bytes:
+        return Reason.TOO_LARGE
+    if data.startswith(OLE_SIGNATURE):
+        return Reason.LEGACY_OR_ENCRYPTED_OFFICE
+    if not data.startswith(ZIP_SIGNATURE):
+        return Reason.CONTENT_MISMATCH
+    return _check_docx(io.BytesIO(data), len(data), limits)
 
 
 def validate_file(path: Path, limits: Limits = DEFAULT_LIMITS) -> Verdict:
