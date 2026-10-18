@@ -21,8 +21,8 @@ describe("navigation", () => {
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("aria-current", "page");
   });
 
-  // The dashboard and the documents page are built; the other sections are placeholders.
-  it.each(NAV_ITEMS.filter((item) => item.path !== "/" && item.path !== "/documents"))(
+  // The dashboard, documents and import pages are built; the other sections are placeholders.
+  it.each(NAV_ITEMS.filter((item) => !["/", "/documents", "/import"].includes(item.path)))(
     "opens the $label placeholder",
     async ({ label, path, description }) => {
       await renderApp();

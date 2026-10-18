@@ -9,6 +9,7 @@ import { NAV_ITEMS } from "./nav";
 import { Dashboard } from "./pages/Dashboard";
 import { DocumentDetailRoute, DocumentsRoute } from "./pages/document-routes";
 import { parseDocumentsSearch } from "./pages/documents-search";
+import { Import } from "./pages/Import";
 import { NotFound } from "./pages/NotFound";
 import { Placeholder } from "./pages/Placeholder";
 import { Shell } from "./Shell";
@@ -32,7 +33,12 @@ export function createAppRouter(history?: RouterHistory) {
     path: "/documents/$documentId",
     component: DocumentDetailRoute,
   });
-  const built = new Set(["/", "/documents"]);
+  const upload = createRoute({
+    getParentRoute: () => root,
+    path: "/import",
+    component: Import,
+  });
+  const built = new Set(["/", "/documents", "/import"]);
   const sections = NAV_ITEMS.filter((item) => !built.has(item.path)).map((item) =>
     createRoute({
       getParentRoute: () => root,
@@ -41,7 +47,7 @@ export function createAppRouter(history?: RouterHistory) {
     }),
   );
   return createRouter({
-    routeTree: root.addChildren([dashboard, documents, documentDetail, ...sections]),
+    routeTree: root.addChildren([dashboard, documents, documentDetail, upload, ...sections]),
     history,
   });
 }
