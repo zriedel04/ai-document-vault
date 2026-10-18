@@ -261,7 +261,10 @@ class TestABackup:
             if path.name == "local-token" and status is not None:
                 values = list(status)
                 values[stat.ST_INO] += 1  # as if another file had taken the name since
-                return os.stat_result(values)
+                # The sequence holds only the first ten fields. The named ones (st_file_attributes
+                # on Windows, the float times) come from the mapping or would come back as None.
+                named = {n: getattr(status, n) for n in dir(status) if n.startswith("st_")}
+                return os.stat_result(values, named)
             return status
 
         with (
