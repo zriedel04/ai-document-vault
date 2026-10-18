@@ -3,7 +3,8 @@
 An extractor reads one version's blob into pages, and ``replace_pages`` stores them: all pages of
 that version are replaced in one transaction, so a reader sees the old set or the new one, never
 a mixture, and a second extraction (a new extractor version) leaves no page of the first behind.
-``read_pages`` gives them back in order.
+``read_pages`` gives them back in order, and ``read_current_pages`` gives the text view one window
+of a document's current version at a time.
 
 What is stored is checked on the way in and again on the way out, because the database can be
 edited by hand: page numbers run 1, 2, 3 ... without a gap, a heading lies inside its page's text,
@@ -23,11 +24,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import Engine, delete, insert, select
+from sqlalchemy import Engine, delete, func, insert, select
 
 from vault.db import ids
 from vault.db.engine import read_snapshot
-from vault.db.schema import document_versions, pages
+from vault.db.schema import document_versions, documents, pages
 
 # The application's rule for an extractor's name: lower-case words joined by hyphens, then the
 # version, a whole number from 1 (the database checks a looser form of the same rule).
@@ -123,7 +124,12 @@ def check_pages(pages_in: Sequence[PageText]) -> tuple[PageText, ...]:
     if not checked:
         msg = "A version has at least one page (an empty file is one empty page)."
         raise ValueError(msg)
-    for position, page in enumerate(checked, start=1):
+    return _check_run(checked, first=1)
+
+
+def _check_run(checked: tuple[PageText, ...], first: int) -> tuple[PageText, ...]:
+    """Pages numbered ``first``, ``first + 1`` ... each with storable text and valid headings."""
+    for position, page in enumerate(checked, start=first):
         if not isinstance(page, PageText) or not is_int(page.number) or page.number != position:
             msg = f"Page {position} is missing or out of order: pages are numbered 1, 2, 3 ..."
             raise ValueError(msg)
@@ -244,3 +250,105 @@ def _headings_from_json(stored: object) -> tuple[PageHeading, ...]:
         msg = "Stored headings are not a list of [level, title, start, end]."
         raise PageDataError(msg)
     return tuple(PageHeading(*item) for item in items)
+
+
+# The text view's window (``GET /api/documents/{id}/pages``): at most MAX_WINDOW pages, and no
+# more text than MAX_WINDOW_CHARS, except that the first page of a window is always sent whole.
+DEFAULT_WINDOW: Final = 20
+MAX_WINDOW: Final = 100
+MAX_WINDOW_CHARS: Final = 1_000_000
+
+
+@dataclass(frozen=True)
+class PageWindow:
+    """Some pages of a document's current version, and how many pages that version has.
+
+    ``total`` is 0 and ``extractor`` is ``None`` when the version has not been extracted yet.
+    """
+
+    version_id: str
+    extractor: str | None
+    total: int
+    pages: tuple[PageText, ...]
+
+
+def read_current_pages(
+    engine: Engine,
+    document_id: str,
+    offset: int,
+    limit: int = DEFAULT_WINDOW,
+    max_chars: int = MAX_WINDOW_CHARS,
+) -> PageWindow | None:
+    """The pages of the document's current version after the first ``offset``, in order: at most
+    ``limit`` of them, and only as many as keep the text before the last one under ``max_chars``
+    characters (so the first is always included). ``None`` for an unknown document, in use or in
+    the trash. A version holds the pages of its latest extraction only (``replace_pages``).
+
+    Every read shares one snapshot, so the version, its count and its pages agree. Raises
+    ``PageDataError`` if the stored pages break the rules, checked for the whole version (one
+    extractor, pages 1 to ``total`` without a gap) and for each page sent.
+    """
+    if not 1 <= limit <= MAX_WINDOW or offset < 0 or max_chars < 1:
+        msg = "The window must have 1 to 100 pages, a positive budget and a non-negative offset."
+        raise ValueError(msg)
+    if not ids.is_ulid(document_id):
+        return None
+    with read_snapshot(engine) as connection:
+        version_id = connection.execute(
+            select(documents.c.current_version_id).where(documents.c.id == document_id)
+        ).scalar_one_or_none()
+        if version_id is None:
+            return None
+        groups = connection.execute(
+            select(
+                pages.c.extractor,
+                pages.c.encoding,
+                func.count().label("count"),
+                func.min(pages.c.page_no).label("first"),
+                func.max(pages.c.page_no).label("last"),
+            )
+            .where(pages.c.version_id == version_id)
+            .group_by(pages.c.extractor, pages.c.encoding)
+        ).all()
+        if not groups:
+            return PageWindow(version_id=version_id, extractor=None, total=0, pages=())
+        # The text before each page after the offset, from the counts alone, so only the texts of
+        # the pages sent are selected.
+        before = (
+            select(
+                pages.c.page_no,
+                (
+                    func.sum(pages.c.char_count).over(order_by=pages.c.page_no) - pages.c.char_count
+                ).label("before"),
+            )
+            .where(pages.c.version_id == version_id, pages.c.page_no > offset)
+            .subquery("before")
+        )
+        rows = connection.execute(
+            select(pages.c.page_no, pages.c.text, pages.c.headings)
+            .join(before, before.c.page_no == pages.c.page_no)
+            .where(pages.c.version_id == version_id, before.c.before < max_chars)
+            .order_by(pages.c.page_no)
+            .limit(limit)
+        ).all()
+    if len(groups) != 1:
+        msg = "The pages of one version name different extractors or encodings."
+        raise PageDataError(msg)
+    group = groups[0]
+    if group.first != 1 or group.last != group.count:
+        msg = "The pages of this version are not numbered 1, 2, 3 ... without a gap."
+        raise PageDataError(msg)
+    try:
+        extractor = check_extractor(group.extractor)
+        check_encoding(group.encoding)
+        window = _check_run(
+            tuple(PageText(r.page_no, r.text, _headings_from_json(r.headings)) for r in rows),
+            first=offset + 1,
+        )
+    except PageDataError:
+        raise
+    except ValueError as error:
+        raise PageDataError(str(error)) from None
+    return PageWindow(
+        version_id=version_id, extractor=extractor, total=int(group.count), pages=window
+    )

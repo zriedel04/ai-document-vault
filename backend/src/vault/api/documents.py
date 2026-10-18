@@ -1,5 +1,6 @@
 """The document list (one page at a time, sorted on the server), one document's details, its
-original file, moving it to the trash and back, and deleting it for good from the trash."""
+original file, its extracted text, moving it to the trash and back, and deleting it for good from
+the trash."""
 
 from __future__ import annotations
 
@@ -27,6 +28,13 @@ from vault.db.documents import (
     list_documents,
     move_to_trash,
     restore,
+)
+from vault.db.pages import (
+    DEFAULT_WINDOW,
+    MAX_WINDOW,
+    MAX_WINDOW_CHARS,
+    PageDataError,
+    read_current_pages,
 )
 from vault.jobs.queue import utc_now
 from vault.storage.blobs import BlobIntegrityError, BlobStore
@@ -277,4 +285,83 @@ async def download_document(
         # A header, not media_type: Starlette adds "; charset=utf-8" to a text/ media type, and a
         # text file may be UTF-16 or UTF-32 with a byte order mark (vault.ingest.validate).
         headers={"Content-Type": original.mime},
+    )
+
+
+class Heading(BaseModel):
+    level: int  # 1 is the top
+    text: str
+    offset: int  # where the heading starts in its page's text, in characters (code points)
+
+
+class Page(BaseModel):
+    number: int  # from 1
+    text: str
+    headings: list[Heading]
+
+
+class DocumentPages(BaseModel):
+    version_id: str
+    extracted: bool  # false until the extraction has stored the version's pages
+    extractor: str | None
+    total: int  # pages in the version, 0 until it is extracted
+    offset: int
+    limit: int
+    pages: list[Page]
+    next_offset: int | None  # where the next window starts, while pages remain after this one
+
+
+@router.get(
+    "/documents/{document_id}/pages",
+    responses={
+        404: {"description": "No such document"},
+        500: {"description": "The stored text of this document breaks the page rules"},
+    },
+)
+async def read_document_pages(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+    limit: Annotated[int, Query(ge=1, le=MAX_WINDOW)] = DEFAULT_WINDOW,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
+) -> DocumentPages:
+    """The extracted text of the document's current version (in use or in the trash, like the
+    details), as plain text by page, with each page's headings. A window starts after ``offset``
+    pages and holds at most ``limit`` pages and about a million characters: a page that would pass
+    that is left for the next window, but the first page of a window is always sent whole.
+    ``next_offset`` says where the next window starts. A document whose text has not been
+    extracted yet answers with ``extracted`` false and no pages, not a 404."""
+    engine = _engine(request)
+    try:
+        window = await run_in_threadpool(
+            read_current_pages, engine, document_id, offset, limit, MAX_WINDOW_CHARS
+        )
+    except PageDataError:
+        # The message names a page by number only, and the id came in the request, so neither is
+        # logged (identifier() is for ids the app made).
+        log_event(logger, "documents.pages_invalid")
+        raise HTTPException(
+            status_code=500, detail="the extracted text of this document is damaged"
+        ) from None
+    if window is None:
+        raise HTTPException(status_code=404, detail="no such document")
+    end = offset + len(window.pages)
+    return DocumentPages(
+        version_id=window.version_id,
+        extracted=window.extractor is not None,
+        extractor=window.extractor,
+        total=window.total,
+        offset=offset,
+        limit=limit,
+        pages=[
+            Page(
+                number=page.number,
+                text=page.text,
+                headings=[
+                    Heading(level=h.level, text=h.title, offset=h.start) for h in page.headings
+                ],
+            )
+            for page in window.pages
+        ],
+        next_offset=end if window.pages and end < window.total else None,
     )

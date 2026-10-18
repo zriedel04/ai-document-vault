@@ -5,6 +5,20 @@ export type DocumentItem = components["schemas"]["DocumentItem"];
 export type DocumentList = components["schemas"]["DocumentList"];
 export type DocumentDetail = components["schemas"]["DocumentDetail"];
 export type DocumentState = DocumentItem["state"];
+export type DocumentPages = components["schemas"]["DocumentPages"];
+export type DocumentPage = components["schemas"]["Page"];
+
+/** Pages the text view asks for at once; the backend allows 1 to 100 (`MAX_WINDOW`). */
+export const TEXT_WINDOW = 20;
+
+/** What the text view says when its request fails. A 500 there means the stored text is damaged. */
+export const PAGES_ERROR_TEXT: Record<DocumentsError, string> = {
+  "needs-token": "This browser has no access to the vault yet. See the notice above.",
+  "no-vault": "No vault is open. Start the app with a vault folder.",
+  "not-found": "There is no such document.",
+  unavailable: "The vault's extracted text of this document is damaged.",
+  unreachable: "The text could not be loaded. Check that the backend is running.",
+};
 
 export type SortKey = components["schemas"]["SortKey"];
 export type Order = components["schemas"]["Order"];
