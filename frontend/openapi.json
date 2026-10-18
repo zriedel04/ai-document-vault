@@ -1013,6 +1013,55 @@
         ]
       }
     },
+    "/api/documents/{document_id}/retry": {
+      "post": {
+        "description": "Queue the document's failed processing again, with all its attempts, and return it as it\nnow is: each stage whose latest job failed runs again, and a document in the ``failed`` state\ngoes back to ``processing``. A document with nothing failed is returned unchanged, so pressing\nRetry twice queues the work once. A document in the trash is refused (409): restore it first.",
+        "operationId": "retry_document_api_documents__document_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such document"
+          },
+          "409": {
+            "description": "The document is in the trash"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
     "/api/documents/{document_id}/trash": {
       "post": {
         "description": "Move a document to the trash and return it as it now is. Nothing is deleted: its file,\nversions, imports and jobs stay, and a restore brings it back in the state it had. A document\nalready in the trash stays there with the time it first went there.",
