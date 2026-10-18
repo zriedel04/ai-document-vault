@@ -1,0 +1,6 @@
+COPY CORNER
+Date: 2026-12-03
+Poster prints 1 x $7.50
+Total
+$7.50
+Paid by card

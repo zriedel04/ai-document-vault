@@ -18,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from vault_spikes.corpus import read_owner_text
+from vault_spikes.corpus import not_a_link, read_owner_text, reference_folder
 from vault_spikes.errors import OwnValueError
 from vault_spikes.metrics import (
     has_text,
@@ -47,11 +47,12 @@ QUESTION = (
     "scanned files on this PC? Feeds ADR 0015."
 )
 METHOD = (
-    "`python -m vault_spikes pdf --extractor NAME --pdfs DIR`. Every PDF in DIR is extracted "
-    "page by page. Pages per second is total pages over total extraction time. A page with no "
-    "text counts as scanned. Heading candidates are lines whose words are at least 1.2 times the "
-    "page's median font size and that have at most 12 words. Word error rate compares the "
-    "extracted text with a reference text file of the same name (`NAME.txt`) where one exists; "
+    "`python -m vault_spikes pdf --extractor NAME --pdfs DIR`. Every PDF in DIR and its "
+    "subfolders is extracted page by page. Pages per second is total pages over total extraction "
+    "time. A page with no text counts as scanned. Heading candidates are lines whose words are at "
+    "least 1.2 times the page's median font size and that have at most 12 words. Word error rate "
+    "compares the extracted text with a reference text file of the same name (`NAME.txt`, next "
+    "to the PDF or at the same relative path under `--references`) where one exists; "
     "a reference with no words has no error rate and is counted in `references_unusable`. "
     "Heading accuracy compares the detected headings with a file of the expected ones "
     "(`NAME.headings.txt`, one heading per line, case and spacing ignored; a heading is counted "
@@ -274,8 +275,8 @@ def read_labels(pdf: Path, folder: Path, *, headings: bool) -> Labels:
     through it. A file may be UTF-8 with or without a byte order mark, or UTF-16 or UTF-32 with
     one (``corpus.decode_text``); the headings file is read only for an extractor that finds
     headings."""
-    text_file = folder / f"{pdf.stem}.txt"
-    heading_file = folder / f"{pdf.stem}{HEADINGS_SUFFIX}"
+    text_file = not_a_link(folder / f"{pdf.stem}.txt")
+    heading_file = not_a_link(folder / f"{pdf.stem}{HEADINGS_SUFFIX}")
     return Labels(
         read_owner_text(text_file, "a reference text file") if text_file.is_file() else None,
         heading_counts(read_owner_text(heading_file, "a headings file"))
@@ -290,10 +291,15 @@ def run_pdf_spike(
     *,
     public_dataset: bool = False,
     references_dir: Path | None = None,
+    pdfs_dir: Path | None = None,
     environment: Environment | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> Report:
-    """Measure one extractor over ``pdfs`` and return a report with one row."""
+    """Measure one extractor over ``pdfs`` and return a report with one row.
+
+    A PDF's reference files are next to it, or, with ``references_dir``, in that folder at the
+    same path relative to it as the PDF has to ``pdfs_dir`` (the folder the PDFs were found in,
+    see ``corpus.files_below``); without ``pdfs_dir``, directly in ``references_dir``."""
     if not pdfs:
         msg = "no PDF files to measure"
         raise OwnValueError(msg)
@@ -306,7 +312,11 @@ def run_pdf_spike(
     )
     extractor.load()  # outside the per-file handling below: a missing library is not a result
     labels = [
-        read_labels(pdf, references_dir or pdf.parent, headings=extractor.detects_headings)
+        read_labels(
+            pdf,
+            reference_folder(pdf, pdfs_dir or pdf.parent, references_dir),
+            headings=extractor.detects_headings,
+        )
         for pdf in pdfs
     ]
     # A reference text with no words has no error rate. It is counted, whatever its PDF's outcome,
