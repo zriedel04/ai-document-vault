@@ -1,0 +1,19 @@
+MATH 241: Calculus II - Course Syllabus
+Lakeshore Institute of Technology, Department of Mathematics. Fall 2026.
+Course information
+The course meets on Mondays, Wednesdays and Fridays from 9:00 AM to 9:50 AM. Instructor: Prof. Daniel Okafor, daniel.okafor@lit.example. His office hours are on Thursdays from 3:00 PM to 5:00 PM.
+Topics
+- Techniques of integration
+- Improper integrals and numerical integration
+- Sequences and series
+- Parametric curves and polar coordinates
+Grading
+- Homework: 20 percent
+- Three unit exams: 15 percent each
+- Final exam: 35 percent
+Homework is submitted on the course portal every Monday. The lowest homework score is dropped.
+Final exam
+The final exam is on Tuesday, December 8, 2026 at 9:00 AM.
+A scientific calculator is allowed. Graphing calculators are not.
+Required textbook
+Calculus: Early Transcendentals, 9th edition, by L. Brandt. The bookstore lists it at 112.50 dollars.

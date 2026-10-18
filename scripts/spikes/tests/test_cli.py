@@ -1011,6 +1011,95 @@ class DatasetNameTest(unittest.TestCase):
                 self.assertIn("without metrics", err)
 
 
+PUBLIC_CORPUS = cli.REPO_ROOT / "demo" / "corpus"
+PUBLIC_REFERENCES = PUBLIC_CORPUS / "references"
+
+
+def public_reference(path: Path, suffix: str = ".txt") -> Path:
+    """Where demo/generate writes the reference file of a public image or PDF."""
+    relative = path.relative_to(PUBLIC_CORPUS)
+    return PUBLIC_REFERENCES / relative.parent / f"{relative.stem}{suffix}"
+
+
+class EchoReferenceOcr:
+    """Reads an image as its public reference says it should be read, so any image paired with
+    the wrong reference (or none) shows in the counts and the error rate."""
+
+    name = "rapidocr-ppocrv5"
+
+    def load(self) -> None:
+        pass
+
+    def recognise(self, image: Path) -> str:
+        return public_reference(image).read_text(encoding="utf-8")
+
+
+class EchoReferencePdf:
+    name = "pypdfium2+pdfplumber"
+    detects_headings = True
+
+    def load(self) -> None:
+        pass
+
+    def extract(self, path: Path) -> pdf.PdfText:
+        text, headings = public_reference(path), public_reference(path, ".headings.txt")
+        if not text.is_file():  # a scan: no text layer
+            return pdf.PdfText([""], [])
+        return pdf.PdfText(
+            [text.read_text(encoding="utf-8")],
+            headings.read_text(encoding="utf-8").splitlines(),
+        )
+
+
+class PublicReferencesTest(unittest.TestCase):
+    """The public corpus carries reference texts for the OCR and PDF spikes in
+    demo/corpus/references/, at each file's own path, and one run reads the whole corpus."""
+
+    def kinds(self) -> dict[str, int]:
+        manifest = json.loads((PUBLIC_CORPUS / "manifest.json").read_text(encoding="utf-8"))
+        counts: dict[str, int] = {}
+        for document in manifest["documents"]:
+            counts[document["kind"]] = counts.get(document["kind"], 0) + 1
+        return counts
+
+    def run_public(self, *command: str) -> dict[str, float]:
+        with tempfile.TemporaryDirectory() as folder:
+            code, _, err = run(
+                *command,
+                str(PUBLIC_CORPUS),
+                "--references",
+                str(PUBLIC_REFERENCES),
+                "--out",
+                folder,
+            )
+            self.assertEqual(code, 0, err)
+            report = next(Path(folder).glob("*-public.json"))
+            metrics: dict[str, float] = json.loads(report.read_text("utf-8"))["rows"][0]["metrics"]
+        return metrics
+
+    def test_every_public_image_is_read_against_its_own_reference(self) -> None:
+        with mock.patch.object(adapters, "RapidOcrEngine", EchoReferenceOcr):
+            metrics = self.run_public("ocr", "--engine", "rapidocr", "--images")
+        kinds = self.kinds()
+        self.assertEqual(metrics["images"], kinds["png"] + kinds["jpg"])
+        self.assertEqual((metrics["failures"], metrics["references_unusable"]), (0, 0))
+        self.assertEqual(metrics["cer_mean"], 0.0)
+        self.assertIs(metrics["public_dataset"], True)
+
+    def test_every_public_text_pdf_is_scored_and_every_scan_is_measured(self) -> None:
+        with mock.patch.object(adapters, "PypdfiumPlumberExtractor", EchoReferencePdf):
+            metrics = self.run_public("pdf", "--extractor", "pypdfium2+pdfplumber", "--pdfs")
+        kinds = self.kinds()
+        self.assertEqual(metrics["files"], kinds["pdf_text"] + kinds["pdf_scan"])
+        self.assertEqual(metrics["pages_without_text"], kinds["pdf_scan"])
+        self.assertEqual(metrics["references_used"], kinds["pdf_text"])
+        self.assertEqual(metrics["references_unusable"], 0)
+        self.assertEqual(metrics["files_with_heading_reference"], kinds["pdf_text"])
+        self.assertEqual(metrics["wer_mean"], 0.0)
+        self.assertEqual(metrics["heading_recall"], 1.0)
+        self.assertIs(metrics["public_dataset"], True)
+
+
 class MergeRowShapeTest(unittest.TestCase):
     """What a merge accepts of a row is fixed per candidate, so ADR evidence cannot lose the
     context a figure needs (what it was measured on, how much was left out) or carry a figure the

@@ -5,7 +5,9 @@ from __future__ import annotations
 import array
 import codecs
 import json
+import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Sequence
@@ -20,6 +22,7 @@ from vault_spikes import spike_ocr as ocr
 from vault_spikes import spike_pdf as pdf
 from vault_spikes import spike_vec as vec
 from vault_spikes.__main__ import KNOWN
+from vault_spikes.corpus import SpikeInputError
 from vault_spikes.errors import OwnRuntimeError, OwnValueError
 from vault_spikes.report import Environment, Report, in_domain
 
@@ -783,6 +786,236 @@ class OcrTest(unittest.TestCase):
         report = ocr.run_ocr_spike(engine, found, environment=ENV, clock=Clock())
         self.assertEqual(report.rows[0].metrics["cer_mean"], 0.0)
 
+    def test_images_in_subfolders_are_paired_with_references_at_the_same_path(self) -> None:
+        # The public corpus keeps its images in several folders, and the references in a folder
+        # of their own that mirrors them (demo/corpus/references/receipts/a.txt).
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("receipts/a.jpg", "screenshots/b.png", "screenshots/deep/c.png"):
+                (root / "images" / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / "images" / name).write_bytes(b"x")
+            references = root / "references"
+            for name, body in (
+                ("receipts/a.txt", "alpha"),
+                ("screenshots/deep/c.txt", "gamma"),
+                ("b.txt", "not at b's path"),  # flat: not where b's reference belongs
+            ):
+                (references / name).parent.mkdir(parents=True, exist_ok=True)
+                (references / name).write_text(body, encoding="utf-8")
+            apart = ocr.find_labelled_images(root / "images", references)
+            beside = ocr.find_labelled_images(references)  # no images there at all
+            (root / "images" / "screenshots" / "b.txt").write_text("beta", encoding="utf-8")
+            next_to = ocr.find_labelled_images(root / "images")
+        self.assertEqual(
+            [(s.image.relative_to(root).as_posix(), s.reference) for s in apart],
+            [("images/receipts/a.jpg", "alpha"), ("images/screenshots/deep/c.png", "gamma")],
+        )
+        self.assertEqual(beside, [])
+        self.assertEqual([(s.image.name, s.reference) for s in next_to], [("b.png", "beta")])
+
+
+class FolderWalkTest(unittest.TestCase):
+    """The OCR and PDF spikes read a folder and its subfolders (``corpus.files_below``)."""
+
+    def test_every_matching_file_below_the_folder_in_path_order(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("b/z.pdf", "a/y.PDF", "x.pdf", "a/notes.txt", "c/d/w.pdf"):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(b"x")
+            (root / "folder.pdf").mkdir()  # a folder with the suffix is not a file
+            found = c.files_below(root, frozenset({".pdf"}))
+        self.assertEqual(
+            [p.relative_to(root).as_posix() for p in found],
+            ["a/y.PDF", "b/z.pdf", "c/d/w.pdf", "x.pdf"],
+        )
+
+    def test_a_link_in_the_tree_stops_the_walk(self) -> None:
+        # Followed, it could take the walk outside the tree (or round a loop); skipped, its files
+        # would leave the measurement unseen.
+        for kind in ("outside folder", "loop", "file"):
+            with self.subTest(kind), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "outside").mkdir()
+                (root / "outside" / "private.pdf").write_bytes(b"x")
+                (root / "tree" / "deeper").mkdir(parents=True)
+                (root / "tree" / "own.pdf").write_bytes(b"x")
+                link = root / "tree" / "deeper" / "link"
+                try:
+                    if kind == "outside folder":
+                        link.symlink_to(root / "outside", target_is_directory=True)
+                    elif kind == "loop":
+                        link.symlink_to(root / "tree", target_is_directory=True)
+                    else:
+                        link.with_suffix(".pdf").symlink_to(root / "outside" / "private.pdf")
+                except OSError:
+                    self.skipTest("this system does not allow symbolic links")
+                with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
+                    c.files_below(root / "tree", frozenset({".pdf"}))
+
+    def test_a_link_in_the_reference_tree_stops_the_run(self) -> None:
+        # The references are a tree of their own that files_below never walks: a linked folder
+        # or file there would take reference texts from outside while the run is labelled by
+        # the folder it names (demo/corpus/references counts as public data).
+        cases = ("folder", "deeper folder", "reference file", "dangling file", "headings file")
+        for kind in cases:
+            with self.subTest(kind), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "outside").mkdir()
+                (root / "outside" / "a.txt").write_text("private", encoding="utf-8")
+                (root / "images" / "receipts" / "deep").mkdir(parents=True)
+                (root / "images" / "receipts" / "deep" / "a.png").write_bytes(b"x")
+                (root / "images" / "receipts" / "deep" / "a.pdf").write_bytes(b"x")
+                references = root / "references"
+                (references / "receipts" / "deep").mkdir(parents=True)
+                try:
+                    if kind == "folder":
+                        (references / "receipts").rename(root / "moved")
+                        (references / "receipts").symlink_to(root / "moved", True)
+                    elif kind == "deeper folder":
+                        (references / "receipts" / "deep").rmdir()
+                        (references / "receipts" / "deep").symlink_to(root / "outside", True)
+                    elif kind == "reference file":
+                        (references / "receipts" / "deep" / "a.txt").symlink_to(
+                            root / "outside" / "a.txt"
+                        )
+                    elif kind == "dangling file":
+                        (references / "receipts" / "deep" / "a.txt").symlink_to(root / "gone")
+                    else:
+                        (references / "receipts" / "deep" / "a.headings.txt").symlink_to(
+                            root / "outside" / "a.txt"
+                        )
+                except OSError:
+                    self.skipTest("this system does not allow symbolic links")
+                images = root / "images"
+                pdfs = c.files_below(images, frozenset({".pdf"}))
+                with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
+                    pdf.run_pdf_spike(
+                        FakePdf({"a.pdf": pdf.PdfText(["text"], ["Text"])}),
+                        pdfs,
+                        references_dir=references,
+                        pdfs_dir=images,
+                        environment=ENV,
+                        clock=Clock(),
+                    )
+                if kind != "headings file":  # the OCR spike reads no headings file
+                    with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
+                        ocr.find_labelled_images(images, references)
+
+    def test_a_reparse_point_in_the_reference_tree_stops_the_run(self) -> None:
+        real_lstat = os.lstat
+
+        def lstat(path: object) -> object:
+            result = real_lstat(path)  # type: ignore[arg-type]
+            if Path(str(path)).name != "receipts" or "references" not in Path(str(path)).parts:
+                return result
+            return mock.Mock(st_file_attributes=0x400, st_mode=result.st_mode)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "images" / "receipts").mkdir(parents=True)
+            (root / "images" / "receipts" / "a.png").write_bytes(b"x")
+            (root / "references" / "receipts").mkdir(parents=True)
+            (root / "references" / "receipts" / "a.txt").write_text("alpha", encoding="utf-8")
+            with (
+                mock.patch.object(os, "lstat", side_effect=lstat),
+                self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"),
+            ):
+                ocr.find_labelled_images(root / "images", root / "references")
+
+    def test_a_hard_link_in_either_tree_stops_the_run(self) -> None:
+        # A hard-linked file is a regular file whose other name can be a private file anywhere
+        # on the drive; inside demo/corpus it would be read as public data.
+        for place in ("image", "reference"):
+            with self.subTest(place), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "outside").mkdir()
+                (root / "outside" / "a.png").write_bytes(b"x")
+                (root / "outside" / "a.txt").write_text("private", encoding="utf-8")
+                (root / "images" / "receipts").mkdir(parents=True)
+                (root / "references" / "receipts").mkdir(parents=True)
+                try:
+                    if place == "image":
+                        os.link(root / "outside" / "a.png", root / "images" / "receipts" / "a.png")
+                        (root / "references" / "receipts" / "a.txt").write_text("own", "utf-8")
+                    else:
+                        (root / "images" / "receipts" / "a.png").write_bytes(b"x")
+                        os.link(
+                            root / "outside" / "a.txt", root / "references" / "receipts" / "a.txt"
+                        )
+                except OSError:
+                    self.skipTest("this system does not allow hard links")
+                with self.assertRaisesRegex(SpikeInputError, "hard link"):
+                    ocr.find_labelled_images(root / "images", root / "references")
+
+    def test_a_reparse_point_stops_the_walk(self) -> None:
+        # A Windows junction has the reparse attribute and not the symbolic-link mode, so
+        # os.walk enters it; the attribute is what is checked.
+        real_lstat = os.lstat
+
+        def lstat(path: object) -> object:
+            result = real_lstat(path)  # type: ignore[arg-type]
+            if Path(str(path)).name != "junction":
+                return result
+            return mock.Mock(st_file_attributes=0x400, st_mode=result.st_mode)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "junction").mkdir()
+            (root / "own.pdf").write_bytes(b"x")
+            with (
+                mock.patch.object(os, "lstat", side_effect=lstat),
+                self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"),
+            ):
+                c.files_below(root, frozenset({".pdf"}))
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions are a Windows feature")
+    def test_a_real_windows_junction_stops_the_walk(self) -> None:
+        import _winapi
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "outside").mkdir()
+            (root / "outside" / "private.pdf").write_bytes(b"x")
+            (root / "tree").mkdir()
+            create_junction = getattr(_winapi, "CreateJunction")  # noqa: B009 - typed for Windows only
+            create_junction(str(root / "outside"), str(root / "tree" / "junction"))
+            self.assertFalse((root / "tree" / "junction").is_symlink())  # why the attribute
+            with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
+                c.files_below(root / "tree", frozenset({".pdf"}))
+            # The same junction in the reference tree, which no walk lists.
+            (root / "images" / "junction").mkdir(parents=True)
+            (root / "images" / "junction" / "private.png").write_bytes(b"x")
+            (root / "outside" / "private.txt").write_text("private", encoding="utf-8")
+            (root / "references").mkdir()
+            create_junction(str(root / "outside"), str(root / "references" / "junction"))
+            with self.assertRaisesRegex(SpikeInputError, "symbolic, junction or hard link"):
+                ocr.find_labelled_images(root / "images", root / "references")
+
+    def test_a_subfolder_that_cannot_be_listed_stops_the_walk(self) -> None:
+        # os.walk skips it without a word unless told otherwise, and its files would leave the
+        # measurement unseen.
+        real_scandir = os.scandir
+
+        def refuse(path: str) -> object:
+            if Path(path).name == "locked":
+                raise PermissionError(13, "denied")
+            return real_scandir(path)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "locked").mkdir()
+            (root / "open.pdf").write_bytes(b"x")
+            with (
+                mock.patch.object(os, "scandir", side_effect=refuse),
+                self.assertRaises(PermissionError),
+            ):
+                c.files_below(root, frozenset({".pdf"}))
+
+    def test_a_missing_folder_is_an_error_not_an_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, self.assertRaises(FileNotFoundError):
+            c.files_below(Path(folder) / "missing", frozenset({".pdf"}))
+
 
 # --- pdf ------------------------------------------------------------------------------------
 
@@ -1078,6 +1311,45 @@ class PdfTest(unittest.TestCase):
     def test_no_pdfs_is_an_error(self) -> None:
         with self.assertRaises(ValueError):
             pdf.run_pdf_spike(FakePdf({}), [], environment=ENV)
+
+    def test_pdfs_in_subfolders_have_references_at_the_same_path(self) -> None:
+        # Three courses each have a syllabus.pdf: one flat folder of references could not tell
+        # them apart, so the references mirror the PDFs' folders.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for course, reference in (("a", "the text"), ("b", "a different one")):
+                (root / "pdfs" / course).mkdir(parents=True)
+                (root / "pdfs" / course / "syllabus.pdf").write_bytes(b"x")
+                (root / "references" / course).mkdir(parents=True)
+                (root / "references" / course / "syllabus.txt").write_text(reference, "utf-8")
+                (root / "references" / course / "syllabus.headings.txt").write_text(
+                    "The text\n", "utf-8"
+                )
+            (root / "pdfs" / "scan.pdf").write_bytes(b"x")  # no reference: measured, not scored
+            pdfs = c.files_below(root / "pdfs", frozenset({".pdf"}))
+            extractor = FakePdf(
+                {
+                    "syllabus.pdf": pdf.PdfText(["the text"], ["The text"]),
+                    "scan.pdf": pdf.PdfText([""], []),
+                }
+            )
+            report = pdf.run_pdf_spike(
+                extractor,
+                pdfs,
+                references_dir=root / "references",
+                pdfs_dir=root / "pdfs",
+                environment=ENV,
+                clock=Clock(),
+            )
+        metrics = report.rows[0].metrics
+        self.assertEqual(metrics["files"], 3)
+        self.assertEqual(metrics["pages_without_text"], 1)
+        self.assertEqual(metrics["references_used"], 2)
+        # a scores 0 against its own reference and b 1 against its own (every word of it
+        # differs or is missing): each PDF was scored against the file at its path.
+        self.assertEqual(metrics["wer_mean"], 0.5)
+        self.assertEqual(metrics["files_with_heading_reference"], 2)
+        self.assertEqual(metrics["heading_recall"], 1.0)
 
 
 if __name__ == "__main__":
