@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 import threading
 from collections.abc import Callable
@@ -686,10 +687,97 @@ class TestTheTargetPermissions:
     def test_on_windows_a_private_target_is_reported_as_private(
         self, vault: Path, target: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        walked: list[Path] = []
         monkeypatch.setattr(acl, "IS_WINDOWS", True)
         monkeypatch.setattr(acl, "secure_vault_folder", lambda folder, *, created: None)
+        monkeypatch.setattr(acl, "verify_tree", walked.append)
         target.mkdir(parents=True)
         assert backup(vault, target).private is True
+        assert walked == [target]  # the whole tree below the folder, with the same walk
+
+    def test_on_windows_an_open_entry_below_a_private_target_is_reported(
+        self, vault: Path, target: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A private target folder is not a private backup: ``blobs/``, ``snapshots/`` or a file
+        moved in keeps its own list, and new files inherit their folder's."""
+
+        def open_below(root: Path) -> None:
+            raise acl.VaultAccessError("1 files or folders below " + str(root))
+
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+        monkeypatch.setattr(acl, "secure_vault_folder", lambda folder, *, created: None)
+        monkeypatch.setattr(acl, "verify_tree", open_below)
+        result = backup(vault, target)
+        assert result.private is False
+        assert result.problems == 0  # a warning, as for an open target folder
+        assert "Warning: other accounts" in "\n".join(cli.report(result))
+
+    def test_the_tree_is_walked_after_this_run_has_written(
+        self, vault: Path, target: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[set[str]] = []
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+        monkeypatch.setattr(acl, "secure_vault_folder", lambda folder, *, created: None)
+        monkeypatch.setattr(acl, "verify_tree", lambda root: seen.append(files_below(root)))
+        result = backup(vault, target)
+        assert len(seen) == 1
+        assert f"snapshots/{result.snapshot}/vault.db" in seen[0]
+        assert len([name for name in seen[0] if name.startswith("blobs/sha256/")]) == 3
+
+    def test_an_open_target_folder_is_not_walked_again(
+        self, vault: Path, target: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(folder: Path, *, created: bool) -> None:
+            raise acl.VaultAccessError("open")
+
+        def never(root: Path) -> None:
+            raise AssertionError("the answer is already no")
+
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+        monkeypatch.setattr(acl, "secure_vault_folder", refuse)
+        monkeypatch.setattr(acl, "verify_tree", never)
+        assert backup(vault, target).private is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses PowerShell and Windows access lists")
+class TestRealWindowsTargetLists:  # pragma: no cover - runs on the Windows CI job only
+    """The real access lists. conftest turns the Windows steps off for this module, so each test
+    turns them on again."""
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(acl, "IS_WINDOWS", True)
+
+    @staticmethod
+    def grant(path: Path, sid: str, *, flags: str = "(OI)(CI)") -> None:
+        # A leading * means "this SID", whatever language Windows is in. Files take no flags.
+        subprocess.run(  # noqa: S603
+            ["icacls", str(path), "/grant", f"*{sid}:{flags}R"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
+
+    def test_a_new_target_and_everything_in_it_is_private(self, vault: Path, target: Path) -> None:
+        assert backup(vault, target).private is True
+
+    def test_an_open_snapshots_folder_in_a_private_target_is_reported(
+        self, vault: Path, target: Path
+    ) -> None:
+        now = clock()
+        assert run_backup(vault, target, now=now).private is True
+        self.grant(target / "snapshots", "S-1-5-32-545")  # Users, inherited by new snapshots
+        assert acl.is_private(acl.read_access(target))  # the folder itself is still private
+        assert run_backup(vault, target, now=now).private is False
+
+    def test_one_open_blob_deep_in_a_private_target_is_reported(
+        self, vault: Path, target: Path
+    ) -> None:
+        now = clock()
+        assert run_backup(vault, target, now=now).private is True
+        blob = BlobStore(target / "blobs").find(sha(DOCUMENTS["notes.md"]))
+        assert blob is not None
+        self.grant(blob, "S-1-5-19", flags="")  # one named second account
+        assert run_backup(vault, target, now=now).private is False
 
 
 class TestTheCommandLine:

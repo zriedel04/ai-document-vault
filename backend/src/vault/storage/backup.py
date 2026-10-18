@@ -95,7 +95,7 @@ class BackupResult:
     mismatched: int  # blobs already in the target whose size differs from the record, kept
     incomplete: int  # earlier snapshot folders without a vault.db
     cleaned: int  # leftovers of an interrupted copy removed from the target, or blobs re-sealed
-    private: bool | None  # Windows: is the target private to its owner? None elsewhere
+    private: bool | None  # Windows: is the target, all of it, owner-only? None elsewhere
 
     @property
     def problems(self) -> int:
@@ -292,13 +292,27 @@ def _count_incomplete(snapshots: Path, mine: Path) -> int:
 
 
 def _secure_target(target: Path, created: bool) -> bool | None:
-    """On Windows, make a new or empty target private to its owner as the vault is, and say
-    whether it is private. Anything that fails (a drive that keeps no permissions, a folder with
-    files that others may read) is reported, not fixed: the owner decides about their folder."""
+    """On Windows, make a new or empty target folder private to its owner as the vault is, and
+    say whether the folder itself is private (what is below it is :func:`_tree_is_private`'s).
+    Anything that fails (a drive that keeps no permissions, a folder with files that others may
+    read) is reported, not fixed: the owner decides about their folder."""
     if not acl.IS_WINDOWS:
         return None
     try:
         acl.secure_vault_folder(target, created=created)
+    except acl.VaultAccessError:
+        return False
+    return True
+
+
+def _tree_is_private(target: Path) -> bool:
+    """Is every file and folder below the target private to its owner? The vault's own start-up
+    walk (``acl.verify_tree``): a folder or file moved in from elsewhere keeps its own access list,
+    and new snapshots and blobs inherit the list of the folder they are written into, so a private
+    target folder says nothing about ``blobs/``, ``snapshots/`` or what is in them. Run after the
+    backup has written, so the answer covers this run's files too. Windows only."""
+    try:
+        acl.verify_tree(target)
     except acl.VaultAccessError:
         return False
     return True
@@ -380,8 +394,13 @@ def run_backup(
     config_file: Path | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     secure: Callable[[Path, bool], bool | None] = _secure_target,
+    tree: Callable[[Path], bool] = _tree_is_private,
 ) -> BackupResult:
-    """Back up the vault at ``vault_root`` into ``target`` (see the module docstring)."""
+    """Back up the vault at ``vault_root`` into ``target`` (see the module docstring).
+
+    ``private`` in the result is True only if the target folder and everything below it, this
+    run's files included, are private to the owner (Windows); one open entry anywhere makes it
+    False. Elsewhere it is None."""
     target = check_target(target, vault_root)
     paths = VaultPaths(vault_root)
     created_target = _ensure_folder(target, parents=True)
@@ -425,6 +444,9 @@ def run_backup(
             _undo(folder, created)
             raise
         incomplete = _count_incomplete(snapshots, folder)
+        if private:
+            # The folder alone is not the backup: every folder and file below it, old and new.
+            private = tree(target)
     return BackupResult(
         snapshot=name,
         copied=counts.copied,
