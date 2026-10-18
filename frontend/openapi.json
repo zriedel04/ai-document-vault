@@ -428,9 +428,26 @@
             ],
             "title": "Name"
           },
+          "name_highlight": {
+            "items": {
+              "$ref": "#/components/schemas/Segment"
+            },
+            "title": "Name Highlight",
+            "type": "array"
+          },
           "page": {
             "title": "Page",
             "type": "integer"
+          },
+          "section_highlight": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/Segment"
+              },
+              "type": "array"
+            },
+            "title": "Section Highlight",
+            "type": "array"
           },
           "section_path": {
             "items": {
@@ -457,7 +474,9 @@
           "char_end",
           "section_path",
           "snippet",
-          "matches"
+          "matches",
+          "name_highlight",
+          "section_highlight"
         ],
         "title": "SearchHit",
         "type": "object"

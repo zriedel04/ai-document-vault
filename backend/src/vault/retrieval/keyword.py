@@ -28,7 +28,11 @@ one snapshot.
 
 The snippet marks the matched words with markers made at random for each request, so a document's
 own text can never pose as a highlight, and is returned as segments (``text``, ``match``) for the
-page to render as text, never as markup.
+page to render as text, never as markup. The name and the section titles are searched too, so
+they come back marked the same way (``name_highlight``, ``section_highlight``): a result found
+only by its file name or its section shows where the words matched. Its snippet is then the start
+of the chosen chunk's text; for a match by name alone that is the document's first chunk, because
+every chunk scores the same and equal scores fall back to the lowest chunk id.
 
 The query, the snippets and the names are the owner's: they go back to the page that asked and
 are never logged, and no error here quotes them.
@@ -40,7 +44,7 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import Engine, bindparam, text
 
@@ -173,6 +177,10 @@ class SearchHit:
     section_path: tuple[str, ...]
     snippet: tuple[Segment, ...]
     matches: int  # the document's chunks that match, the best one included
+    # The name and each section title with the matched words marked, because a query can match
+    # them and not the text; without a match they are one unmarked segment (or none when empty).
+    name_highlight: tuple[Segment, ...] = ()
+    section_highlight: tuple[tuple[Segment, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -219,7 +227,9 @@ _COUNT = text(_COUNT_SQL).bindparams(bindparam("extensions", expanding=True))
 _PAGE = text(_PAGE_SQL).bindparams(bindparam("extensions", expanding=True))
 _SNIPPETS = text(
     "SELECT rowid AS chunk_id,"
-    " snippet(chunks_fts, 0, :open, :close, :ellipsis, :tokens) AS snippet"
+    " snippet(chunks_fts, 0, :open, :close, :ellipsis, :tokens) AS snippet,"
+    " highlight(chunks_fts, 1, :open, :close) AS title,"
+    " highlight(chunks_fts, 2, :open, :close) AS section_path"
     " FROM chunks_fts WHERE chunks_fts MATCH :match AND rowid IN :chunk_ids"
 ).bindparams(bindparam("chunk_ids", expanding=True))
 
@@ -273,10 +283,10 @@ def search(engine: Engine, query: SearchQuery) -> SearchPage:
         rows = connection.execute(
             _PAGE, {**scope, "limit": query.limit, "offset": query.offset}
         ).all()
-        snippets: dict[int, str] = {}
+        marked: dict[int, Any] = {}
         if rows:
-            snippets = {
-                row.chunk_id: row.snippet
+            marked = {
+                row.chunk_id: row
                 for row in connection.execute(
                     _SNIPPETS,
                     {
@@ -289,19 +299,57 @@ def search(engine: Engine, query: SearchQuery) -> SearchPage:
                     },
                 )
             }
-    items = tuple(
-        SearchHit(
-            document_id=row.document_id,
-            name=row.name or None,
-            extension=row.ext,
-            chunk_id=row.chunk_id,
-            page=row.page_start,
-            char_start=row.char_start,
-            char_end=row.char_end,
-            section_path=_section_path(row.section_path),
-            snippet=_segments(snippets.get(row.chunk_id, ""), open_mark, close_mark),
-            matches=row.matches,
+    items = []
+    for row in rows:
+        section_path = _section_path(row.section_path)
+        highlights = marked.get(row.chunk_id)
+        snippet = _segments(highlights.snippet, open_mark, close_mark) if highlights else ()
+        name = row.name or ""
+        name_highlight = _segments(highlights.title, open_mark, close_mark) if highlights else ()
+        if _plain(name_highlight) != name:
+            name_highlight = _segments(name, open_mark, close_mark)
+        section_highlight = (
+            _marked_titles(highlights.section_path, section_path, open_mark, close_mark)
+            if highlights
+            else None
+        ) or tuple(_segments(title, open_mark, close_mark) for title in section_path)
+        items.append(
+            SearchHit(
+                document_id=row.document_id,
+                name=name or None,
+                extension=row.ext,
+                chunk_id=row.chunk_id,
+                page=row.page_start,
+                char_start=row.char_start,
+                char_end=row.char_end,
+                section_path=section_path,
+                snippet=snippet,
+                matches=row.matches,
+                name_highlight=name_highlight,
+                section_highlight=section_highlight,
+            )
         )
-        for row in rows
-    )
-    return SearchPage(items=items, total=total)
+    return SearchPage(items=tuple(items), total=total)
+
+
+def _plain(segments: tuple[Segment, ...]) -> str:
+    return "".join(segment.text for segment in segments)
+
+
+def _marked_titles(
+    marked: str, titles: tuple[str, ...], open_mark: str, close_mark: str
+) -> tuple[tuple[Segment, ...], ...] | None:
+    """The section titles as FTS5 marked them in the stored JSON list, or ``None`` when the
+    marked list does not read back as exactly ``titles`` once the marks are taken out (the marks
+    sit between tokens, inside the JSON strings, so this does not happen with the chunker's own
+    titles), so a mark can never change what a title says."""
+    try:
+        parsed = json.loads(marked)
+    except ValueError:
+        return None
+    if not isinstance(parsed, list) or not all(isinstance(title, str) for title in parsed):
+        return None
+    result = tuple(_segments(title, open_mark, close_mark) for title in parsed)
+    if tuple(_plain(title) for title in result) != titles:
+        return None
+    return result

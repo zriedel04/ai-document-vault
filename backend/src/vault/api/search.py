@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine
 
 from vault.core.security import LocalUser, current_user
+from vault.retrieval import keyword
 from vault.retrieval.keyword import (
     DEFAULT_PAGE,
     MAX_PAGE,
@@ -52,6 +53,9 @@ class SearchHit(BaseModel):
     section_path: list[str]
     snippet: list[Segment]
     matches: int
+    # The name and each section title, with the words the query matched marked.
+    name_highlight: list[Segment]
+    section_highlight: list[list[Segment]]
 
 
 class SearchResults(BaseModel):
@@ -99,8 +103,12 @@ async def search_documents(
                 char_start=hit.char_start,
                 char_end=hit.char_end,
                 section_path=list(hit.section_path),
-                snippet=[Segment(text=part.text, match=part.match) for part in hit.snippet],
+                snippet=[_segment(part) for part in hit.snippet],
                 matches=hit.matches,
+                name_highlight=[_segment(part) for part in hit.name_highlight],
+                section_highlight=[
+                    [_segment(part) for part in title] for title in hit.section_highlight
+                ],
             )
             for hit in page.items
         ],
@@ -108,3 +116,7 @@ async def search_documents(
         limit=body.limit,
         offset=body.offset,
     )
+
+
+def _segment(part: keyword.Segment) -> Segment:
+    return Segment(text=part.text, match=part.match)

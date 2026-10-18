@@ -373,8 +373,12 @@ export interface components {
             matches: number;
             /** Name */
             name: string | null;
+            /** Name Highlight */
+            name_highlight: components["schemas"]["Segment"][];
             /** Page */
             page: number;
+            /** Section Highlight */
+            section_highlight: components["schemas"]["Segment"][][];
             /** Section Path */
             section_path: string[];
             /** Snippet */

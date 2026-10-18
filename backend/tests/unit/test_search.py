@@ -250,6 +250,56 @@ def test_the_file_name_and_the_section_are_searched_too(
     assert marked(item) == ["Deposit", "March"]
 
 
+def segments_marked(segments: list[dict[str, Any]]) -> list[str]:
+    return [part["text"] for part in segments if part["match"]]
+
+
+def test_a_match_in_the_name_or_a_section_is_marked_there(
+    client: TestClient,
+    library: Library,
+) -> None:
+    """The name and the section path are searched, so a result found by them alone shows where:
+    the text snippet has no mark then, and a match by name alone shows the first chunk."""
+    title = 'Say "hi" \\ to Lease terms'  # a quote and a backslash, escaped in the stored JSON
+    document_id = library.add("Lease-Agreement.md", "body")
+    version = current_version(library.engine, document_id)
+    first = "# Intro\nNothing to see on page one.\n"
+    second = f"# {title}\nThe deposit is due.\n"
+    index(
+        library.engine,
+        version,
+        PageText(1, first, (PageHeading(1, "Intro", 0, 7),)),
+        PageText(2, second, (PageHeading(1, title, 0, len(title) + 2),)),
+    )
+    [by_name] = find(client, "agreement")["items"]
+    assert segments_marked(by_name["name_highlight"]) == ["Agreement"]
+    assert "".join(part["text"] for part in by_name["name_highlight"]) == "Lease-Agreement.md"
+    assert marked(by_name) == []
+    assert by_name["page"] == 1  # every chunk scores the same: the first one is shown
+    [by_section] = find(client, "terms")["items"]
+    assert by_section["page"] == 2
+    assert by_section["section_path"] == [title]
+    [section] = by_section["section_highlight"]
+    assert segments_marked(section) == ["terms"]
+    assert "".join(part["text"] for part in section) == title
+    assert segments_marked(by_section["name_highlight"]) == []
+    [by_text] = find(client, "deposit")["items"]
+    assert marked(by_text) == ["deposit"]
+    assert by_text["name_highlight"] == [{"text": "Lease-Agreement.md", "match": False}]
+    assert by_text["section_highlight"] == [[{"text": title, "match": False}]]
+
+
+def test_a_marked_section_list_that_reads_back_differently_is_not_used() -> None:
+    from vault.retrieval.keyword import _marked_titles
+
+    o, c = "<o>", "<c>"
+    assert _marked_titles('["a <o>b<c>"]', ("a b",), o, c) is not None
+    assert _marked_titles('["a <o>b<c>", "x"]', ("a b",), o, c) is None
+    assert _marked_titles('["a <o>c<c>"]', ("a b",), o, c) is None
+    assert _marked_titles("not json", ("a b",), o, c) is None
+    assert _marked_titles("[1]", ("1",), o, c) is None
+
+
 def test_one_result_per_document_with_its_best_chunk_and_match_count(
     client: TestClient,
     library: Library,
