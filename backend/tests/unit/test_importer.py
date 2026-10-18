@@ -270,6 +270,7 @@ class SwappingStore(BlobStore):
         *,
         max_bytes: int | None = None,
         expected_sha256: str | None = None,
+        expected_size: int | None = None,
     ) -> Any:
         assert self.source is not None
         self.source.write_bytes(self.replacement)

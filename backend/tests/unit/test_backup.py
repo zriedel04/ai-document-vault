@@ -37,9 +37,10 @@ from vault.storage.backup import (
     run_backup,
 )
 from vault.storage.blobs import (
-    BlobHashMismatchError,
+    BlobMismatchError,
     BlobStore,
 )
+from vault.storage.blobs import _lstat as blobs_lstat
 
 DOCUMENTS = {
     "syllabus.txt": b"Course syllabus\nWeek 1: introduction\nWeek 2: sources\n",
@@ -49,6 +50,7 @@ DOCUMENTS = {
 PRIVATE_NAME = "Patient-Diagnosis-Confidential"
 START = datetime(2026, 10, 17, 14, 30, 5, tzinfo=UTC)
 CONFIG_TEXT = "# synthetic settings for a test\n[server]\nport = 8765\n"
+TOKEN_TEXT = "SyntheticTokenForTests_0123456789abcdefghij"  # noqa: S105 - synthetic, 43 characters
 
 
 def sha(data: bytes) -> str:
@@ -117,7 +119,8 @@ def vault(tmp_path: Path) -> Path:
     (root / "derived" / "01ABC" / "page-1.json").write_text("{}")
     (root / "logs").mkdir()
     (root / "logs" / "vault.log").write_text("log line\n")
-    (root / "local-token").write_text("t" * 43)
+    (root / "local-token").write_text(TOKEN_TEXT)
+    (root / "local-token").chmod(0o600)
     return root
 
 
@@ -146,7 +149,11 @@ class TestABackup:
         assert result.snapshot == "2026-10-17T143005Z"
         assert (result.copied, result.present, result.problems) == (3, 0, 0)
         snapshot = target / "snapshots" / result.snapshot
-        assert sorted(p.name for p in snapshot.iterdir()) == ["config.toml", "vault.db"]
+        assert sorted(p.name for p in snapshot.iterdir()) == [
+            "config.toml",
+            "local-token",
+            "vault.db",
+        ]
         assert (snapshot / "config.toml").read_text() == CONFIG_TEXT
         store = BlobStore(target / "blobs")
         for data in DOCUMENTS.values():
@@ -168,7 +175,7 @@ class TestABackup:
             copy.close()
         assert hashes == {sha(data) for data in DOCUMENTS.values()}
 
-    def test_rebuildable_data_logs_and_the_token_are_left_out(
+    def test_rebuildable_data_and_logs_are_left_out_and_the_token_is_kept(
         self, vault: Path, target: Path
     ) -> None:
         result = backup(vault, target)
@@ -178,7 +185,90 @@ class TestABackup:
             for name, data in DOCUMENTS.items()
             for h in [sha(data)]
         }
-        assert written == {"backup.lock", f"snapshots/{result.snapshot}/vault.db", *blobs}
+        snapshot = f"snapshots/{result.snapshot}"
+        assert written == {"backup.lock", f"{snapshot}/vault.db", f"{snapshot}/local-token", *blobs}
+        assert not result.token_missing
+
+    def test_the_token_is_copied_owner_only_as_adr_0016_says(
+        self, vault: Path, target: Path
+    ) -> None:
+        result = backup(vault, target)
+        copy = target / "snapshots" / result.snapshot / "local-token"
+        assert copy.read_text() == TOKEN_TEXT
+        assert is_read_only(copy)
+        if os.name != "nt":  # Windows has only the read-only attribute; its list is checked below
+            assert stat.S_IMODE(os.lstat(copy).st_mode) == 0o400
+        assert list((target / "snapshots" / result.snapshot).glob("*.partial")) == []
+
+    def test_a_vault_without_a_token_is_backed_up_without_one(
+        self, vault: Path, target: Path
+    ) -> None:
+        (vault / "local-token").unlink()
+        result = backup(vault, target)
+        assert result.token_missing
+        assert result.problems == 0  # the server makes one at its first start
+        assert not (target / "snapshots" / result.snapshot / "local-token").exists()
+        assert (target / "snapshots" / result.snapshot / "vault.db").is_file()
+        assert "no local-token yet" in "\n".join(cli.report(result))
+
+    def test_a_link_in_place_of_the_token_is_refused(
+        self, vault: Path, target: Path, tmp_path: Path
+    ) -> None:
+        outside = tmp_path / "outside-token"
+        outside.write_text("not the vault's token")
+        (vault / "local-token").unlink()
+        link(outside, vault / "local-token")
+        with pytest.raises(BackupError, match="token file"):
+            backup(vault, target)
+        assert list((target / "snapshots").iterdir()) == []
+
+    def test_a_folder_in_place_of_the_token_is_refused(self, vault: Path, target: Path) -> None:
+        (vault / "local-token").unlink()
+        (vault / "local-token").mkdir()
+        with pytest.raises(BackupError, match="token file"):
+            backup(vault, target)
+        assert list((target / "snapshots").iterdir()) == []
+
+    def test_a_token_file_far_larger_than_a_token_is_refused(
+        self, vault: Path, target: Path
+    ) -> None:
+        (vault / "local-token").write_bytes(b"x" * 5000)
+        with pytest.raises(BackupError, match="larger than a token"):
+            backup(vault, target)
+        assert list((target / "snapshots").iterdir()) == []
+
+    def test_a_token_file_that_cannot_be_opened_stops_the_run(
+        self, vault: Path, target: Path
+    ) -> None:
+        real_open = os.open
+
+        def refuse(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            if str(path).endswith("local-token") and str(vault) in str(path):
+                raise PermissionError(13, "held by another program")
+            return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(os, "open", refuse), pytest.raises(BackupError, match="token"):
+            backup(vault, target)
+        assert list((target / "snapshots").iterdir()) == []
+
+    def test_a_token_file_swapped_after_the_check_is_refused(
+        self, vault: Path, target: Path
+    ) -> None:
+        real_lstat = blobs_lstat
+
+        def stale(path: Path) -> os.stat_result | None:
+            status = real_lstat(path)
+            if path.name == "local-token" and status is not None:
+                values = list(status)
+                values[stat.ST_INO] += 1  # as if another file had taken the name since
+                return os.stat_result(values)
+            return status
+
+        with (
+            mock.patch("vault.storage.backup._lstat", stale),
+            pytest.raises(BackupError, match="changed while"),
+        ):
+            backup(vault, target)
 
     def test_a_second_run_copies_nothing_new(self, vault: Path, target: Path) -> None:
         now = clock()
@@ -245,6 +335,25 @@ class TestABackup:
         result = backup(vault, target)
         assert result.damaged == 1
         assert BlobStore(target / "blobs").find(sha(data)) is None
+
+    def test_a_blob_shorter_than_its_record_is_not_copied(self, vault: Path, target: Path) -> None:
+        """The bytes match the hash, but the record says more bytes: ``max_bytes`` alone is only a
+        ceiling, so the size has to be exact (Codex P2 on PR #59)."""
+        data = DOCUMENTS["plan.txt"]
+        real = backup_module._snapshot
+
+        def snapshot(db: Path, out: Path) -> list[tuple[object, object, object]]:
+            rows = real(db, out)
+            return [
+                (h, ext, size + 5 if h == sha(data) else size)  # type: ignore[operator]
+                for h, ext, size in rows
+            ]
+
+        with mock.patch.object(backup_module, "_snapshot", snapshot):
+            result = backup(vault, target)
+        assert (result.copied, result.damaged) == (2, 1)
+        assert BlobStore(target / "blobs").find(sha(data)) is None
+        assert list((target / "blobs" / ".tmp").iterdir()) == []
 
     def test_a_blob_missing_from_the_vault_is_counted(self, vault: Path, target: Path) -> None:
         assert BlobStore(vault / "blobs").delete(sha(DOCUMENTS["syllabus.txt"]))
@@ -722,6 +831,7 @@ class TestTheTargetPermissions:
         result = backup(vault, target)
         assert len(seen) == 1
         assert f"snapshots/{result.snapshot}/vault.db" in seen[0]
+        assert f"snapshots/{result.snapshot}/local-token" in seen[0]
         assert len([name for name in seen[0] if name.startswith("blobs/sha256/")]) == 3
 
     def test_an_open_target_folder_is_not_walked_again(
@@ -791,7 +901,14 @@ class TestTheCommandLine:
 
     @staticmethod
     def private_words(vault: Path, target: Path) -> list[str]:
-        return [PRIVATE_NAME, str(target), str(vault), *DOCUMENTS, sha(DOCUMENTS["notes.md"])]
+        return [
+            PRIVATE_NAME,
+            str(target),
+            str(vault),
+            *DOCUMENTS,
+            sha(DOCUMENTS["notes.md"]),
+            TOKEN_TEXT,
+        ]
 
     def test_it_prints_counts_and_never_a_name(
         self, settings: Path, vault: Path, target: Path, capsys: pytest.CaptureFixture[str]
@@ -913,19 +1030,21 @@ class TestTheCommandLine:
         result = BackupResult(
             snapshot="2026-10-17T143005Z", copied=1, present=2, missing=3, damaged=4,
             unreadable=5, mismatched=6, incomplete=7, cleaned=8, private=False,
+            token_missing=True,
         )  # fmt: skip
         text = "\n".join(cli.report(result))
         for figure in ("missing", "damaged", "unreadable", "mismatched", "incomplete"):
             assert str(getattr(result, figure)) in text
         assert "tidied up: 8" in text
         assert "Warning: other accounts" in text
+        assert "no local-token yet" in text
         assert result.problems == 3 + 4 + 5 + 6
 
 
 class TestPutWithAnExpectedHash:
     def test_bytes_with_another_hash_are_not_stored(self, tmp_path: Path) -> None:
         store = BlobStore(tmp_path / "blobs")
-        with pytest.raises(BlobHashMismatchError):
+        with pytest.raises(BlobMismatchError):
             store.put(io.BytesIO(b"other bytes"), "txt", expected_sha256=sha(b"expected"))
         assert store.scan().blobs == ()
         assert list((store.root / ".tmp").iterdir()) == []
@@ -933,6 +1052,24 @@ class TestPutWithAnExpectedHash:
     def test_the_expected_hash_must_be_a_hash(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="SHA-256"):
             BlobStore(tmp_path / "blobs").put(io.BytesIO(b"x"), "txt", expected_sha256="x\n")
+
+    @pytest.mark.parametrize("size", [len(b"expected") - 1, len(b"expected") + 1])
+    def test_bytes_of_another_size_are_not_stored(self, tmp_path: Path, size: int) -> None:
+        store = BlobStore(tmp_path / "blobs")
+        with pytest.raises(BlobMismatchError, match="size"):
+            store.put(
+                io.BytesIO(b"expected"),
+                "txt",
+                max_bytes=size + 1,
+                expected_sha256=sha(b"expected"),
+                expected_size=size,
+            )
+        assert store.scan().blobs == ()
+
+    @pytest.mark.parametrize("size", [-1, True, 1.0])
+    def test_the_expected_size_must_be_a_count(self, tmp_path: Path, size: object) -> None:
+        with pytest.raises(ValueError, match="whole number"):
+            BlobStore(tmp_path / "blobs").put(io.BytesIO(b"x"), "txt", expected_size=size)  # type: ignore[arg-type]
 
     def test_bytes_with_the_expected_hash_are_stored(self, tmp_path: Path) -> None:
         store = BlobStore(tmp_path / "blobs")
@@ -950,4 +1087,4 @@ def test_an_engine_is_not_needed_to_read_the_snapshot(vault: Path, target: Path)
         assert copy.execute("PRAGMA journal_mode").fetchone() == ("delete",)
     finally:
         copy.close()
-    assert sorted(p.name for p in folder.iterdir()) == ["vault.db"]
+    assert sorted(p.name for p in folder.iterdir()) == ["local-token", "vault.db"]

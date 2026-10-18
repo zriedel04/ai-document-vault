@@ -8,17 +8,19 @@ A backup target holds one shared blob store and one dated folder per snapshot::
       snapshots/2026-10-17T143005Z/
         vault.db                       consistent copy of the database, read-only
         config.toml                    the settings file, if there is one, read-only
+        local-token                    the vault's API token (ADR 0016), owner-only, read-only
 
 The database is copied with SQLite's ``VACUUM INTO``, which reads one consistent snapshot even
 while the app writes, into ``vault.db.partial``; the copy is checked (``PRAGMA quick_check``) and
 lists the blobs it refers to. Each of those blobs not yet in the target is copied with the blob
 store's own ``put``: to a temporary name in the target, hashed as it is written, flushed, and
-published under its final name only if the hash is the one it is filed under, then marked
-read-only. Only then is the snapshot renamed to ``vault.db``, so a snapshot folder with a
-``vault.db`` is complete and every blob it names is in the target (except the ones the result counts
-as problems). ``index.db``, ``derived/``, ``logs/``, ``backups/`` and the local token are never
-copied: the first three are rebuilt by the app, and the token is a credential the server creates
-again.
+published under its final name only if the hash and the exact size are the ones its record gives,
+then marked read-only. Only then is the snapshot renamed to ``vault.db``, so a snapshot folder with
+a ``vault.db`` is complete and every blob it names is in the target (except the ones the result
+counts as problems). The local token is copied as ADR 0016 says ("backed up with the vault"), so a
+restored vault keeps the token the browser holds; a vault without one (the server has not started
+yet) is backed up without it and the result says so. ``index.db``, ``derived/``, ``logs/`` and
+``backups/`` are never copied: the app rebuilds them.
 
 Nothing is ever overwritten: a snapshot folder is created only if its name is free, a published
 file never replaces an entry, and a blob already in the target is kept (its size is compared with
@@ -57,8 +59,8 @@ from vault.storage.blobs import (
     READ_ONLY,
     SHA256,
     WRITABLE,
-    BlobHashMismatchError,
     BlobIntegrityError,
+    BlobMismatchError,
     BlobStore,
     BlobTooLargeError,
     _is_link,
@@ -74,6 +76,10 @@ BLOBS: Final = "blobs"
 SNAPSHOTS: Final = "snapshots"
 DATABASE: Final = "vault.db"
 CONFIG: Final = "config.toml"
+TOKEN: Final = "local-token"  # noqa: S105 - the file name (VaultPaths.token_file), not a secret
+TOKEN_MAX_BYTES: Final = 1024  # a token is 32 to 128 characters (vault.core.security.TOKEN)
+OWNER_ONLY: Final = stat.S_IRUSR  # the copied token: read-only, and for its owner alone
+OWNER_ONLY_WRITABLE: Final = stat.S_IRUSR | stat.S_IWUSR  # a file while it is written
 PARTIAL: Final = ".partial"
 STAMP_FORMAT: Final = "%Y-%m-%dT%H%M%SZ"  # no colon: Windows does not allow one in a name
 STAMP: Final = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z")  # always ``fullmatch``
@@ -96,6 +102,7 @@ class BackupResult:
     incomplete: int  # earlier snapshot folders without a vault.db
     cleaned: int  # leftovers of an interrupted copy removed from the target, or blobs re-sealed
     private: bool | None  # Windows: is the target, all of it, owner-only? None elsewhere
+    token_missing: bool  # the vault had no local-token yet, so the snapshot has none
 
     @property
     def problems(self) -> int:
@@ -248,25 +255,55 @@ def _snapshot(db: Path, out: Path) -> list[tuple[object, object, object]]:
     return [(row[0], row[1], row[2]) for row in rows]
 
 
-def _write_new(data: bytes, final: Path, created: list[Path]) -> None:
+def _write_new(data: bytes, final: Path, created: list[Path], *, mode: int = READ_ONLY) -> None:
     """Write bytes to a temporary name, flush them and publish them under ``final`` only if that
-    name is free, then make the file read-only."""
+    name is free, then give the file ``mode``. The temporary file is created owner-only, so a
+    secret is never readable by others while it is being written."""
     temp = final.with_name(final.name + PARTIAL)
-    with temp.open("xb") as out:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(temp, flags, OWNER_ONLY_WRITABLE), "wb") as out:
         created.append(temp)
         out.write(data)
         out.flush()
         os.fsync(out.fileno())
-    _publish(temp, final, created)
+    _publish(temp, final, created, mode=mode)
 
 
-def _publish(temp: Path, final: Path, created: list[Path]) -> None:
+def _publish(temp: Path, final: Path, created: list[Path], *, mode: int = READ_ONLY) -> None:
     if not publish_new(temp, final):
         msg = "a file is already where the snapshot's file belongs; nothing was replaced"
         raise BackupError(msg)
     created.append(final)
     temp.unlink(missing_ok=True)  # first: Windows cannot remove a name of a read-only file
-    final.chmod(READ_ONLY)
+    final.chmod(mode)
+
+
+def _read_token(path: Path) -> bytes | None:
+    """The vault's token file, or None if the vault has none yet (the server makes it at its first
+    start). Anything but a real file in its place (a link, a junction, a folder) is refused, as the
+    blob store refuses one where a blob belongs: a link could hand the backup another file. The file
+    is opened without following a link and must still be the entry that was checked."""
+    status = _lstat(path)
+    if status is None:
+        return None
+    if not _is_real_file(status):
+        msg = "something that is not a file (or a link) is where the vault's token file belongs"
+        raise BackupError(msg)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        msg = "the vault's token file could not be read"
+        raise BackupError(msg) from None
+    with os.fdopen(fd, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino):
+            msg = "the vault's token file changed while it was being read"
+            raise BackupError(msg)
+        data = handle.read(TOKEN_MAX_BYTES + 1)
+    if len(data) > TOKEN_MAX_BYTES:
+        msg = "the vault's token file is far larger than a token; it was not copied"
+        raise BackupError(msg)
+    return data
 
 
 def _undo(folder: Path, created: list[Path]) -> None:
@@ -375,10 +412,11 @@ def _copy_blobs(
                     ext,
                     max_bytes=size,
                     expected_sha256=sha256,
+                    expected_size=size,
                 )
         except _SourceReadError:
             counts.unreadable += 1
-        except (BlobTooLargeError, BlobHashMismatchError):
+        except (BlobTooLargeError, BlobMismatchError):
             counts.damaged += 1
         else:
             # Not created only if another writer stored it first, which the target lock prevents.
@@ -439,6 +477,9 @@ def run_backup(
                     msg = "the settings file could not be read"
                     raise BackupError(msg) from None
                 _write_new(settings, folder / CONFIG, created)
+            token = _read_token(paths.token_file)
+            if token is not None:
+                _write_new(token, folder / TOKEN, created, mode=OWNER_ONLY)
             _publish(partial, folder / DATABASE, created)
         except BaseException:
             _undo(folder, created)
@@ -458,4 +499,5 @@ def run_backup(
         incomplete=incomplete,
         cleaned=cleaned,
         private=private,
+        token_missing=token is None,
     )

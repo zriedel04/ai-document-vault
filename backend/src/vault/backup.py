@@ -86,6 +86,11 @@ def report(result: BackupResult) -> list[str]:
             f"Earlier snapshots that did not finish (a folder without vault.db): "
             f"{result.incomplete}; they can be deleted"
         )
+    if result.token_missing:
+        lines.append(
+            "The vault has no local-token yet, so this snapshot has none (the server makes one "
+            "when it starts)."
+        )
     if result.private is False:
         lines.append(
             "Warning: other accounts on this PC may be able to read the backup folder, or its "
