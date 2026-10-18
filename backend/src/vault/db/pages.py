@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import Engine, delete, func, insert, select
+from sqlalchemy import Connection, Engine, delete, func, insert, select
 
 from vault.db import ids
 from vault.db.engine import read_snapshot
@@ -215,9 +215,15 @@ def read_pages(engine: Engine, version_id: str) -> StoredPages | None:
     if not ids.is_ulid(version_id):
         return None
     with read_snapshot(engine) as connection:
-        rows = connection.execute(
-            select(pages).where(pages.c.version_id == version_id).order_by(pages.c.page_no)
-        ).all()
+        return pages_of(connection, version_id)
+
+
+def pages_of(connection: Connection, version_id: str) -> StoredPages | None:
+    """``read_pages`` in the caller's transaction, so what it reads can be acted on before anyone
+    else writes (the chunk stage compares it with what it chunked under the write lock)."""
+    rows = connection.execute(
+        select(pages).where(pages.c.version_id == version_id).order_by(pages.c.page_no)
+    ).all()
     if not rows:
         return None
     if len({(row.extractor, row.encoding) for row in rows}) != 1:

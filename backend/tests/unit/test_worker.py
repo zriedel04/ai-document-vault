@@ -508,7 +508,10 @@ def test_the_app_starts_and_stops_its_pool_with_the_server(vault_dir: Path) -> N
     pool = app.state.workers
     assert isinstance(pool, WorkerPool)
     with TestClient(app):
-        assert pool.threads == ()  # no stage has a handler yet
+        # Only the chunk stage has a handler so far, with its limit of one thread.
+        assert len(pool.threads) == 1
+        assert all(thread.is_alive() for thread in pool.threads)
+    assert not any(thread.is_alive() for thread in pool.threads)
     with pytest.raises(RuntimeError):
         pool.start()  # it was started by the server
 
