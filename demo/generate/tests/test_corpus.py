@@ -22,6 +22,7 @@ import yaml
 from PIL import Image
 
 import build
+import references
 from model import Document
 from questions import build_questions
 from render import Pen, image_layout, scan_layout
@@ -198,6 +199,171 @@ class CorpusTests(unittest.TestCase):
                 entry["sha256"], hashlib.sha256(FILES[f"demo/corpus/{path}"]).hexdigest()
             )
             self.assertEqual(entry["bytes"], len(FILES[f"demo/corpus/{path}"]))
+
+
+REFERENCES = "demo/corpus/references/"
+
+
+def reference_text(path: str) -> str:
+    return FILES[f"{REFERENCES}{path}"].decode("utf-8")
+
+
+def stem(doc: Document) -> str:
+    return doc.path.rsplit(".", 1)[0]
+
+
+_FONT = re.compile(rb"/BaseFont /([\w-]+) /Encoding /\w+ /Name /(F\d+)")
+_STREAM = re.compile(rb"stream\n(.*?)endstream", re.DOTALL)
+_DRAW = re.compile(rb"/(F\d+) [\d.]+ Tf|\(((?:\\.|[^\\)])*)\) Tj")
+_ESCAPE = re.compile(rb"\\(.)")
+
+
+def drawn_strings(pdf: bytes) -> list[tuple[str, str]]:
+    """Every string a text PDF draws, as (font name, text), in the order of its content streams,
+    read from the bytes (reportlab writes them uncompressed here): an account of the pages that
+    does not go through the generator's ``Document``."""
+    fonts = {name.decode(): base.decode() for base, name in _FONT.findall(pdf)}
+    drawn: list[tuple[str, str]] = []
+    for stream in _STREAM.findall(pdf):
+        font = ""
+        for token in _DRAW.finditer(stream):
+            if token.group(1):
+                font = fonts[token.group(1).decode()]
+            else:
+                drawn.append((font, _ESCAPE.sub(rb"\1", token.group(2)).decode("latin-1")))
+    return drawn
+
+
+def rows_in_reading_order(pen: Pen) -> list[str]:
+    """The drawn pieces of a picture in visual line order: pieces whose heights overlap share a
+    line (a receipt's price sits a pixel or two higher than its item), lines from top to bottom,
+    and pieces from left to right on a line."""
+    lines: list[list[tuple[float, float, str]]] = []
+    for placed in sorted(pen.placed, key=lambda one: one.box[1]):
+        left, _, _, bottom = placed.box
+        if lines and placed.box[1] < max(piece[1] for piece in lines[-1]):
+            lines[-1].append((left, bottom, placed.text))
+        else:
+            lines.append([(left, bottom, placed.text)])
+    return [piece[2] for line in lines for piece in sorted(line)]
+
+
+class SpikeReferenceTests(unittest.TestCase):
+    """Reference texts for the OCR and PDF spikes in demo/corpus/references/ (references.py)."""
+
+    def test_every_image_and_text_pdf_has_its_references_and_nothing_else_does(self) -> None:
+        expected: set[str] = set()
+        for doc in DOCS.values():
+            if doc.kind in ("png", "jpg"):
+                expected.add(f"{stem(doc)}.txt")
+            if doc.kind == "pdf_text":
+                expected |= {f"{stem(doc)}.txt", f"{stem(doc)}.headings.txt"}
+        found = {path.removeprefix(REFERENCES) for path in FILES if path.startswith(REFERENCES)}
+        self.assertEqual(found, expected)
+        kinds = [d.kind for d in DOCS.values()]
+        self.assertEqual(
+            len(found), kinds.count("png") + kinds.count("jpg") + 2 * kinds.count("pdf_text")
+        )
+
+    def test_references_are_not_documents(self) -> None:
+        # The embedding spike, the eval set and the demo import take the manifest's list, so a
+        # reference must never be listed or cited, and never share a document's folder.
+        manifest = json.loads(FILES["demo/corpus/manifest.json"])
+        prefix = f"{references.FOLDER}/"
+        self.assertFalse([e for e in manifest["documents"] if e["path"].startswith(prefix)])
+        self.assertFalse([path for path in DOCS if path.startswith(prefix)])
+        for q in QUESTIONS:
+            for src in (*q.sources, *q.alternatives):
+                self.assertFalse(src.path.startswith(prefix), q.id)
+
+    def test_reference_files_are_plain_utf8_lines(self) -> None:
+        # The spikes read UTF-8 with or without a mark; the generator writes it without one,
+        # with Unix line ends and one entry per line. A blank reference text would be counted
+        # as unusable, so none is; a headings file may be empty (the PDF has no headings).
+        for path, content in FILES.items():
+            if not path.startswith(REFERENCES):
+                continue
+            with self.subTest(path=path):
+                text = content.decode("utf-8")
+                self.assertFalse(content.startswith(b"\xef\xbb\xbf"))
+                self.assertNotIn("\r", text)
+                self.assertNotIn("\t", text)
+                lines = text.splitlines()
+                self.assertTrue(lines or path.endswith(references.HEADINGS_SUFFIX))
+                self.assertTrue(not text or text.endswith("\n"))
+                self.assertTrue(all(line and line.strip() == line for line in lines))
+
+    def test_an_image_reference_holds_every_drawn_word_and_only_those(self) -> None:
+        # Checked against the content, not against the renderer that wrote the reference: the
+        # words of the lines, plus only the title bar's label that the terminal layout draws.
+        chrome = {"terminal": ["Terminal"]}
+        for doc in DOCS.values():
+            if doc.kind not in ("png", "jpg"):
+                continue
+            with self.subTest(document=doc.path):
+                words = chrome.get(doc.layout, []) + " ".join(doc.lines[0]).split()
+                self.assertEqual(reference_text(f"{stem(doc)}.txt").split(), words)
+
+    def test_an_image_reference_follows_the_lines_of_the_picture(self) -> None:
+        # Top to bottom and left to right, except the kanban board, whose columns are read one
+        # after the other: a person reads a board column by column, so an engine that reads it
+        # row by row is scored down for its reading order on that one image.
+        seen_kanban = False
+        for doc in DOCS.values():
+            if doc.kind not in ("png", "jpg"):
+                continue
+            pen = image_layout(doc)
+            reference = reference_text(f"{stem(doc)}.txt").splitlines()
+            with self.subTest(document=doc.path):
+                if doc.layout == "kanban":
+                    seen_kanban = True
+                    self.assertNotEqual(reference, rows_in_reading_order(pen))
+                    self.assertEqual(reference, list(doc.lines[0]))
+                else:
+                    self.assertEqual(reference, rows_in_reading_order(pen))
+        self.assertTrue(seen_kanban)
+
+    def test_a_pdf_reference_is_the_text_drawn_into_the_pdf(self) -> None:
+        # Read from the PDF's own bytes. A wrapped paragraph is one line of the reference and the
+        # spike collapses whitespace, so the words in order are what must agree.
+        for doc in DOCS.values():
+            if doc.kind != "pdf_text":
+                continue
+            with self.subTest(document=doc.path):
+                drawn = " ".join(text for _, text in drawn_strings(data(doc)))
+                self.assertEqual(reference_text(f"{stem(doc)}.txt").split(), drawn.split())
+
+    def test_a_headings_reference_lists_every_bold_line_of_the_pdf(self) -> None:
+        # Headings are the only bold text, each drawn as one line, so the bold strings of the PDF
+        # in order are the expected headings; a heading that wrapped would show as two.
+        for doc in DOCS.values():
+            if doc.kind != "pdf_text":
+                continue
+            with self.subTest(document=doc.path):
+                bold = [text for font, text in drawn_strings(data(doc)) if font.endswith("-Bold")]
+                self.assertTrue(bold)
+                self.assertEqual(reference_text(f"{stem(doc)}.headings.txt").splitlines(), bold)
+
+    def test_the_pdf_reader_of_these_tests_sees_fonts_and_escapes(self) -> None:
+        # The reader of the PDF bytes is part of the proof, so it is checked on a known stream.
+        pdf = (
+            b"<<\n/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype\n>>"
+            b"<<\n/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype\n>>"
+            b"stream\nBT /F2 18 Tf 21.6 TL ET\nBT 1 0 0 1 72 694 Tm (Title \\(draft\\)) Tj ET\n"
+            b"BT /F1 11 Tf 13.2 TL ET\nBT 1 0 0 1 72 671 Tm (-) Tj T* ET\n"
+            b"BT 1 0 0 1 86 671 Tm (a\\\\b) Tj T* ET\nendstream"
+        )
+        self.assertEqual(
+            drawn_strings(pdf),
+            [("Helvetica-Bold", "Title (draft)"), ("Helvetica", "-"), ("Helvetica", "a\\b")],
+        )
+
+    def test_scans_have_no_reference(self) -> None:
+        # The OCR spike reads image files only, and the PDF spike counts a scanned page as a page
+        # without text; a word error rate of 1 against a reference would add nothing.
+        for doc in DOCS.values():
+            if doc.kind == "pdf_scan":
+                self.assertNotIn(f"{REFERENCES}{stem(doc)}.txt", FILES, doc.path)
 
 
 class EvalSetTests(unittest.TestCase):
