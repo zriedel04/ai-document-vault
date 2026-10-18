@@ -1194,3 +1194,88 @@ def test_a_staged_upload_is_in_the_temporary_folder_and_cleaned_after_a_crash(
     assert store.clean_temp() == 1
     assert not first.exists()
     assert store.scan().blobs == ()
+
+
+# --- a delete running beside other work (a permanent delete runs while the app serves) ----------
+
+
+def test_a_lookup_whose_folder_a_delete_just_removed_finds_nothing(store: BlobStore) -> None:
+    put(store, HELLO)
+    gone = store.root / "sha256" / "00" / "00"  # a folder that is not there (removed in between)
+    with mock.patch.object(store, "_safe_folder", return_value=gone):
+        assert store.find(HELLO_SHA) is None
+
+
+def test_an_open_whose_blob_a_delete_just_removed_is_not_found(
+    store: BlobStore, tmp_path: Path
+) -> None:
+    with (
+        mock.patch.object(store, "find", return_value=tmp_path / "removed.txt"),
+        pytest.raises(BlobNotFoundError),
+    ):
+        store.open(HELLO_SHA)
+
+
+def test_a_copy_whose_folders_a_delete_just_removed_makes_them_again(store: BlobStore) -> None:
+    """A delete of another blob with the same prefix removes the folders it leaves empty; it holds
+    that blob's claim, not this one, so it can do so between this copy's folder check and its
+    publication."""
+    original = BlobStore._publish
+    removed: list[bool] = []
+
+    def publish_after_removal(temp: Path, final: Path) -> bool:
+        if not removed:
+            final.parent.rmdir()
+            final.parent.parent.rmdir()
+            removed.append(True)
+        return original(temp, final)
+
+    with mock.patch.object(BlobStore, "_publish", staticmethod(publish_after_removal)):
+        stored = store.put(io.BytesIO(HELLO), "txt")
+    assert removed == [True]
+    assert stored.created
+    assert stored.path.read_bytes() == HELLO
+    assert is_read_only(stored.path)
+
+
+def test_a_copy_gives_up_when_its_folders_keep_disappearing(store: BlobStore) -> None:
+    def publish_after_removal(_temp: Path, final: Path) -> bool:
+        final.parent.rmdir()
+        final.parent.parent.rmdir()
+        raise FileNotFoundError
+
+    with (
+        mock.patch.object(BlobStore, "_publish", staticmethod(publish_after_removal)),
+        pytest.raises(FileNotFoundError),
+    ):
+        store.put(io.BytesIO(HELLO), "txt")
+    assert store.find(HELLO_SHA) is None
+    assert list((store.root / TEMP_FOLDER).iterdir()) == []
+
+
+def test_a_blob_removed_and_stored_again_is_another_file(store: BlobStore) -> None:
+    first = store.put(io.BytesIO(HELLO), "txt")
+    assert first.identity is not None
+    assert store.identity(HELLO_SHA) == first.identity
+    assert store.delete(HELLO_SHA)
+    assert store.identity(HELLO_SHA) is None
+    again = store.put(io.BytesIO(HELLO), "txt")  # the system may reuse the file number
+    assert again.path == first.path
+    assert again.identity == store.identity(HELLO_SHA)
+    assert again.identity != first.identity
+    # A repeated import returns the same file, so the same identity.
+    assert store.put(io.BytesIO(HELLO), "md").identity == again.identity
+
+
+def test_a_delete_of_one_file_leaves_another_stored_under_the_same_name(store: BlobStore) -> None:
+    first = store.put(io.BytesIO(HELLO), "txt")
+    assert first.identity is not None
+    store.delete(HELLO_SHA)
+    again = store.put(io.BytesIO(HELLO), "txt")
+
+    assert not store.delete(HELLO_SHA, only=first.identity)
+    assert store.find(HELLO_SHA) == again.path
+    assert is_read_only(again.path)
+    assert again.identity is not None
+    assert store.delete(HELLO_SHA, only=again.identity)
+    assert store.find(HELLO_SHA) is None
