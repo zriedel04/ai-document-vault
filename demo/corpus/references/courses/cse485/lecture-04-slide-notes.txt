@@ -1,0 +1,19 @@
+Lecture 4 Slide Notes: Requirements Engineering
+Slide 1: Why requirements matter
+Most project failures trace back to requirements that were unclear, missing or changed late.
+Slide 2: Elicitation techniques
+- Interviews with the people who will use the product
+- Surveys for reaching many users cheaply
+- Observation of how users work today
+Slide 3: Qualities of a good requirement
+A good requirement is unambiguous, testable, necessary and feasible.
+Words such as fast, easy and user-friendly are not testable until a number is attached to them.
+Slide 4: Functional and non-functional requirements
+A functional requirement says what the system does. A non-functional requirement says how well it does it, for example response time or capacity.
+Slide 5: Prioritising with MoSCoW
+- Must have: the product fails without it
+- Should have: important but not vital
+- Could have: nice to have if time allows
+- Won't have: agreed to leave out for now
+Slide 6: Reminder
+The requirements specification is due on October 9. Bring your draft to class on October 6 for peer feedback.

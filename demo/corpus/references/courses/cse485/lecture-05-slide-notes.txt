@@ -1,0 +1,12 @@
+Lecture 5 Slide Notes: Design and Reviews
+Slide 1: From requirements to design
+Every design decision should trace back to at least one requirement.
+Slide 2: Layers
+- Presentation: what the user sees
+- Logic: the rules of the application
+- Data: where information is stored
+Slide 3: Interfaces first
+Agree on the interface between two components before either one is built. Write down inputs, outputs and errors.
+Slide 4: Running a design review
+A design review is a meeting where the team explains its design and a reviewer asks questions. Bring a diagram, a traceability table and a list of open risks.
+The design reviews in this course are on October 30.

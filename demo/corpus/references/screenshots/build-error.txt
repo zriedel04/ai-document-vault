@@ -1,0 +1,9 @@
+Terminal
+alex@laptop:~/studybuddy$ npm run build
+> studybuddy@0.1.0 build
+> webpack --mode production
+ERROR in ./src/app.js
+Module not found: Error: Can't resolve 'express-session'
+Build failed with 1 error
+alex@laptop:~/studybuddy$ npm install express-session
+added 1 package in 2s
