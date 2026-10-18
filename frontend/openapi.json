@@ -391,6 +391,170 @@
         "title": "Reason",
         "type": "string"
       },
+      "SearchHit": {
+        "properties": {
+          "char_end": {
+            "title": "Char End",
+            "type": "integer"
+          },
+          "char_start": {
+            "title": "Char Start",
+            "type": "integer"
+          },
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "integer"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "extension": {
+            "title": "Extension",
+            "type": "string"
+          },
+          "matches": {
+            "title": "Matches",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "section_path": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Section Path",
+            "type": "array"
+          },
+          "snippet": {
+            "items": {
+              "$ref": "#/components/schemas/Segment"
+            },
+            "title": "Snippet",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_id",
+          "name",
+          "extension",
+          "chunk_id",
+          "page",
+          "char_start",
+          "char_end",
+          "section_path",
+          "snippet",
+          "matches"
+        ],
+        "title": "SearchHit",
+        "type": "object"
+      },
+      "SearchRequest": {
+        "properties": {
+          "limit": {
+            "default": 20,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 1000000000.0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "types": {
+            "default": [],
+            "items": {
+              "enum": [
+                "pdf",
+                "docx",
+                "png",
+                "jpg",
+                "txt",
+                "md"
+              ],
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "SearchRequest",
+        "type": "object"
+      },
+      "SearchResults": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "SearchResults",
+        "type": "object"
+      },
+      "Segment": {
+        "properties": {
+          "match": {
+            "title": "Match",
+            "type": "boolean"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "match"
+        ],
+        "title": "Segment",
+        "type": "object"
+      },
       "SortKey": {
         "enum": [
           "added",
@@ -983,6 +1147,41 @@
         "summary": "Upload",
         "tags": [
           "imports"
+        ]
+      }
+    },
+    "/api/search": {
+      "post": {
+        "description": "One page of the documents in use whose current text matches ``query``, best first, each\nwith its best passage: the page it is on, its place in that page's text, its section and a\nsnippet whose matched words are marked. ``total`` counts the matching documents.\n\nThe query goes in the body, never in the address, because it says what the owner is looking\nfor. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with\nno letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose\nmessage does not repeat it. Nothing here is logged.",
+        "operationId": "search_documents_api_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "The query cannot be searched"
+          }
+        },
+        "summary": "Search Documents",
+        "tags": [
+          "search"
         ]
       }
     },
