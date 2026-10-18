@@ -79,6 +79,12 @@ class BlobIntegrityError(BlobError):
     there. The store never deletes or replaces it: that is for the integrity check and the owner."""
 
 
+class BlobMismatchError(BlobIntegrityError):
+    """A copy expected to have one hash and one size (``put(expected_sha256=...,
+    expected_size=...)``) has another, so it was not stored: the file it was read from no longer
+    holds the bytes its name and its record give."""
+
+
 class BlobBusyError(BlobError):
     """Another import of the same bytes did not finish in time (a lock left by a crash is removed
     by ``clean_temp()`` at start-up)."""
@@ -206,6 +212,34 @@ def _writable(path: Path) -> None:
     path.chmod(_real_file_mode(path) | WRITABLE)
 
 
+def publish_new(temp: Path, final: Path) -> bool:
+    """Make the finished copy visible under its final name. False if it already exists.
+
+    A hard link creates the name only if it is free, so when several imports of the same bytes
+    race, exactly one of them wins on any system. (A plain rename replaces silently on Linux
+    and macOS, and two racers would both report a new blob.) The temporary name is removed by
+    the caller. A file system without hard links falls back to a rename, which still never
+    leaves a partial blob.
+    """
+    try:
+        os.link(temp, final)
+    except FileExistsError:
+        return False
+    except OSError:
+        if os.path.lexists(final):  # never rename over an entry, whatever it is
+            return False
+        try:
+            temp.rename(final)
+        except FileExistsError:
+            return False
+        except OSError:
+            # Windows reports a folder in the way as an access error, not as "exists".
+            if os.path.lexists(final):
+                return False
+            raise
+    return True
+
+
 class BlobStore:
     """The ``blobs/`` folder of a vault."""
 
@@ -300,14 +334,29 @@ class BlobStore:
             return self.put(stream, suffix, max_bytes=max_bytes)
 
     def put(
-        self, stream: BinaryIO, extension: str = "", *, max_bytes: int | None = None
+        self,
+        stream: BinaryIO,
+        extension: str = "",
+        *,
+        max_bytes: int | None = None,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
     ) -> StoredBlob:
         """Store the bytes of ``stream``; return where they are and whether they were new.
 
         If the same bytes are already stored (under any extension) nothing is written and the
         existing file is returned. ``max_bytes`` stops a copy that turns out to be too large
-        before it fills the disk.
+        before it fills the disk. With ``expected_sha256`` (a copy of a blob from another store,
+        such as a backup), bytes with any other hash raise ``BlobMismatchError`` and are never
+        published, under either hash. ``expected_size`` is the exact byte count the copy must
+        have, checked the same way: ``max_bytes`` is only a ceiling, so a copy shorter than its
+        record would otherwise pass.
         """
+        if expected_sha256 is not None:
+            check_sha256(expected_sha256)
+        if expected_size is not None and (type(expected_size) is not int or expected_size < 0):
+            msg = "an expected size is a whole number of bytes, at least 0"
+            raise ValueError(msg)
         suffix = normalise_extension(extension)
         temp = self._temp_path()
         digest = hashlib.sha256()
@@ -324,6 +373,12 @@ class BlobStore:
                 out.flush()
                 os.fsync(out.fileno())
             sha256 = digest.hexdigest()
+            if expected_sha256 is not None and sha256 != expected_sha256:
+                msg = "the copied bytes do not have the hash they were expected to have"
+                raise BlobMismatchError(msg)
+            if expected_size is not None and size != expected_size:
+                msg = "the copied bytes are not the size they were expected to be"
+                raise BlobMismatchError(msg)
             with self._claim(sha256):
                 return self._store(temp, sha256, size, suffix)
         finally:
@@ -416,33 +471,7 @@ class BlobStore:
                     raise
                 time.sleep(LOCK_POLL_SECONDS)
 
-    @staticmethod
-    def _publish(temp: Path, final: Path) -> bool:
-        """Make the finished copy visible under its final name. False if it already exists.
-
-        A hard link creates the name only if it is free, so when several imports of the same bytes
-        race, exactly one of them wins on any system. (A plain rename replaces silently on Linux
-        and macOS, and two racers would both report a new blob.) The temporary name is removed by
-        the caller. A file system without hard links falls back to a rename, which still never
-        leaves a partial blob.
-        """
-        try:
-            os.link(temp, final)
-        except FileExistsError:
-            return False
-        except OSError:
-            if os.path.lexists(final):  # never rename over an entry, whatever it is
-                return False
-            try:
-                temp.rename(final)
-            except FileExistsError:
-                return False
-            except OSError:
-                # Windows reports a folder in the way as an access error, not as "exists".
-                if os.path.lexists(final):
-                    return False
-                raise
-        return True
+    _publish = staticmethod(publish_new)
 
     def _temp_folder(self) -> Path:
         """The temporary folder, made if it is missing. Anything but a real folder (a link, a file)
