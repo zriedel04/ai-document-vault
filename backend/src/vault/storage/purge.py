@@ -16,9 +16,12 @@ a guess. So after such a crash the deleted bytes stay in ``blobs/orphans/`` unti
 empties that folder. A step 2 that fails (another program holds the file on Windows) leaves the
 same state, with the same outcome at the next start.
 
-The plan's chunks, vectors and cached AI results do not exist yet. A table in ``vault.db`` with a
-foreign key to a document or a version must be added to ``vault.db.documents.DOCUMENT_ROWS`` (a
-test fails until it is); the vectors in ``index.db`` will need a step of their own.
+Step 1 removes the document's chunks too, and with them their rows in the keyword index
+``chunks_fts`` (a trigger on deleting a chunk, in the same transaction), so a search no longer
+finds the document's text once the delete has committed. The plan's vectors and cached AI results
+do not exist yet. A table in ``vault.db`` with a foreign key to a document or a version must be
+added to ``vault.db.documents.DOCUMENT_ROWS`` (a test fails until it is); the vectors in
+``index.db`` will need a step of their own.
 
 **Races.** Between the commit and step 2 an import of the same bytes can record the blob again,
 and its file must then stay. Step 2 therefore decides again for each blob, inside a transaction
