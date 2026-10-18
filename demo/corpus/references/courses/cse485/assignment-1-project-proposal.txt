@@ -1,0 +1,15 @@
+Assignment 1: Project Proposal
+Due Friday, September 18, 2026 at 11:59 PM. Worth 10 percent of the final grade.
+Task
+Each team submits a proposal of no more than two pages that describes the product it plans to build.
+The proposal must contain a problem statement, a description of the target users, three core features and a list of risks.
+Teams
+Teams have three or four students. Each team must be approved by the instructor before it starts work.
+Submission
+Submit the proposal as a single PDF file through the course portal. Only one team member needs to submit.
+Grading rubric (100 points)
+- Problem statement: 25 points
+- Core features: 30 points
+- Risks and mitigations: 20 points
+- Writing quality: 25 points
+A proposal that exceeds two pages loses 5 points for each extra page.

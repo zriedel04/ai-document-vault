@@ -2,14 +2,15 @@ name: Spike scripts
 
 # The Phase 0 spike scripts (scripts/spikes) are only unit-tested here, with fakes. CI never
 # installs the model, OCR or PDF libraries, never downloads a model and never runs a benchmark:
-# those run on the owner's Windows PC (docs/spikes/README.md).
+# those run on the owner's Windows PC (docs/spikes/README.md). A change to demo/corpus runs them
+# too, because a test reads the public corpus's reference texts the way a public run does.
 
 on:
   push:
     branches: [main]
-    paths: ["scripts/spikes/**", ".github/workflows/spikes.yml"]
+    paths: ["scripts/spikes/**", "demo/corpus/**", ".github/workflows/spikes.yml"]
   pull_request:
-    paths: ["scripts/spikes/**", ".github/workflows/spikes.yml"]
+    paths: ["scripts/spikes/**", "demo/corpus/**", ".github/workflows/spikes.yml"]
   workflow_dispatch:
 
 permissions:
