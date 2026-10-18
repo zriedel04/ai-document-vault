@@ -5,10 +5,12 @@ import type { Api } from "./client";
 import {
   type DocumentDetail,
   type DocumentList,
+  type DocumentPages,
   type DocumentsError,
   type Order,
   PAGE_SIZE,
   type SortKey,
+  TEXT_WINDOW,
   errorFor,
 } from "./documents";
 import { useSessionState } from "./session-context";
@@ -100,6 +102,24 @@ export async function loadDocument(
   } catch {
     return { status: "error", error: "unreachable" };
   }
+}
+
+/**
+ * A window of the extracted text of a document's current version, from `offset` pages in. A 500
+ * is the backend's answer for stored text that breaks the page rules, so it is "unavailable".
+ */
+export function useDocumentPages(id: string, offset: number): Request<DocumentPages> {
+  const api = useApi();
+  return useRequest(JSON.stringify([id, offset]), async () => {
+    const { data, response } = await api.GET("/api/documents/{document_id}/pages", {
+      params: { path: { document_id: id }, query: { offset, limit: TEXT_WINDOW } },
+    });
+    if (data) return { status: "ok", data };
+    return {
+      status: "error",
+      error: response.status === 500 ? "unavailable" : errorFor(response.status),
+    };
+  });
 }
 
 /** One document's details. */

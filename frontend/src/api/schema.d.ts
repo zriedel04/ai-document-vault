@@ -80,6 +80,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}/pages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Document Pages
+         * @description The extracted text of the document's current version (in use or in the trash, like the
+         *     details), as plain text by page, with each page's headings. A window starts after ``offset``
+         *     pages and holds at most ``limit`` pages and about a million characters: a page that would pass
+         *     that is left for the next window, but the first page of a window is always sent whole.
+         *     ``next_offset`` says where the next window starts. A document whose text has not been
+         *     extracted yet answers with ``extracted`` false and no pages, not a 404.
+         */
+        get: operations["read_document_pages_api_documents__document_id__pages_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}/restore": {
         parameters: {
             query?: never;
@@ -297,10 +322,38 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** DocumentPages */
+        DocumentPages: {
+            /** Extracted */
+            extracted: boolean;
+            /** Extractor */
+            extractor: string | null;
+            /** Limit */
+            limit: number;
+            /** Next Offset */
+            next_offset: number | null;
+            /** Offset */
+            offset: number;
+            /** Pages */
+            pages: components["schemas"]["Page"][];
+            /** Total */
+            total: number;
+            /** Version Id */
+            version_id: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** Heading */
+        Heading: {
+            /** Level */
+            level: number;
+            /** Offset */
+            offset: number;
+            /** Text */
+            text: string;
         };
         /** Health */
         Health: {
@@ -352,6 +405,15 @@ export interface components {
          * @enum {string}
          */
         Outcome: "imported" | "duplicate" | "refused";
+        /** Page */
+        Page: {
+            /** Headings */
+            headings: components["schemas"]["Heading"][];
+            /** Number */
+            number: number;
+            /** Text */
+            text: string;
+        };
         /**
          * Reason
          * @enum {string}
@@ -636,6 +698,54 @@ export interface operations {
                 };
             };
             /** @description The stored copy is missing, or two files claim its hash */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    read_document_pages_api_documents__document_id__pages_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentPages"];
+                };
+            };
+            /** @description No such document */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The stored text of this document breaks the page rules */
             500: {
                 headers: {
                     [name: string]: unknown;

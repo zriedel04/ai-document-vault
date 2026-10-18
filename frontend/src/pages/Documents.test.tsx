@@ -87,10 +87,25 @@ function backend(handler: Handler) {
       }
       const answer = handler(request, url);
       if (answer !== undefined) return Promise.resolve(answer);
+      // The details page also asks for the text (TextView.test.tsx covers it): not extracted yet.
+      if (/^\/api\/documents\/[^/]+\/pages$/.test(url.pathname)) {
+        return Promise.resolve(jsonResponse(NOT_EXTRACTED));
+      }
     }
     return healthyBackend(input);
   });
 }
+
+const NOT_EXTRACTED = {
+  version_id: "01J9Z8Y7X6W5V4T3S2R1Q0P9N9",
+  extracted: false,
+  extractor: null,
+  total: 0,
+  offset: 0,
+  limit: 20,
+  pages: [],
+  next_offset: null,
+};
 
 function listOf(items: DocumentItem[], total = items.length): Handler {
   return (_request, url) =>
