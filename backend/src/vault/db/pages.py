@@ -77,11 +77,11 @@ class StoredPages:
     pages: tuple[PageText, ...]
 
 
-def _is_int(value: object) -> bool:
+def is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _storable(value: str) -> bool:
+def is_storable(value: str) -> bool:
     """Text SQLite stores and measures as Python does: no NUL, no lone surrogate."""
     if "\x00" in value:
         return False
@@ -130,10 +130,10 @@ def check_pages(pages_in: Sequence[PageText]) -> tuple[PageText, ...]:
 def _check_run(checked: tuple[PageText, ...], first: int) -> tuple[PageText, ...]:
     """Pages numbered ``first``, ``first + 1`` ... each with storable text and valid headings."""
     for position, page in enumerate(checked, start=first):
-        if not isinstance(page, PageText) or not _is_int(page.number) or page.number != position:
+        if not isinstance(page, PageText) or not is_int(page.number) or page.number != position:
             msg = f"Page {position} is missing or out of order: pages are numbered 1, 2, 3 ..."
             raise ValueError(msg)
-        if not isinstance(page.text, str) or not _storable(page.text):
+        if not isinstance(page.text, str) or not is_storable(page.text):
             msg = f"The text of page {position} holds a NUL or a character that is not Unicode."
             raise ValueError(msg)
         _check_headings(page)
@@ -150,13 +150,13 @@ def _check_headings(page: PageText) -> None:
         if not isinstance(heading, PageHeading):
             msg = f"{where} is not a heading."
             raise ValueError(msg)
-        if not _is_int(heading.level) or heading.level not in HEADING_LEVELS:
+        if not is_int(heading.level) or heading.level not in HEADING_LEVELS:
             msg = f"{where} has a level outside 1 to 6."
             raise ValueError(msg)
-        if not isinstance(heading.title, str) or not _storable(heading.title):
+        if not isinstance(heading.title, str) or not is_storable(heading.title):
             msg = f"{where} has a title that is not storable text."
             raise ValueError(msg)
-        if not (_is_int(heading.start) and _is_int(heading.end)):
+        if not (is_int(heading.start) and is_int(heading.end)):
             msg = f"{where} has offsets that are not whole numbers."
             raise ValueError(msg)
         if not previous_end <= heading.start < heading.end <= len(page.text):
@@ -175,7 +175,8 @@ def replace_pages(
     """Store ``pages_in`` as the only pages of the version, in one transaction.
 
     Raises ``ValueError`` for pages, an extractor or an encoding that break the rules, before
-    anything is written, and ``VersionNotFoundError`` for an id that names no version.
+    anything is written, and ``VersionNotFoundError`` for an id that names no version. The
+    version's chunks go with its old pages (a foreign-key cascade): they point at the old text.
     """
     checked = check_pages(pages_in)
     check_extractor(extractor)
