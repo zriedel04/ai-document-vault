@@ -9,6 +9,10 @@
     .\vault.ps1 stop      Stop the server that "run" started.
     .\vault.ps1 dev       Start the server in the background and the Vite dev server in this
                           window; the server stops when the dev server does.
+    .\vault.ps1 check     Check the vault without changing it: SQLite's integrity and foreign
+                          key checks, every blob re-hashed, and the database compared with the
+                          blob store. Prints counts and content hashes, never file names. Exits
+                          with 1 if it finds a problem. It can run while the server runs.
     .\vault.ps1 backup -To <folder>
                           Snapshot the database and copy the original files that are not yet
                           in the backup folder. Safe while the app runs.
@@ -30,7 +34,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'run', 'stop', 'dev', 'backup')]
+    [ValidateSet('install', 'run', 'stop', 'dev', 'check', 'backup')]
     [string]$Command,
 
     [switch]$NoBrowser,
@@ -608,6 +612,36 @@ function Invoke-Dev {
     }
 }
 
+function Get-CheckVerdict {
+    <# What the exit code of python -m vault.check means: $null for a clean vault, otherwise the
+       message the launcher stops with. The report itself is already on the console. #>
+    param([Parameter(Mandatory)][int]$ExitCode)
+    switch ($ExitCode) {
+        0 { return $null }
+        1 { return 'the integrity check found problems (see the report above); nothing was changed' }
+        default { return "the integrity check could not run (exit code $ExitCode, see the message above)" }
+    }
+}
+
+function Invoke-Check {
+    <# Run the backend's read-only integrity check (backend/src/vault/check.py) in the backend
+       folder, so it reads the same settings as the server. It takes no lock and touches no
+       record: it starts nothing and only reads the vault, so it can run beside the server.
+       -Python replaces the backend's interpreter, for the tests. #>
+    param([object]$Python)
+    if ($null -eq $Python) { $Python = Get-BackendPython }
+    Push-Location -LiteralPath $script:BackendDir
+    try {
+        & $Python -m vault.check
+        $code = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+    }
+    $verdict = Get-CheckVerdict $code
+    if ($null -ne $verdict) { throw $verdict }
+}
+
 function Invoke-Backup {
     <# Back up the vault into a folder (docs/launcher.md). The backend does the work and prints
        only counts and the snapshot's name. The folder goes to it in an environment variable,
@@ -649,7 +683,7 @@ function Invoke-Backup {
 
 function Main {
     if (-not $Command) {
-        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|backup> [-NoBrowser] [-To <folder>]   (Get-Help .\vault.ps1 for details)'
+        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|check|backup> [-NoBrowser] [-To <folder>]   (Get-Help .\vault.ps1 for details)'
         exit 2
     }
     try {
@@ -658,6 +692,7 @@ function Main {
             'run' { Invoke-Run }
             'stop' { Invoke-Stop }
             'dev' { Invoke-Dev }
+            'check' { Invoke-Check }
             'backup' { Invoke-Backup $To }
         }
     }

@@ -327,6 +327,42 @@ jobs:
             $idle = & $edition -NoProfile -File .\vault.ps1 stop | Out-String
             if ($idle -notmatch 'not running') { throw 'stop did not say the server was not running' }
           }
+      - name: check passes the vault, beside the running server too, and fails a damaged one
+        shell: pwsh
+        run: |
+          $vault = Join-Path $env:RUNNER_TEMP ('vault-Jos' + [char]0x00E9)
+          foreach ($edition in 'powershell', 'pwsh') {
+            $text = & $edition -NoProfile -File .\vault.ps1 check 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "check failed on a sound vault in ${edition}: $text" }
+            if ($text -notmatch 'No problems found') { throw "unexpected report in ${edition}: $text" }
+          }
+          # Reads under WAL do not block the server, nor the server them.
+          & powershell -NoProfile -File .\vault.ps1 run -NoBrowser
+          if ($LASTEXITCODE -ne 0) { throw 'run failed' }
+          try {
+            $text = & pwsh -NoProfile -File .\vault.ps1 check 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "check failed beside the running server: $text" }
+          }
+          finally {
+            & powershell -NoProfile -File .\vault.ps1 stop
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'stop failed' }
+          $stray = Join-Path $vault 'blobs\sha256\Patient-Notes.txt'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stray) | Out-Null
+          Set-Content -LiteralPath $stray -Value 'synthetic' -Encoding ASCII
+          try {
+            foreach ($edition in 'powershell', 'pwsh') {
+              $text = & $edition -NoProfile -File .\vault.ps1 check 2>&1 | Out-String
+              if ($LASTEXITCODE -eq 0) { throw "check passed a damaged vault in $edition" }
+              if ($text -notmatch 'stray_other') { throw "the stray entry was not reported in ${edition}: $text" }
+              if ($text -match 'Patient') { throw "the report named a file in ${edition}: $text" }
+            }
+            if (-not (Test-Path -LiteralPath $stray)) { throw 'check removed the stray entry' }
+          }
+          finally {
+            Remove-Item -LiteralPath $stray -Force
+          }
+          exit 0
       - name: Backup while the server runs, in both PowerShell editions
         shell: pwsh
         run: |

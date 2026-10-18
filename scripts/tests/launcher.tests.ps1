@@ -417,6 +417,47 @@ finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- check: the backend's exit code becomes the launcher's ---------------------------------------
+Assert-That 'a clean check is no error' ($null -eq (Get-CheckVerdict 0))
+$verdict = Get-CheckVerdict 1
+Assert-That 'a check that found problems stops with a message' (($null -ne $verdict) -and ($verdict -match 'found problems'))
+$verdict = Get-CheckVerdict 2
+Assert-That 'a check that could not run says so' (($null -ne $verdict) -and ($verdict -match 'could not run'))
+$commandParameter = (Get-Command $launcher).Parameters['Command']
+$allowed = @($commandParameter.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })[0].ValidValues
+Assert-That 'check is one of the commands' ($allowed -contains 'check')
+
+# A stand-in for the backend's Python: it records its arguments and sets the exit code asked for.
+# That the real interpreter's exit code reaches the launcher is the CI job's end-to-end step.
+# The tests above leave BackendDir pointing at a folder of the removed work folder, so check
+# gets a backend folder of its own.
+$checkDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vault-check-tests-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $checkDir
+$script:BackendDir = $checkDir
+$script:checkArguments = $null
+$script:checkFolder = $null
+$script:checkCode = 0
+$standIn = {
+    $script:checkArguments = $args -join ' '
+    $script:checkFolder = (Get-Location).Path
+    $global:LASTEXITCODE = $script:checkCode
+}
+$startedIn = (Get-Location).Path
+$message = Get-ThrownMessage { Invoke-Check -Python $standIn }
+if ($null -ne $message) { Write-Host "     (check said: $message)" }
+Assert-That 'check passes when the backend finds nothing' ($null -eq $message)
+Assert-That 'check runs the backend module vault.check with no other argument' ($script:checkArguments -ceq '-m vault.check')
+Assert-That 'check runs in the backend folder' ($script:checkFolder -eq $checkDir)
+Assert-That 'check returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+$script:checkCode = 1
+$message = Get-ThrownMessage { Invoke-Check -Python $standIn }
+Assert-That 'check fails when the backend finds a problem' (($null -ne $message) -and ($message -match 'found problems'))
+$script:checkCode = 2
+$message = Get-ThrownMessage { Invoke-Check -Python $standIn }
+Assert-That 'check fails when the backend cannot run' (($null -ne $message) -and ($message -match 'could not run'))
+Assert-That 'and still returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+Remove-Item -LiteralPath $checkDir -Recurse -Force -ErrorAction SilentlyContinue
+
 # --- backup: the folder reaches the backend in the environment, never on its command line ------
 $message = Get-ThrownMessage { Invoke-Backup '' }
 Assert-That 'backup without a folder says how to name one' (($null -ne $message) -and ($message -match '-To'))
