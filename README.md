@@ -1,6 +1,6 @@
 # AI Document Vault
 
-A local-first personal document library that acts as external memory for AI. When it is finished, you will import your documents, search them by keyword and meaning, and ask questions that are answered with citations pointing back to the exact page and passage. It runs on a Windows desktop as a local web app. The design keeps documents on the PC: a cloud model will receive only the passages retrieved for a question, never the library.
+A local-first personal document library that acts as external memory for AI. When it is finished, you will import your documents, search them by keyword and meaning, and ask questions that are answered with citations pointing back to the exact page and passage. It runs on a Windows desktop as a local web app. The design keeps the vault on the PC. When you ask a question, the cloud model you picked receives only the question, the recent turns of that conversation and the passages retrieved to answer it. There is one planned exception, off unless you enable it: the opening section of a document may be sent once to get metadata suggestions.
 
 This README explains what exists today, how it is built and why. A stated goal of the project is that every engineering decision is written down with its reasoning, so most sections link to the decision record behind them.
 
@@ -43,7 +43,7 @@ Browser (React)  --HTTP/JSON-->  vault-server (FastAPI, 127.0.0.1:8765)
 
 | Decision | Why, in one line | Record |
 | --- | --- | --- |
-| Local-first | Private documents stay on the PC; a cloud model is used only for answers, and only on retrieved passages | [ADR 0001](docs/decisions/0001-local-first-design.md), [ADR 0010](docs/decisions/0010-cloud-models-receive-only-retrieved-context.md) |
+| Local-first | Extraction, OCR, search and embeddings will run locally. A cloud model will be used to answer questions, and will receive only the question, recent turns and the retrieved passages. Later, if you enable it, it may also receive a document's opening section once to suggest metadata. Every call will go through one egress gate, which refuses or drops passages from documents and labels marked local-only | [ADR 0001](docs/decisions/0001-local-first-design.md), [ADR 0010](docs/decisions/0010-cloud-models-receive-only-retrieved-context.md) |
 | Local web app, React + FastAPI, bound to `127.0.0.1` | One process serves the API and the built UI to the browser; the server refuses to listen on anything but a loopback address | [ADR 0002](docs/decisions/0002-local-web-app.md) |
 | Native Windows, no Docker or WSL2 | Docker and WSL2 add a virtual machine, slow file access and unreliable folder-change events, for a single-machine app that needs none of that | [ADR 0003](docs/decisions/0003-native-windows.md) |
 | Two SQLite files instead of PostgreSQL | `vault.db` (WAL mode) holds what cannot be rebuilt; `index.db` holds vectors that can. FTS5 for keywords and sqlite-vec for vectors are planned for Phases 2 and 4 | [ADR 0004](docs/decisions/0004-sqlite-instead-of-postgresql.md) |
@@ -61,7 +61,7 @@ The embedding model, the OCR engine and the PDF extraction approach are still op
 The app manages personal documents, so privacy is designed in rather than added later.
 
 - **Logging is deny by default.** A value reaches the log only if the code marks it as safe (an id the app generated, a count it computed); every other string and number is written as `[redacted]`, including one parsed from a document. Third-party log messages are omitted apart from the server's start-up and error lines, and exceptions are logged by type, never by message ([`backend/src/vault/core/logging.py`](backend/src/vault/core/logging.py)).
-- **The API token never travels in a cookie or a URL the server sees** ([ADR 0016](docs/decisions/0016-local-api-token-delivery.md)). The launcher opens the browser with the token in the address fragment, which is never sent to a server; the page moves it into `sessionStorage`, removes it from the address bar and sends it only as a bearer header to its own origin. A cookie was tried first and dropped, because cookies are scoped by host and not by port, so another local program on `localhost` would have received it.
+- **The API token never travels in a cookie or a URL the server sees** ([ADR 0016](docs/decisions/0016-local-api-token-delivery.md)). The launcher opens the browser with the token in the address fragment, which is never sent to a server; the page moves it into `sessionStorage`, removes it from the address bar and sends it only as a bearer header to its own origin. A cookie was tried first and dropped, because cookies are scoped by host and not by port, so another local program on `localhost` would have received it. The ADR also records the exposure that remains: while the browser starts, the token is on its command line.
 - **The vault folder is private and outside the repository.** The server refuses a vault folder inside a Git working tree, and on Windows it sets and then verifies an access list that admits only the current user.
 - **A repository safety check** ([`scripts/check_repo_safety.py`](scripts/check_repo_safety.py)) blocks databases, documents, images, archives, keys, model files, local configuration and oversized files by name, and databases, documents, images and archives also by their content signature, whatever the file is called (the synthetic fixture folders may hold documents, images and archives). It checks staged files, every tracked file and the whole Git history, in pre-commit and in CI, beside gitleaks.
 - **Test data is synthetic only.** Tests, CI and the demo use the generated corpus in [`demo/corpus/`](demo/generate/README.md) and the public questions in [`eval/public/`](eval/README.md). Private questions stay in the vault folder.
@@ -92,7 +92,7 @@ The extension loaded, and its exact search gave the same ranked ten neighbours a
 
 ## Quick start
 
-On Windows, with `uv` and Node.js installed: copy `config.example.toml` to `backend\config.toml`, set `vault.path` to a folder outside this repository, then run `.\vault.ps1 install` and `.\vault.ps1 run`. The launcher builds the app, starts the server and opens the browser; `.\vault.ps1 stop` stops it and `.\vault.ps1 dev` runs the development servers. Details: [docs/launcher.md](docs/launcher.md).
+You need Windows, [uv](https://docs.astral.sh/uv/) and Node.js 22.13 or newer on an even-numbered line (22.13+, 24 or 26+, the range `frontend/package.json` requires). The backend runs on Python 3.12 only (`backend/pyproject.toml`); uv installs it if it is missing. Copy `config.example.toml` to `backend\config.toml`, set `vault.path` to a folder outside this repository, then run `.\vault.ps1 install` and `.\vault.ps1 run`. The launcher builds the app, starts the server and opens the browser; `.\vault.ps1 stop` stops it and `.\vault.ps1 dev` runs the development servers. Details: [docs/launcher.md](docs/launcher.md).
 
 ## Repository layout
 
