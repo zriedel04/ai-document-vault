@@ -3,7 +3,9 @@ one page of the document list, sorted on the server (section 16: no screen loads
 page of documents).
 
 A document's name is the file name of its first import source (the earliest, ties broken by id),
-because a document has no name of its own until the owner renames it in a later phase. Its size
+because a document has no name of its own until the owner renames it in a later phase. The keyword
+index repeats this rule in SQL for each chunk's title (migration ``0005``, kept in step by triggers
+on ``import_sources``), so a change to it changes both. Its size
 and type are those of its current version's blob. The list holds the documents in use, or with
 ``in_trash`` the documents in the trash, never both.
 
@@ -37,6 +39,7 @@ from vault.db.schema import (
     JOB_STAGES,
     TRASHED,
     blobs,
+    chunks,
     document_versions,
     documents,
     import_sources,
@@ -420,17 +423,26 @@ class DeletedRows:
 
 
 # Every table whose rows belong to one document, in the order they are removed (children first).
-# ``pages`` hangs off a version, the others off the document. A test compares this with every
-# foreign key in the schema that points at ``documents`` or ``document_versions``, so a table
-# added later cannot be left out.
-DOCUMENT_ROWS: Final = ("pages", "jobs", "import_sources", "document_versions", "documents")
+# ``chunks`` hang off a version and its pages, ``pages`` off a version, the others off the
+# document. A test compares this with every foreign key in the schema that points at
+# ``documents`` or ``document_versions``, so a table added later cannot be left out. The keyword
+# index ``chunks_fts`` has no foreign key (a virtual table cannot): the trigger on deleting a chunk
+# removes its index row in the same transaction (migration ``0005``).
+DOCUMENT_ROWS: Final = (
+    "chunks",
+    "pages",
+    "jobs",
+    "import_sources",
+    "document_versions",
+    "documents",
+)
 
 
 def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | DeleteRefusal:
     """Remove a document in the trash and every row that belongs to it, in one transaction: its
-    pages, jobs, import sources and versions, then the ``blobs`` row of each of its blobs that no
-    remaining version uses (another document can hold the same bytes only through its own version,
-    so a shared blob keeps its row).
+    chunks (and with them their keyword index rows), pages, jobs, import sources and versions,
+    then the ``blobs`` row of each of its blobs that no remaining version uses (another document
+    can hold the same bytes only through its own version, so a shared blob keeps its row).
 
     The transaction holds the write lock from its first statement (``write_transaction``), so a
     restore, a move to the trash or an import that brings the document back comes wholly before it
@@ -456,6 +468,8 @@ def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | Delete
                 )
             ).scalars()
         )
+        # Each deleted chunk's trigger deletes its row in chunks_fts, in this transaction.
+        connection.execute(delete(chunks).where(chunks.c.document_id == document_id))
         connection.execute(delete(pages).where(pages.c.version_id.in_(versions)))
         connection.execute(delete(jobs).where(jobs.c.document_id == document_id))
         connection.execute(
