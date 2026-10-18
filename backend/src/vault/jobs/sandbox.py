@@ -40,10 +40,16 @@ the job's handle and ends every process in it, so a crash of the server leaves n
 child starts suspended and runs only once it is in the job: in a virtual environment
 ``sys.executable`` is a launcher that starts the real interpreter as its own child, and a process
 started before its parent joined the job would stay outside it. Processes started inside the job
-are in it too, so the cap and the kill cover the real interpreter and anything it starts. On Linux
-the child caps its own address space with
-``RLIMIT_AS`` before it reads the input, and asks the kernel to kill it when the parent dies
-(``PR_SET_PDEATHSIG``). Address space is larger than committed memory (libraries reserve more
+are in it too, so the cap and the kill cover the real interpreter and anything it starts. Before
+the first child, the server puts itself in a kill-on-close job of its own (:func:`server_job`), so
+every child is in that job from the moment it is created: a server that dies while a child is
+still suspended and outside its own job takes the child with it. ``subprocess`` cannot create a
+process directly in a job (``PROC_THREAD_ATTRIBUTE_JOB_LIST``), which would be the other way to
+close that window. On Linux the child caps its own address space with ``RLIMIT_AS`` before it
+reads the input, and asks the kernel to kill it when the parent dies
+(``PR_SET_PDEATHSIG``), then checks that its parent is still the server, so a server that died
+before that call is caught too; until the child has its input it waits on a pipe that the
+server's death closes. Address space is larger than committed memory (libraries reserve more
 than they use), so the same number is stricter on Linux; the Linux path is for development and
 CI, the product runs on Windows. An allocation that fails raises ``MemoryError`` in the child on
 both systems, and the child reports it as :class:`SandboxMemoryLimitError` at every step that grows
@@ -520,6 +526,8 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
     _kernel32.TerminateJobObject.restype = wintypes.BOOL
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
 
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
@@ -583,31 +591,61 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
             _kernel32.CloseHandle(snapshot)
         return resumed > 0
 
+    def _new_job(flags: int, memory_bytes: int = 0) -> int:
+        """A new Job Object with these limit flags, or :class:`SandboxUnavailableError`."""
+        handle = _kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise SandboxUnavailableError
+        info = _ExtendedLimits()
+        info.BasicLimitInformation.LimitFlags = flags
+        info.ProcessMemoryLimit = memory_bytes
+        info.JobMemoryLimit = memory_bytes
+        if not _kernel32.SetInformationJobObject(
+            handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            _kernel32.CloseHandle(handle)
+            raise SandboxUnavailableError
+        return int(handle)
+
+    _server_job_lock = threading.Lock()
+    _server_job_handle: int | None = None
+
+    def server_job() -> int:
+        """A kill-on-close job that holds this process, made on the first run.
+
+        A process started by a member of a job is in that job from the moment it is created, so
+        each child is contained before ``Popen`` even returns: if the server dies in the window
+        before the child is in its own job (while it is still suspended), Windows closes this
+        handle, which only the server holds, and ends the child. ``subprocess`` cannot create a
+        process directly in a job (``PROC_THREAD_ATTRIBUTE_JOB_LIST``: its attribute list takes
+        only a handle list), so the server's own membership gives the same atomicity. The
+        per-run job then nests inside this one (Windows 8 and later).
+        """
+        global _server_job_handle
+        with _server_job_lock:
+            if _server_job_handle is None:
+                job = _new_job(_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+                if not _kernel32.AssignProcessToJobObject(job, _kernel32.GetCurrentProcess()):
+                    _kernel32.CloseHandle(job)
+                    raise SandboxUnavailableError
+                _server_job_handle = job
+            return _server_job_handle
+
     class _Guard:
         """A Job Object with a memory limit and kill-on-close, holding the child."""
 
         def __init__(self, memory_bytes: int) -> None:
-            handle = _kernel32.CreateJobObjectW(None, None)
-            if not handle:
-                raise SandboxUnavailableError
-            info = _ExtendedLimits()
-            info.BasicLimitInformation.LimitFlags = (
+            server_job()  # before the child exists, so it is born inside the server's job
+            self._job: int | None = _new_job(
                 _JOB_OBJECT_LIMIT_PROCESS_MEMORY
                 | _JOB_OBJECT_LIMIT_JOB_MEMORY
                 | _JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
-                | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                memory_bytes,
             )
-            info.ProcessMemoryLimit = memory_bytes
-            info.JobMemoryLimit = memory_bytes
-            if not _kernel32.SetInformationJobObject(
-                handle,
-                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                ctypes.byref(info),
-                ctypes.sizeof(info),
-            ):
-                _kernel32.CloseHandle(handle)
-                raise SandboxUnavailableError
-            self._job: int | None = handle
 
         def attach(self, process: subprocess.Popen[bytes]) -> bool:
             # The Popen object holds the process handle until it is reaped, so the id cannot

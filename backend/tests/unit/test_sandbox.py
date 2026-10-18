@@ -228,29 +228,91 @@ def test_a_timeout_also_ends_what_the_child_started(tmp_path: Path) -> None:
     assert gone(wait_for_file(pid_file))
 
 
-def test_a_child_that_dies_with_the_server_leaves_no_orphan(tmp_path: Path) -> None:
-    """Linux: PR_SET_PDEATHSIG. Windows: the job's kill-on-close."""
-    pid_file = tmp_path / "child.pid"
-    script = textwrap.dedent(
-        f"""
-        from vault.jobs import sandbox
-        entries = {{"s": sandbox.EntryPoint("{PROBES}:sleep_with_pid_file")}}
-        limits = sandbox.SandboxLimits(timeout_seconds=60, memory_bytes=256 * sandbox.MIB)
-        sandbox.run("s", {str(pid_file).encode()!r}, limits, entry_points=entries)
-        """
-    )
+def kill_server_after(script: str, pid_file: Path) -> int:
+    """Run ``script`` as a stand-in server, wait for the child id it writes, then kill it."""
     server = subprocess.Popen(  # noqa: S603 - a fixed command
-        [sys.executable, "-I", "-c", script],
+        [sys.executable, "-I", "-c", textwrap.dedent(script)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     try:
-        child = wait_for_file(pid_file)
+        return wait_for_file(pid_file)
     finally:
         server.kill()
         server.wait(10)
-    assert gone(child)
+
+
+def test_a_child_that_dies_with_the_server_leaves_no_orphan(tmp_path: Path) -> None:
+    """Linux: PR_SET_PDEATHSIG. Windows: the job's kill-on-close."""
+    pid_file = tmp_path / "child.pid"
+    script = f"""
+        from vault.jobs import sandbox
+        entries = {{"s": sandbox.EntryPoint("{PROBES}:sleep_with_pid_file")}}
+        limits = sandbox.SandboxLimits(timeout_seconds=60, memory_bytes=256 * sandbox.MIB)
+        sandbox.run("s", {str(pid_file).encode()!r}, limits, entry_points=entries)
+        """
+    assert gone(kill_server_after(script, pid_file))
+
+
+def test_a_server_killed_before_the_child_is_limited_leaves_no_orphan(tmp_path: Path) -> None:
+    """The window between creating the child and putting it in its own job (Windows: the child
+    is still suspended; Linux: it has not been sent its input). The stand-in server stops in
+    that window, writes the child's id and is killed there."""
+    pid_file = tmp_path / "child.pid"
+    script = f"""
+        import pathlib, time
+        from vault.jobs import sandbox
+
+        def stop_here(self, process):
+            pathlib.Path({str(pid_file)!r}).write_text(str(process.pid), encoding="ascii")
+            time.sleep(60)
+            return False
+
+        sandbox._Guard.attach = stop_here
+        entries = {{"s": sandbox.EntryPoint("{PROBES}:echo")}}
+        limits = sandbox.SandboxLimits(timeout_seconds=60, memory_bytes=256 * sandbox.MIB)
+        sandbox.run("s", b"", limits, entry_points=entries)
+        """
+    assert gone(kill_server_after(script, pid_file))
+
+
+if sys.platform == "win32":  # pragma: no cover - Job Objects: the Windows CI job only
+
+    def test_the_child_is_in_the_server_job_from_creation(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.IsProcessInJob.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        kernel32.IsProcessInJob.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        process_query_limited_information = 0x1000
+        seen: list[bool] = []
+        real_attach = sandbox._Guard.attach
+
+        def checking_attach(self: object, process: subprocess.Popen[bytes]) -> bool:
+            handle = kernel32.OpenProcess(process_query_limited_information, False, process.pid)
+            assert handle
+            try:
+                inside = wintypes.BOOL()
+                assert kernel32.IsProcessInJob(handle, sandbox.server_job(), ctypes.byref(inside))
+                seen.append(bool(inside.value))
+            finally:
+                kernel32.CloseHandle(handle)
+            return real_attach(self, process)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sandbox._Guard, "attach", checking_attach)
+        assert run("echo", b"ok") == b"ok"
+        assert seen == [True]
 
 
 # --- memory ---------------------------------------------------------------------------------
