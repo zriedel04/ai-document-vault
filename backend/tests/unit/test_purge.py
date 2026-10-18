@@ -16,11 +16,12 @@ import pytest
 import sqlalchemy
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select, update
+from sqlalchemy import Engine, func, select, text, update
 
 from vault.core.config import Settings
 from vault.core.logging import SafeFormatter
 from vault.db import ids
+from vault.db.chunks import replace_chunks
 from vault.db.documents import (
     DOCUMENT_ROWS,
     DeletedRows,
@@ -33,6 +34,7 @@ from vault.db.engine import create_vault_engine, write_transaction
 from vault.db.pages import PageText, replace_pages
 from vault.db.schema import blobs, document_versions, documents, import_sources, metadata
 from vault.ingest import importer as importer_module
+from vault.ingest.chunking.structural_v1 import CHUNKER_VERSION, chunk_pages
 from vault.ingest.importer import Importer, ImportRequest, Outcome
 from vault.main import create_app
 from vault.storage.blobs import ORPHAN_FOLDER, BlobNotFoundError, BlobStore
@@ -44,6 +46,8 @@ URL = "/api/documents"
 NOW = datetime(2026, 10, 15, 12, 0, 0)
 BODY = b"Rent is due on the first of each month.\n"
 SHA = hashlib.sha256(BODY).hexdigest()
+# A synthetic word that only the chunks of the document made by ``trashed_with_everything`` hold.
+MARKER = "zanzibarquokka"
 
 
 class Vault:
@@ -79,7 +83,7 @@ class Vault:
         with self.engine.connect() as connection:
             if table == "documents":
                 where = named.c.id == document_id
-            elif table == "pages":
+            elif table == "pages":  # chunks have their own document_id
                 where = named.c.version_id.in_(
                     select(document_versions.c.id).where(
                         document_versions.c.document_id == document_id
@@ -90,6 +94,29 @@ class Vault:
             return connection.execute(
                 select(func.count()).select_from(named).where(where)
             ).scalar_one()
+
+    def add_chunks(self, document_id: str, page_text: str) -> None:
+        """Pages and chunks for the document's current version, as the chunk stage will write."""
+        version_id = self.version_of(document_id)
+        pages_in = [PageText(1, page_text)]
+        replace_pages(self.engine, version_id, pages_in, "text-1", None)
+        replace_chunks(self.engine, version_id, chunk_pages(pages_in), CHUNKER_VERSION)
+
+    def search(self, query: str) -> list[str]:
+        """The documents whose chunks match an FTS5 query, one entry per matching chunk."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT chunks.document_id FROM chunks_fts"
+                    " JOIN chunks ON chunks.id = chunks_fts.rowid WHERE chunks_fts MATCH :query"
+                ),
+                {"query": query},
+            )
+            return [row[0] for row in rows]
+
+    def index_rows(self) -> int:
+        with self.engine.connect() as connection:
+            return connection.execute(text("SELECT count(*) FROM chunks_fts")).scalar_one()
 
     def blob_row(self, sha256: str = SHA) -> bool:
         with self.engine.connect() as connection:
@@ -138,11 +165,9 @@ def vault(app: FastAPI, tmp_path: Path) -> Vault:
 
 
 def trashed_with_everything(vault: Vault) -> str:
-    """A trashed document with a version, an import source, a job and pages."""
+    """A trashed document with a version, an import source, a job, pages and chunks."""
     document_id = vault.add()
-    replace_pages(
-        vault.engine, vault.version_of(document_id), [PageText(1, "page")], "text-1", None
-    )
+    vault.add_chunks(document_id, f"Rent and the {MARKER} clause.\n\nPaid monthly.")
     vault.trash(document_id)
     for table in DOCUMENT_ROWS:
         assert vault.count(table, document_id) >= 1, table
@@ -170,6 +195,27 @@ def test_a_trashed_document_is_deleted_with_every_row_and_its_file(
     assert not path.exists()
     assert client.get(f"{URL}/{document_id}").status_code == 404
     assert client.get(URL, params={"trash": True}).json()["total"] == 0
+
+
+def test_a_deleted_documents_text_is_no_longer_found(client: TestClient, vault: Vault) -> None:
+    """Its chunks and their keyword index rows go in the delete's transaction; another
+    document's chunks and index rows stay."""
+    other_body = b"Another synthetic note.\n"
+    kept = vault.add(other_body, "note.txt")
+    vault.add_chunks(kept, "The other note mentions rent too.")
+    document_id = trashed_with_everything(vault)
+    assert vault.search(MARKER) == [document_id]
+    assert sorted(set(vault.search("rent"))) == sorted({document_id, kept})
+    kept_rows = vault.count("chunks", kept)
+
+    assert client.delete(f"{URL}/{document_id}").status_code == 204
+
+    assert vault.count("chunks", document_id) == 0
+    assert vault.search(MARKER) == []
+    assert vault.search("rent") == [kept]
+    assert vault.count("chunks", kept) == kept_rows == vault.index_rows()
+    with vault.engine.begin() as connection:
+        connection.execute(text("INSERT INTO chunks_fts (chunks_fts) VALUES ('integrity-check')"))
 
 
 def test_deleting_again_is_a_404(client: TestClient, vault: Vault) -> None:
@@ -275,6 +321,7 @@ def test_every_table_that_points_at_a_document_or_version_is_cleared() -> None:
     }
     assert set(DOCUMENT_ROWS) == pointing | {"documents"}
     # Children before the tables they point at.
+    assert DOCUMENT_ROWS.index("chunks") < DOCUMENT_ROWS.index("pages")
     assert DOCUMENT_ROWS.index("pages") < DOCUMENT_ROWS.index("document_versions")
     assert DOCUMENT_ROWS[-2:] == ("document_versions", "documents")
 
@@ -321,9 +368,10 @@ def test_the_rows_go_in_one_transaction(vault: Vault, monkeypatch: pytest.Monkey
     monkeypatch.setattr(documents_module, "delete", failing_delete)
     with pytest.raises(RuntimeError):
         delete_permanently(vault.engine, document_id)
-    assert calls["n"] >= 3  # pages, jobs and import sources were deleted before the failure
+    assert calls["n"] >= 4  # chunks, pages, jobs and import sources went before the failure
     for table in DOCUMENT_ROWS:
         assert vault.count(table, document_id) >= 1, table
+    assert vault.search(MARKER) == [document_id]  # the index rows came back with the chunks
     assert vault.blob_row()
 
 
