@@ -11,11 +11,11 @@ parent's process id and the input's length, never document content. The child th
    ``RLIMIT_AS`` (on Windows the parent puts it in a Job Object instead, before sending input);
 3. reads the input bytes from standard input into one ``bytes`` object of the announced length
    (one allocation, no second copy: the input may be close to the memory cap);
-4. calls the target and writes one answer: a status byte followed by the pickled result, or by
-   the exception's class name, and nothing else.
+4. calls the target and writes one answer: a status byte followed by the result as ASCII JSON
+   (:func:`encode`), or by the exception's class name, and nothing else.
 
 Running out of memory at any step that grows with the input or the result (reading the input,
-importing and running the target, pickling the result, writing the answer) is reported as
+importing and running the target, encoding the result, writing the answer) is reported as
 ``MEMORY``, never as a crash or a refusal. Only if even that byte cannot be written does the child
 end without an answer (:class:`~vault.jobs.sandbox.SandboxCrashError`).
 
@@ -26,20 +26,22 @@ child starts fast and holds little before its target runs.
 
 from __future__ import annotations
 
+import base64
+import dataclasses
 import importlib
 import inspect
 import io
+import json
 import os
-import pickle
 import re
 import sys
 from typing import Final
 
 # The answer's first byte.
-OK: Final = b"R"  # the pickled result follows
+OK: Final = b"R"  # the result follows, as ASCII JSON
 ERROR: Final = b"E"  # the target raised; the exception's class name follows (ASCII)
-MEMORY: Final = b"M"  # the target or the pickling ran out of memory
-UNPICKLABLE: Final = b"U"  # the result could not be pickled
+MEMORY: Final = b"M"  # the target or the encoding ran out of memory
+UNENCODABLE: Final = b"U"  # the result holds a value encode() does not write
 REFUSED: Final = b"X"  # the target is not a top-level function of a ``vault.`` module
 SETUP: Final = b"S"  # the child could not limit itself
 
@@ -47,7 +49,11 @@ SETUP: Final = b"S"  # the child could not limit itself
 TARGET: Final = re.compile(r"vault(?:\.[a-z_][a-z0-9_]*)+:[a-z_][a-z0-9_]*")
 ERROR_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 UNNAMED_ERROR: Final = "Error"
-PICKLE_PROTOCOL: Final = 5
+# How bytes are written: an object whose only key is this (not a field name: it is not an
+# identifier).
+BYTES_KEY: Final = "$bytes"
+# How deep containers (lists, tuples, dataclasses) may nest in a result; the parent refuses deeper.
+MAX_DEPTH: Final = 64
 _READ_CHUNK: Final = 1 << 16
 
 
@@ -83,6 +89,44 @@ def resolve(target: str) -> object | None:
     return function
 
 
+def _plain(value: object, depth: int) -> object:
+    """``value`` as what ``json.dumps`` writes, or ``TypeError``/``ValueError`` if it holds a value
+    the sandbox does not bring back. Exact types only: a subclass (an ``IntEnum``, a ``str``
+    subclass) or a dict is refused rather than guessed at."""
+    kind = type(value)
+    if value is None or kind is bool or kind is int or kind is float or kind is str:
+        return value
+    if kind is bytes or kind is bytearray:
+        return {BYTES_KEY: base64.b64encode(value).decode("ascii")}  # type: ignore[arg-type]
+    if depth >= MAX_DEPTH:
+        msg = "the result is nested too deep"
+        raise ValueError(msg)
+    if kind is list or kind is tuple:
+        return [_plain(item, depth + 1) for item in value]  # type: ignore[attr-defined]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _plain(getattr(value, item.name), depth + 1)
+            for item in dataclasses.fields(value)
+        }
+    raise TypeError
+
+
+def encode(result: object) -> bytes:
+    """The result as JSON in ASCII: ``None``, booleans, integers, finite floats and strings as
+    themselves, ``bytes`` and ``bytearray`` as ``{"$bytes": "<base64>"}``, lists and tuples as
+    arrays, and dataclass instances as objects of their fields, nested up to ``MAX_DEPTH``. The
+    parent builds the entry point's declared type from it; nothing in it names a type. Raises
+    ``TypeError`` or ``ValueError`` (a ``NaN``, too deep, any other value) when it cannot."""
+    text = json.dumps(
+        _plain(result, 0),
+        ensure_ascii=True,
+        allow_nan=False,
+        check_circular=False,  # _plain already bounded the depth, and built no shared objects
+        separators=(",", ":"),
+    )
+    return text.encode("ascii")
+
+
 def respond(target: str, data: bytes) -> tuple[bytes, bytes]:
     """Run ``target`` on ``data`` and return the answer: a status byte and its payload.
 
@@ -102,11 +146,11 @@ def respond(target: str, data: bytes) -> tuple[bytes, bytes]:
     except BaseException as error:  # everything, SystemExit too: report it, never its message
         return ERROR, error_name(error).encode("ascii")
     try:
-        payload = pickle.dumps(result, protocol=PICKLE_PROTOCOL)
+        payload = encode(result)
     except MemoryError:
         return MEMORY, b""
     except BaseException:
-        return UNPICKLABLE, b""
+        return UNENCODABLE, b""
     return OK, payload
 
 

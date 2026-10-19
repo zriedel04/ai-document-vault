@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import logging
 import os
 import pickle
@@ -17,10 +18,13 @@ import subprocess
 import sys
 import textwrap
 import time
+import tracemalloc
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import IntFlag
 from pathlib import Path
+from typing import Annotated, Any, Literal, Optional, Union
 
 import pytest
 
@@ -39,32 +43,35 @@ from vault.jobs.sandbox import (
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
-from vault.jobs.sandbox_probes import ProbeResult
+from vault.jobs.sandbox_probes import ProbeKinds, ProbePage, ProbeResult
 
 SECRET = "Patient diagnosis confidential: Jane Roe, 1984-02-03"  # noqa: S105 - not a password
 PROBES = "vault.jobs.sandbox_probes"
-RESULT_TYPE = f"{PROBES}:ProbeResult"
-NAMES = (
-    "echo",
-    "length",
-    "describe",
-    "fail",
-    "fail_with_memory",
-    "noisy",
-    "allocate",
-    "sleep",
-    "sleep_with_pid_file",
-    "spawn_sleeper",
-    "exit_now",
-    "abort",
-    "unpicklable",
-    "large",
-    "many_lists",
-    "exit_system",
-    "environment_names",
-)
-ENTRIES = {name: EntryPoint(f"{PROBES}:{name}") for name in NAMES}
-ENTRIES["describe_allowed"] = EntryPoint(f"{PROBES}:describe", frozenset({RESULT_TYPE}))
+# Each probe and the type it returns.
+RESULT_TYPES: dict[str, object] = {
+    "echo": bytes,
+    "length": int,
+    "describe": ProbeResult,
+    "fail": None,
+    "fail_with_memory": None,
+    "noisy": int,
+    "allocate": int,
+    "sleep": None,
+    "sleep_with_pid_file": None,
+    "spawn_sleeper": None,
+    "exit_now": None,
+    "abort": None,
+    "unencodable": None,
+    "large": bytes,
+    "many_lists": list[list[int]],
+    "exit_system": None,
+    "environment_names": list[str],
+    "every_kind": ProbeKinds,
+}
+NAMES = tuple(RESULT_TYPES)
+ENTRIES = {name: EntryPoint(f"{PROBES}:{name}", kind) for name, kind in RESULT_TYPES.items()}
+# The same function declared with another type: its answer does not fit and is refused.
+ENTRIES["describe_as_bytes"] = EntryPoint(f"{PROBES}:describe", bytes)
 LIMITS = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB)
 SHORT = SandboxLimits(timeout_seconds=1.5, memory_bytes=256 * MIB)
 
@@ -137,13 +144,13 @@ def test_returns_the_result() -> None:
     assert run("echo", data) == data
 
 
-def test_an_allowed_result_type_comes_back() -> None:
-    assert run("describe_allowed", b"abcdef") == ProbeResult(size=6, head=b"abcd")
+def test_a_declared_dataclass_comes_back() -> None:
+    assert run("describe", b"abcdef") == ProbeResult(size=6, head=b"abcd")
 
 
-def test_a_result_type_not_listed_is_refused_without_being_built() -> None:
+def test_a_result_of_another_type_than_declared_is_refused() -> None:
     with pytest.raises(SandboxResultError):
-        run("describe", b"abcdef")
+        run("describe_as_bytes", b"abcdef")
 
 
 def test_a_large_input_and_result_cross_both_pipes() -> None:
@@ -252,7 +259,7 @@ def test_a_child_that_dies_with_the_server_leaves_no_orphan(tmp_path: Path) -> N
     pid_file = tmp_path / "child.pid"
     script = f"""
         from vault.jobs import sandbox
-        entries = {{"s": sandbox.EntryPoint("{PROBES}:sleep_with_pid_file")}}
+        entries = {{"s": sandbox.EntryPoint("{PROBES}:sleep_with_pid_file", None)}}
         limits = sandbox.SandboxLimits(timeout_seconds=60, memory_bytes=256 * sandbox.MIB)
         sandbox.run("s", {str(pid_file).encode()!r}, limits, entry_points=entries)
         """
@@ -274,7 +281,7 @@ def test_a_server_killed_before_the_child_is_limited_leaves_no_orphan(tmp_path: 
             return False
 
         sandbox._Guard.attach = stop_here
-        entries = {{"s": sandbox.EntryPoint("{PROBES}:echo")}}
+        entries = {{"s": sandbox.EntryPoint("{PROBES}:echo", bytes)}}
         limits = sandbox.SandboxLimits(timeout_seconds=60, memory_bytes=256 * sandbox.MIB)
         sandbox.run("s", b"", limits, entry_points=entries)
         """
@@ -342,8 +349,8 @@ def test_an_input_that_does_not_fit_while_it_is_read_is_a_memory_error() -> None
         run("length", bytes(200 * MIB), limits)
 
 
-def test_a_result_that_does_not_fit_while_it_is_pickled_is_a_memory_error() -> None:
-    """The input (128 MiB) fits and the target returns it; its pickled copy does not fit."""
+def test_a_result_that_does_not_fit_while_it_is_encoded_is_a_memory_error() -> None:
+    """The input (128 MiB) fits and the target returns it; its encoded copies do not fit."""
     with pytest.raises(SandboxMemoryLimitError):
         run("echo", bytes(128 * MIB))
 
@@ -382,27 +389,6 @@ def test_write_answer_writes_the_status_then_the_payload() -> None:
             os.close(writer)
 
 
-def test_a_result_is_read_from_a_view() -> None:
-    value = [1, "a" * 5000 + "\nline", b"raw", 2.5, {"k": (None, True)}]
-    payload = pickle_of(value)
-    assert sandbox._interpret(sandbox_child.OK + payload, frozenset()) == value
-    assert sandbox._interpret(bytearray(sandbox_child.OK + payload), frozenset()) == value
-
-
-@pytest.mark.parametrize("protocol", range(5))
-def test_a_result_in_another_pickle_protocol_is_refused(
-    protocol: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The child always writes protocol 5; older protocols memoize by an index the stream names
-    (``PUT``, ``BINPUT``, ``LONG_BINPUT``), which the scan does not accept."""
-    import pickle
-
-    value = [1, "a" * 5000 + "\nline", 2.5, {"k": (None, True)}]
-    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
-    with pytest.raises(SandboxResultError):
-        sandbox._interpret(sandbox_child.OK + pickle.dumps(value, protocol=protocol), frozenset())
-
-
 def test_a_memory_error_raised_by_the_target_is_a_memory_error() -> None:
     with pytest.raises(SandboxMemoryLimitError) as caught:
         run("fail_with_memory", SECRET.encode())
@@ -433,322 +419,505 @@ def test_an_abort_is_a_crash() -> None:
 # --- results that cannot come back ----------------------------------------------------------
 
 
-def test_a_result_that_cannot_be_pickled() -> None:
+def test_a_result_that_cannot_be_encoded() -> None:
     with pytest.raises(SandboxResultError):
-        run("unpicklable")
+        run("unencodable")
 
 
 def test_a_result_larger_than_the_cap() -> None:
-    limits = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB, max_result_bytes=1000)
+    limits = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB, max_result_bytes=2000)
     with pytest.raises(SandboxResultError):
         run("large", b"5000", limits)
     assert run("large", b"900", limits) == b"x" * 900
 
 
-# One-byte opcodes that each build an object: empty list, dict, set, tuple, None, a memoized list.
-EXPANDING = {
-    "lists": b"]",
-    "dicts": b"}",
-    "sets": b"\x8f",
-    "tuples": b")",
-    "nones": b"N",
-    "memoized lists": b"]\x94",
-}
+# --- the answer: JSON built into the declared type ----------------------------------------
 
 
-def expanding_pickle(opcode: bytes, count: int) -> bytes:
-    """A protocol 5 pickle of a list of ``count`` objects, each built by ``opcode``."""
-    return b"\x80\x05](" + opcode * count + b"e."
-
-
-class UnpicklerRanError(BaseException):
+class ParserRanError(BaseException):
     """Not an ``Exception``, so ``_load_result`` cannot turn it into a refusal."""
 
 
-def never(self: object) -> object:
-    raise UnpicklerRanError
+def never(*args: object, **kwargs: object) -> object:
+    raise ParserRanError
 
 
-@pytest.mark.parametrize("opcode", EXPANDING.values(), ids=EXPANDING.keys())
-def test_the_charge_for_each_opcode_covers_what_unpickling_allocates(opcode: bytes) -> None:
-    """Compared with an independent measure: the peak tracemalloc sees while the real unpickler
-    builds the same answer, so the constants cannot drift below what CPython allocates."""
-    import pickle
-    import tracemalloc
+def decoder(result_type: object) -> sandbox._Node:
+    return sandbox._compile_result_type(result_type)
 
-    payload = expanding_pickle(opcode, 50_000)
-    charged = sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40)
+
+def decode(payload: bytes, result_type: object, **limits: int) -> object:
+    """The server's reading of an answer whose payload is ``payload``."""
+    return sandbox._interpret(sandbox_child.OK + payload, decoder(result_type), **limits)
+
+
+def round_trip(value: object, result_type: object) -> object:
+    return decode(sandbox_child.encode(value), result_type)
+
+
+@dataclass(frozen=True)
+class Empty:
+    pass
+
+
+@dataclass
+class One:
+    a: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Slotted:
+    name: str
+    pages: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class Tree:
+    label: str
+    children: list[Tree]
+
+
+@dataclass
+class Checked:
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.count < 0:
+            msg = "negative"
+            raise ValueError(msg)
+
+
+@dataclass
+class WithDict:
+    names: dict[str, int]
+
+
+@dataclass
+class NotInitialised:
+    a: int
+    b: int = field(init=False, default=0)
+
+
+@dataclass
+class Unresolvable:
+    a: Missing  # type: ignore[name-defined]  # noqa: F821 - the point of the test
+
+
+class Plain:
+    a: int
+
+
+class Flag(IntFlag):
+    A = 1
+
+
+def tree(depth: int) -> Tree:
+    node = Tree("leaf", [])
+    for _ in range(depth):
+        node = Tree("node", [node])
+    return node
+
+
+# Every kind of field a result type may have, with values at the edges of each kind.
+ROUND_TRIPS: list[tuple[object, object]] = [
+    (None, None),
+    (None, type(None)),
+    (True, bool),
+    (False, bool),
+    (0, int),
+    (2**63 - 1, int),
+    (-(2**63), int),
+    (0.1, float),
+    (-0.0, float),
+    (1e300, float),
+    (5e-324, float),
+    ("", str),
+    ('text, with [brackets] {braces}: "quotes" \\ and\nlines\r\x00\x1f\N{LINE SEPARATOR}', str),
+    ("\N{GRINNING FACE} caf\N{LATIN SMALL LETTER E WITH ACUTE} \ud800", str),
+    (b"", bytes),
+    (bytes(range(256)) * 3, bytes),
+    ([], list[int]),
+    ([1, 2, 3], list[int]),
+    ([[], [b"x"]], list[list[bytes]]),
+    ((), tuple[int, ...]),
+    ((1, 2), tuple[int, ...]),
+    (("a", 1, None), tuple[str, int, None]),
+    ((), tuple[()]),
+    (None, int | None),
+    (3, int | None),
+    (None, Optional[str]),  # noqa: UP045 - the other spelling of the same type
+    ("x", Optional[str]),  # noqa: UP045
+    ([None, "a"], list[str | None]),
+    (Empty(), Empty),
+    (One(a=1), One),
+    (Slotted(name="n", pages=(1, 2)), Slotted),
+    (tree(10), Tree),
+    (ProbeResult(size=3, head=b"abc"), ProbeResult),
+    ([ProbePage(1, "a"), ProbePage(2, "b")], list[ProbePage]),
+    (ProbePage(1, "a"), ProbePage | None),
+    (sandbox_probes.every_kind(b"one\ntwo, three"), ProbeKinds),
+    (sandbox_probes.every_kind(b""), ProbeKinds),
+]
+
+
+@pytest.mark.parametrize(("value", "result_type"), ROUND_TRIPS)
+def test_every_declared_field_kind_round_trips(value: object, result_type: object) -> None:
+    built = round_trip(value, result_type)
+    assert built == value
+    assert type(built) is type(value)
+
+
+def test_bytes_and_tuples_come_back_as_declared() -> None:
+    """A bytearray comes back as bytes, and an array as a tuple where a tuple is declared."""
+    assert round_trip(bytearray(b"ab"), bytes) == b"ab"
+    assert type(round_trip(bytearray(b"ab"), bytes)) is bytes
+    assert round_trip([1, 2], tuple[int, ...]) == (1, 2)
+    assert round_trip((1, 2), list[int]) == [1, 2]
+
+
+def test_every_kind_comes_back_from_a_real_child() -> None:
+    data = "first line, caf\N{LATIN SMALL LETTER E WITH ACUTE}\nsecond\r\nthird".encode()
+    assert run("every_kind", data) == sandbox_probes.every_kind(data)
+
+
+def test_the_answer_is_ascii_json() -> None:
+    payload = sandbox_child.encode(sandbox_probes.every_kind("caf\N{GRINNING FACE}".encode()))
+    assert payload.isascii()
+    assert isinstance(json.loads(payload), dict)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"a": 1},  # dict
+        {1, 2},  # set
+        frozenset(),
+        object(),
+        os.system,  # a function
+        ProbeResult,  # a class
+        float("nan"),
+        float("inf"),
+        Flag.A,  # an int subclass
+        type("Text", (str,), {})("x"),  # a str subclass
+        complex(1, 2),
+        tree(sandbox_child.MAX_DEPTH),  # too deep
+    ],
+    ids=lambda value: type(value).__name__,
+)
+def test_the_child_refuses_to_encode_anything_else(value: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        sandbox_child.encode(value)
+
+
+def test_a_recursive_value_is_refused_by_the_child() -> None:
+    looped: list[object] = []
+    looped.append(looped)
+    with pytest.raises(ValueError, match="deep"):
+        sandbox_child.encode(looped)
+
+
+@pytest.mark.parametrize(
+    "result_type",
+    [
+        sandbox_probes.echo,  # a vault function: what the finding named
+        os.system,
+        print,
+        "vault.jobs.sandbox_probes:ProbeResult",  # a name, not a class
+        ProbeResult(size=1, head=b""),  # an instance, not a class
+        Plain,  # a class that is not a dataclass
+        IntFlag,
+        object,
+        type,
+        Any,
+        dict,
+        dict[str, int],
+        set[int],
+        frozenset[int],
+        list,
+        tuple,
+        list[int, str],  # type: ignore[misc]
+        int | str,
+        int | str | None,
+        Union[int, bytes],  # noqa: UP007 - the other spelling
+        Literal[1],
+        Annotated[int, "x"],
+        complex,
+        bytearray,
+        WithDict,
+        NotInitialised,
+        Unresolvable,
+        list[WithDict],
+        Callable[[], int],
+    ],
+    ids=repr,
+)
+def test_a_result_type_that_is_not_allowed_is_refused_at_definition(result_type: object) -> None:
+    with pytest.raises(ValueError, match="result type"):
+        EntryPoint(f"{PROBES}:echo", result_type)
+
+
+def test_an_entry_point_declares_its_result_type() -> None:
+    with pytest.raises(TypeError):
+        EntryPoint(f"{PROBES}:echo")  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("payload", "result_type"),
+    [
+        # Something that names a type or a function: never resolved, refused by its shape.
+        (b'{"__class__":"os:system","args":["calc"]}', ProbeResult),
+        (b'{"py/object":"os.system"}', None),
+        (b'{"size":1,"head":{"$bytes":""},"__reduce__":"os:system"}', ProbeResult),
+        (b'{"$bytes":"","type":"vault.jobs.sandbox_probes:ProbeResult"}', bytes),
+        (pickle.dumps(os.system, protocol=5), None),  # the old format
+        (pickle.dumps(ProbeResult(size=1, head=b""), protocol=5), ProbeResult),
+        # Another dataclass's shape, or a field missing, extra, repeated or of the wrong kind.
+        (b'{"number":1,"text":"a"}', ProbeResult),
+        (b'{"size":1}', ProbeResult),
+        (b'{"size":1,"head":{"$bytes":""},"pages":2}', ProbeResult),
+        (b'{"size":1,"size":2,"head":{"$bytes":""}}', ProbeResult),
+        (b'{"size":"1","head":{"$bytes":""}}', ProbeResult),
+        (b'[1,{"$bytes":""}]', ProbeResult),
+        (b'{"count":-1}', Checked),  # the class's own check refuses it
+        # Each kind against the others.
+        (b"true", int),
+        (b"1.0", int),
+        (b'"1"', int),
+        (b"1", float),
+        (b"0", bool),
+        (b"null", str),
+        (b'{"$bytes":""}', str),
+        (b'"YWJj"', bytes),
+        (b'{"$bytes":"!!!!"}', bytes),
+        (b'{"$bytes":"YQ"}', bytes),  # padding missing
+        (b'{"$bytes":"YWJj","x":1}', bytes),
+        (b'{"$bytes":1}', bytes),
+        (b"[1]", tuple[int, int]),
+        (b"[1,2,3]", tuple[int, int]),
+        (b"[1,null]", list[int]),
+        (b'"x"', int | None),
+        (b"{}", list[int]),
+        (b"[]", Empty),
+        # Not JSON the child writes.
+        (b"NaN", float),
+        (b"Infinity", float),
+        (b"-Infinity", float),
+        (b"1" * 21, int),
+        (b"-" + b"9" * 20, int),
+        ('"caf\N{LATIN SMALL LETTER E WITH ACUTE}"'.encode(), str),  # not ASCII
+        (b'"\xff"', str),
+        (b"1 2", int),
+        (b"", None),
+        (b"not json", None),
+        (b"\xef\xbb\xbfnull", None),  # a byte order mark
+        ('"a"'.encode("utf-16"), str),
+    ],
+)
+def test_an_answer_that_does_not_fit_the_declared_type_is_refused(
+    payload: bytes, result_type: object
+) -> None:
+    with pytest.raises(SandboxResultError):
+        decode(payload, result_type)
+
+
+def test_nothing_in_the_answer_is_called_but_the_declared_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An answer shaped like another dataclass's fields builds the declared class or nothing."""
+    called: list[str] = []
+    real_init = ProbePage.__init__
+
+    def recording_init(self: ProbePage, *args: object, **kwargs: object) -> None:
+        called.append("ProbePage")
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ProbePage, "__init__", recording_init)
+    with pytest.raises(SandboxResultError):
+        decode(b'{"number":1,"text":"a"}', ProbeResult)
+    assert called == []
+    built = decode(b'{"number":1,"text":"a"}', ProbePage)
+    assert called == ["ProbePage"]
+    assert built == ProbePage(1, "a")
+
+
+def test_nesting_is_bounded_on_both_sides() -> None:
+    deepest = tree(sandbox_child.MAX_DEPTH // 2 - 1)  # a Tree and its list: two levels each
+    assert round_trip(deepest, Tree) == deepest
+    with pytest.raises(ValueError, match="deep"):
+        sandbox_child.encode(tree(sandbox_child.MAX_DEPTH // 2))
+    # The same too-deep value written by hand, as a hijacked child would: refused by the server.
+    too_deep = b'{"label":"leaf","children":[]}'
+    for _ in range(sandbox_child.MAX_DEPTH // 2):
+        too_deep = b'{"label":"node","children":[' + too_deep + b"]}"
+    with pytest.raises(SandboxResultError):
+        decode(too_deep, Tree)
+
+
+@pytest.mark.parametrize("size", [100_000, 8 * MIB])
+def test_deep_nesting_beyond_what_json_parses_is_refused_quickly(size: int) -> None:
+    """json's scanner stops at CPython's recursion limit (``RecursionError``), whatever the
+    length: refused, and the server neither crashes nor builds the rest."""
+    started = time.monotonic()
+    for payload in (b"[" * size + b"]" * size, b'{"a":' * size + b"1" + b"}" * size):
+        with pytest.raises(SandboxResultError):
+            decode(payload, Tree, max_memory=1 << 40, max_values=1 << 40)
+    assert time.monotonic() - started < 30
+
+
+def test_large_integers_are_refused_before_int_reads_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    real = sandbox._parse_int
+
+    def recording(text: str) -> int:
+        calls.append(text)
+        return real(text)
+
+    monkeypatch.setattr(sandbox, "_parse_int", recording)
+    with pytest.raises(SandboxResultError):
+        decode(b"1" * 4_000, int)
+    assert calls == ["1" * 4_000]  # int() would read it (under CPython's 4300 digits): refused
+
+
+# Answers that each build many objects for few bytes, with a type that accepts them.
+HOSTILE: dict[str, tuple[bytes, object]] = {
+    "empty lists": (b"[" + b"[]," * 50_000 + b"[]]", list[list[int]]),
+    "empty objects": (b"[" + b"{}," * 50_000 + b"{}]", list[Empty]),
+    "one-key objects": (b"[" + b'{"a":0},' * 50_000 + b'{"a":0}]', list[One]),
+    "distinct keys": (b"[" + b",".join(b'{"k%d":0}' % n for n in range(50_000)) + b"]", None),
+    "tuples": (b"[" + b"[0]," * 50_000 + b"[0]]", list[tuple[int, ...]]),
+    "strings": (b"[" + b",".join(b'"%d"' % n for n in range(50_000)) + b"]", list[str]),
+    "empty strings": (b"[" + b'"",' * 50_000 + b'""]', list[str]),
+    "ints": (b"[" + b",".join(b"%d" % (n + 1000) for n in range(50_000)) + b"]", list[int]),
+    "floats": (b"[" + b",".join(b"%d.5" % n for n in range(50_000)) + b"]", list[float]),
+    "wide string": (b'"\\ud83d\\ude00' + b"a" * 1_000_000 + b'"', str),
+    "one large bytes": (sandbox_child.encode(b"y" * 3_000_000), bytes),
+    "many bytes": (sandbox_child.encode([b"%d" % n for n in range(30_000)]), list[bytes]),
+    "nested": (b"[" + b"[[[0]]]," * 20_000 + b"[[[0]]]]", list[list[list[list[int]]]]),
+    "dataclasses": (
+        sandbox_child.encode([ProbeResult(size=n, head=b"") for n in range(20_000)]),
+        list[ProbeResult],
+    ),
+    "every kind": (
+        sandbox_child.encode([sandbox_probes.every_kind(b"a\nb") for _ in range(2_000)]),
+        list[ProbeKinds],
+    ),
+}
+
+
+def count_values(value: object) -> int:
+    """The JSON values (keys included) a parsed answer holds: an independent count."""
+    if isinstance(value, list):
+        return 1 + sum(count_values(item) for item in value)
+    if isinstance(value, dict):
+        return 1 + sum(1 + count_values(item) for item in value.values())
+    return 1
+
+
+@pytest.mark.parametrize(("payload", "result_type"), HOSTILE.values(), ids=HOSTILE.keys())
+def test_the_value_count_bounds_what_json_builds(payload: bytes, result_type: object) -> None:
+    built = json.loads(payload)
+    assert sandbox._answer_cost(sandbox_child.OK + payload)[1] >= count_values(built)
+
+
+@pytest.mark.parametrize(("payload", "result_type"), HOSTILE.values(), ids=HOSTILE.keys())
+def test_the_cost_covers_what_decoding_allocates(payload: bytes, result_type: object) -> None:
+    """Compared with an independent measure: tracemalloc's peak while the server decodes the
+    answer and builds the declared type, so the constants cannot drift below what CPython
+    allocates."""
+    answer = sandbox_child.OK + payload
+    reader = decoder(result_type)
+    cost, _values = sandbox._answer_cost(answer)
     tracemalloc.start()
     try:
-        pickle.loads(payload)  # noqa: S301 - a pickle built above, from fixed bytes
+        with contextlib.suppress(SandboxResultError):
+            sandbox._load_result(answer, reader, 1 << 40, 1 << 40)
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert charged >= peak
+    assert cost >= peak
 
 
-def test_strings_are_charged_as_python_holds_them() -> None:
-    import pickle
-
-    text = "a" * 10_000 + "\N{GRINNING FACE}"  # one emoji makes every character four bytes
-    payload = pickle.dumps(text, protocol=5)
-    charged = sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40)
-    built = pickle.loads(payload)  # noqa: S301 - a pickle built above
-    # The copy the unpickler builds, not ``text``, which now also caches its UTF-8 form.
-    assert built == text
-    assert charged >= sys.getsizeof(built) > 40_000
-
-
-def test_an_answer_that_would_build_too_much_is_refused_before_it_is_built(
+def test_an_answer_that_could_build_too_much_is_refused_before_it_is_parsed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Small on the wire, large in the server: refused by the opcode count and by the memory
-    budget, without the unpickler ever running."""
-    payload = sandbox_child.OK + expanding_pickle(b"]", 2_000)
-    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
+    """Small on the wire, large in the server: refused by the value count and by the memory
+    budget, without json ever running."""
+    payload = b"[" + b"[]," * 2_000 + b"[]]"
+    monkeypatch.setattr(json, "loads", never)
     with pytest.raises(SandboxResultError):
-        sandbox._interpret(payload, frozenset(), max_opcodes=1_000)
+        decode(payload, list[list[int]], max_values=1_000)
     with pytest.raises(SandboxResultError):
-        sandbox._interpret(payload, frozenset(), max_memory=100_000)
-    big = sandbox_child.OK + pickle_of("x" * 200_000)
+        decode(payload, list[list[int]], max_memory=100_000)
     with pytest.raises(SandboxResultError):
-        sandbox._interpret(big, frozenset(), max_memory=100_000)
+        decode(b'"' + b"x" * 200_000 + b'"', str, max_memory=100_000)
+    monkeypatch.undo()
+    monkeypatch.setattr(json, "loads", never)
+    with pytest.raises(ParserRanError):  # the control: within the limits, json does run
+        decode(payload, list[list[int]])
 
 
 def test_an_answer_within_the_budget_is_built() -> None:
-    payload = sandbox_child.OK + expanding_pickle(b"]", 2_000)
-    assert sandbox._interpret(payload, frozenset(), max_opcodes=3_000) == [[]] * 2_000
-    assert sandbox._interpret(payload, frozenset(), max_memory=300_000) == [[]] * 2_000
+    payload = b"[" + b"[]," * 1_999 + b"[]]"
+    assert decode(payload, list[list[int]], max_values=4_001) == [[]] * 2_000
+    assert decode(payload, list[list[int]], max_memory=1_100_000) == [[]] * 2_000
+
+
+def test_the_answer_and_the_load_are_charged_before_any_value() -> None:
+    cost, values = sandbox._answer_cost(sandbox_child.OK + b"null")
+    assert values == 1
+    assert cost == sandbox._LOAD_BYTES + 4 * sandbox._ANSWER_BYTE_COST + sandbox._VALUE_COST
+    with pytest.raises(SandboxResultError):
+        decode(b"null", None, max_memory=cost - 1)
+    assert decode(b"null", None, max_memory=cost) is None
 
 
 def test_the_budget_applies_to_a_real_child() -> None:
-    limits = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB, max_result_opcodes=1_000)
+    limits = SandboxLimits(timeout_seconds=30, memory_bytes=256 * MIB, max_result_values=1_000)
     with pytest.raises(SandboxResultError):
         run("many_lists", b"1000", limits)
     assert run("many_lists", b"100", limits) == [[]] * 100
 
 
-def test_the_default_budget_refuses_a_hostile_answer_of_the_largest_size_quickly() -> None:
-    """256 MiB of one-byte list opcodes would build about 20 GiB; the default limits refuse it
-    after reading 4 million opcodes, in a bounded time."""
-    payload = memoryview(expanding_pickle(b"]", sandbox.DEFAULT_MAX_RESULT_BYTES - 16))
+def test_the_default_budget_refuses_a_hostile_answer_of_the_largest_size_quickly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """256 MiB of ``[],`` would build about 6 GiB; the default limits refuse it from its bytes,
+    without parsing, in a bounded time."""
+    count = (sandbox.DEFAULT_MAX_RESULT_BYTES - 2) // 3
+    answer = sandbox_child.OK + b"[" + b"[]," * count + b"0]"
+    monkeypatch.setattr(json, "loads", never)
     started = time.monotonic()
     with pytest.raises(SandboxResultError):
-        sandbox._check_expansion(
-            payload, sandbox.DEFAULT_MAX_RESULT_MEMORY_BYTES, sandbox.DEFAULT_MAX_RESULT_OPCODES
-        )
+        sandbox._interpret(answer, decoder(list[list[int]]))
     assert time.monotonic() - started < 30
 
 
-def pickle_of(value: object) -> bytes:
-    import pickle
-
-    return pickle.dumps(value, protocol=5)
-
-
-# Values of each kind of argument a protocol 5 pickle carries; all
-# different, so the pickler cannot share one object between them.
-SIZED = {
-    "bytearray": ([bytearray(b"x" * 300_000)], 5),
-    "bytes": ([b"x" * 300_000], 5),
-    "short bytes": ([b"%05d" % n + b"x" * 200 for n in range(2_000)], 5),
-    "str": (["x" * 300_000], 5),
-    "short str": ([f"{n:05}" + "x" * 200 for n in range(2_000)], 5),
-    "int": ([1 << 2_400_000], 5),
-    "ints": ([(1 << 13_000) + n for n in range(200)], 5),
-    "floats": ([1.5 + n for n in range(2_000)], 5),
-}
-
-
-@pytest.mark.parametrize(("values", "protocol"), SIZED.values(), ids=SIZED.keys())
-def test_every_argument_is_charged_at_least_its_size(values: list[object], protocol: int) -> None:
-    import pickle
-
-    payload = memoryview(pickle.dumps(values, protocol=protocol))
-    built = pickle.loads(payload)  # noqa: S301 - a pickle built above
-    size = sum(sys.getsizeof(value) for value in built)
-    assert sandbox._check_expansion(payload, 1 << 40, 1 << 40) >= size
-    with pytest.raises(SandboxResultError):
-        sandbox._check_expansion(payload, size, 1 << 40)
-
-
-def test_a_large_bytearray_answer_is_refused_by_the_memory_budget() -> None:
-    answer = sandbox_child.OK + pickle_of(bytearray(5 * MIB))
-    with pytest.raises(SandboxResultError):
-        sandbox._interpret(answer, frozenset(), max_memory=1_000)
-
-
-@pytest.mark.parametrize(
-    "put",
-    [
-        b"p100000000\n",  # PUT
-        b"q\xff",  # BINPUT
-        b"r" + (100_000_000).to_bytes(4, "little"),  # LONG_BINPUT
-    ],
-    ids=["PUT", "BINPUT", "LONG_BINPUT"],
-)
-def test_a_memo_index_named_in_the_answer_is_refused_before_it_is_built(
-    put: bytes, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Nine bytes (``NONE``, ``LONG_BINPUT 100000000``, ``STOP``) make the C unpickler grow its
-    memo table to that index, 1.6 GB of pointers; only ``MEMOIZE``, whose index is the memo's
-    own length, is accepted."""
-    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
-    answer = sandbox_child.OK + b"\x80\x05N" + put + b"."
-    with pytest.raises(SandboxResultError):
-        sandbox._interpret(answer, frozenset())
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [b"N.", b"N\x80\x05.", b"\x80\x04N.", b"\x80\x06N.", b"."],
-    ids=["no PROTO", "PROTO later", "PROTO 4", "PROTO 6", "STOP only"],
-)
-def test_an_answer_that_does_not_start_with_protocol_5_is_refused(
-    payload: bytes, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
-    with pytest.raises(SandboxResultError):
-        sandbox._interpret(sandbox_child.OK + payload, frozenset())
-
-
-def test_the_answer_itself_and_the_load_are_charged_before_any_opcode() -> None:
-    """The unpickler copies each string and frame out of the view before decoding it, so the
-    answer's length is charged once more, with what one load costs."""
-    payload = memoryview(pickle_of(None))
-    charged = sandbox._check_expansion(payload, 1 << 40, 1 << 40)
-    assert charged >= sandbox._LOAD_BYTES + len(payload)
-    with pytest.raises(SandboxResultError):
-        sandbox._check_expansion(payload, sandbox._LOAD_BYTES, 1 << 40)
-
-
-@pytest.mark.parametrize("opcode", ["DUP", "EXT1", "PERSID", "NEXT_BUFFER", "STRING", "INT"])
-def test_an_opcode_the_child_does_not_write_is_refused(opcode: str) -> None:
-    """Built by hand: a protocol 5 header, then one opcode the result pickler never writes."""
-    import pickletools
-
-    code = next(op.code for op in pickletools.opcodes if op.name == opcode).encode("latin-1")
-    argument = {"EXT1": b"\x01", "PERSID": b"x\n", "STRING": b"'x'\n", "INT": b"1\n"}
-    payload = b"\x80\x05N" + code + argument.get(opcode, b"") + b"."
-    with pytest.raises(SandboxResultError):
-        sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40)
-
-
-@dataclass(frozen=True, slots=True)
-class SlottedResult:
-    name: str
-    pages: tuple[int, ...]
-
-
-# Every kind of value an extraction result holds, so that every opcode protocol 5 writes for one
-# appears: numbers of every width, strings and bytes short and long, every container, memo hits
-# for shared and recursive objects, and dataclasses with and without slots.
-SHARED = ["shared"]
-RECURSIVE: list[object] = []
-RECURSIVE.append(RECURSIVE)
-RESULT_VALUES = [
-    None, True, False, 0, 1, 255, 256, 65_535, 65_536, -1, 1 << 40, 1 << 3_000, -(1 << 3_000),
-    1.5, float("inf"),
-    "", "short", "\N{GRINNING FACE}", "x" * 300, "y" * 70_000,
-    b"", b"short", b"x" * 300, b"y" * 70_000, bytearray(b"z" * 10),
-    (), (1,), (1, 2), (1, 2, 3), (1, 2, 3, 4), [], [1], list(range(3_000)),
-    {}, {"a": 1}, {str(n): n for n in range(3_000)}, set(), {1, 2}, frozenset(), frozenset({3}),
-    [SHARED, SHARED, (SHARED,)], RECURSIVE,
-    ProbeResult(size=3, head=b"abc"), SlottedResult(name="n", pages=(1, 2)),
-]  # fmt: skip
-
-
-def test_every_opcode_a_result_needs_is_accepted() -> None:
-    import pickletools
-
-    payload = pickle_of(RESULT_VALUES)
-    written = {opcode.name for opcode, _argument, _position in pickletools.genops(payload)}
-    assert written <= sandbox._RESULT_OPCODES
-    assert sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40) > 0
-
-
-def test_the_accepted_opcodes_are_real_and_name_no_memo_index() -> None:
-    import pickletools
-
-    names = {opcode.name for opcode in pickletools.opcodes}
-    assert names >= sandbox._RESULT_OPCODES
-    assert not sandbox._RESULT_OPCODES & {"PUT", "BINPUT", "LONG_BINPUT"}
-    assert sandbox._FREE_OPCODES <= sandbox._RESULT_OPCODES
-
-
-# Answers the real result unpickler builds, each stressing one allocation: the memo, the array of
-# marks, the reader's copy of a string, nested containers.
-MEASURED = {
-    "many memo entries": pickle_of([str(n) for n in range(100_000)]),
-    "marks": b"\x80\x05" + b"(" * 100_000 + b"N.",
-    "one large string": pickle_of("y" * 5_000_000),
-    "large bytes": pickle_of(b"y" * 5_000_000),
-    "nested lists": pickle_of([[[[n]]] for n in range(20_000)]),
-    "dicts": pickle_of([{"a": n, "b": float(n)} for n in range(20_000)]),
-    "sets": pickle_of([{n} for n in range(10_000)]),
-    "tuples": pickle_of([(n, n, n, n, n) for n in range(20_000)]),
-    "results": pickle_of(RESULT_VALUES * 20),
-}
-
-
-@pytest.mark.parametrize("payload", MEASURED.values(), ids=MEASURED.keys())
-def test_the_charge_covers_what_the_result_unpickler_allocates(payload: bytes) -> None:
-    """Compared with tracemalloc's peak while the server's own unpickler reads the answer from a
-    view, as ``_load_result`` does."""
-    import tracemalloc
-
-    view = memoryview(payload)
-    charged = sandbox._check_expansion(view, 1 << 40, 1 << 40)
-    allowed = frozenset({"vault.jobs.sandbox_probes:ProbeResult", f"{__name__}:SlottedResult"})
-    reader = sandbox._ViewReader(view)
-    tracemalloc.start()
-    try:
-        with contextlib.suppress(pickle.UnpicklingError):
-            sandbox._ResultUnpickler(reader, allowed).load()
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    assert charged >= peak
-
-
-def test_the_argument_kinds_are_every_kind_pickletools_knows() -> None:
-    import pickletools
-
-    kinds = {opcode.arg.name for opcode in pickletools.opcodes if opcode.arg is not None}
-    assert kinds == sandbox._ARGUMENT_KINDS
-
-
-def test_an_argument_of_a_kind_or_type_that_is_not_listed_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = memoryview(pickle_of(bytearray(b"abc")))
-    assert sandbox._check_expansion(payload, 1 << 40, 1 << 40) > 0
-    monkeypatch.setattr(sandbox, "_ARGUMENT_KINDS", sandbox._ARGUMENT_KINDS - {"bytearray8"})
-    with pytest.raises(SandboxResultError):
-        sandbox._check_expansion(payload, 1 << 40, 1 << 40)
-    monkeypatch.undo()
-    monkeypatch.setattr(sandbox, "_ARGUMENT_TYPES", (int, float, str, bytes))
-    with pytest.raises(SandboxResultError):
-        sandbox._check_expansion(payload, 1 << 40, 1 << 40)
+def test_a_large_answer_is_read_without_copying_the_buffer() -> None:
+    """The text is decoded from a view of the answer buffer, which a bytearray also gives."""
+    payload = sandbox_child.encode("x" * 100_000)
+    assert sandbox._interpret(bytearray(sandbox_child.OK + payload), decoder(str)) == "x" * 100_000
 
 
 @pytest.mark.parametrize(
     "answer",
     [
-        sandbox_child.OK + b"not a pickle",
+        sandbox_child.OK + b"not json",
+        sandbox_child.OK,
         sandbox_child.MEMORY + b"extra",
         b"Z",
-        sandbox_child.UNPICKLABLE,
+        sandbox_child.UNENCODABLE,
     ],
 )
 def test_a_malformed_answer_is_a_result_error(answer: bytes) -> None:
     with pytest.raises(SandboxResultError):
-        sandbox._interpret(answer, frozenset())
+        sandbox._interpret(answer, decoder(None))
 
 
 def test_an_error_name_that_is_not_a_class_name_is_replaced() -> None:
     with pytest.raises(SandboxChildError) as caught:
-        sandbox._interpret(sandbox_child.ERROR + b"Jane Roe\n", frozenset())
+        sandbox._interpret(sandbox_child.ERROR + b"Jane Roe\n", decoder(None))
     assert caught.value.error_class == "Error"
 
 
@@ -762,16 +931,7 @@ def test_an_error_name_that_is_not_a_class_name_is_replaced() -> None:
 )
 def test_the_other_answers(answer: bytes, error: type[SandboxError]) -> None:
     with pytest.raises(error):
-        sandbox._interpret(answer, frozenset())
-
-
-def test_the_unpickler_resolves_no_global_name_unlisted() -> None:
-    import pickle
-
-    # What a hijacked child would send to run a command, in the protocol the scan accepts.
-    payload = pickle.dumps(os.system, protocol=5)
-    with pytest.raises(SandboxResultError):
-        sandbox._interpret(sandbox_child.OK + payload, frozenset())
+        sandbox._interpret(answer, decoder(None))
 
 
 # --- refusals -------------------------------------------------------------------------------
@@ -807,7 +967,7 @@ def test_the_production_allowlist_is_empty_until_extraction_is_wired() -> None:
 )
 def test_an_entry_point_outside_vault_or_malformed_is_refused(target: str) -> None:
     with pytest.raises(ValueError, match="entry point"):
-        EntryPoint(target)
+        EntryPoint(target, None)
     assert answer(target, b"") == sandbox_child.REFUSED
 
 
@@ -826,15 +986,9 @@ def test_the_child_refuses_what_is_not_a_function_of_that_module(target: str) ->
 
 
 def test_the_child_refuses_on_its_side_too() -> None:
-    entries = {"x": EntryPoint(f"{PROBES}:imported_function")}
+    entries = {"x": EntryPoint(f"{PROBES}:imported_function", None)}
     with pytest.raises(SandboxRefusedError):
         sandbox.run("x", b"", LIMITS, entry_points=entries)
-
-
-@pytest.mark.parametrize("names", [frozenset({"os:system"}), frozenset({"vault.x:Y\n"}), {"a"}])
-def test_result_types_must_be_vault_classes(names: frozenset[str]) -> None:
-    with pytest.raises(ValueError, match="result types"):
-        EntryPoint(f"{PROBES}:echo", names)
 
 
 def test_the_input_must_be_bytes_and_the_limits_limits() -> None:
@@ -914,11 +1068,11 @@ def test_a_timeout_does_not_disturb_runs_beside_it() -> None:
 def test_respond_in_process() -> None:
     assert sandbox_child.respond(f"{PROBES}:echo", b"ab") == (
         sandbox_child.OK,
-        __import__("pickle").dumps(b"ab", protocol=5),
+        b'{"$bytes":"YWI="}',
     )
     assert answer(f"{PROBES}:fail", SECRET.encode()) == b"EValueError"
     assert answer(f"{PROBES}:fail_with_memory", b"x") == sandbox_child.MEMORY
-    assert answer(f"{PROBES}:unpicklable", b"") == sandbox_child.UNPICKLABLE
+    assert answer(f"{PROBES}:unencodable", b"") == sandbox_child.UNENCODABLE
     assert answer(f"{PROBES}:exit_system", b"x") == b"ESystemExit"
     assert answer(f"{PROBES}:large", b"3")[:1] == sandbox_child.OK
     assert answer(f"{PROBES}:describe", b"abcdef")[:1] == sandbox_child.OK
@@ -1002,8 +1156,8 @@ def test_settings_out_of_range_are_refused(key: str, value: object) -> None:
             {"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_memory_bytes": 0},
             ValueError,
         ),
-        ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_opcodes": 0}, ValueError),
-        ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_opcodes": 1.5}, TypeError),
+        ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_values": 0}, ValueError),
+        ({"timeout_seconds": 1, "memory_bytes": 256 * MIB, "max_result_values": 1.5}, TypeError),
         ({"timeout_seconds": "1", "memory_bytes": 256 * MIB}, TypeError),
     ],
 )

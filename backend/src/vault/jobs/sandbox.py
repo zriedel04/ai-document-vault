@@ -12,8 +12,8 @@ raises one :class:`SandboxError` subclass that says how it failed:
   ``os._exit(0)``);
 - :class:`SandboxChildError`: the function raised; only the exception's class name comes back
   (``error_class``), never its message or traceback, which can quote the document;
-- :class:`SandboxResultError`: the result could not be pickled, was larger than the cap, held a
-  type that is not allowed for this entry point, or was not a well-formed answer;
+- :class:`SandboxResultError`: the result could not be encoded, was larger than the cap, did not
+  have the type this entry point declares, or was not a well-formed answer;
 - :class:`SandboxRefusedError`: the entry point is not on the allowlist (nothing is started);
 - :class:`SandboxUnavailableError`: the child could not be started or limited on this system.
 
@@ -29,17 +29,23 @@ appears on its command line; no temporary file is written, so there is no file a
 redirect. The child answers on its standard output, which the parent reads up to
 ``max_result_bytes``; its standard error goes to the null device, and the child points its own
 descriptors 1 and 2 there too, so nothing a library prints reaches the server's console. The
-result is unpickled by an unpickler that resolves only the classes listed for the entry point
-(plain values such as ``str``, ``bytes``, numbers, lists, tuples, dicts and sets need none), so a
-child that a hostile file took over cannot make the server run code through the pickle. Nor can it
-make the server build more than it should: before unpickling, the parent reads the answer's
-opcodes without building anything and refuses an answer whose objects would cost more than
-``max_result_memory_bytes`` (1 GiB by default) or that has more than ``max_result_opcodes``
-opcodes (4 million), because a pickle of 256 MiB made of one-byte "empty list" opcodes would
-otherwise build about 20 GiB in the server. It accepts only the opcodes protocol 5 writes for a
-result, so a memo index named in the stream (nine bytes of ``LONG_BINPUT`` would grow the memo
-table to gigabytes) is refused rather than charged. The child
-gets a reduced environment (:data:`CHILD_ENV`), without API keys or other secrets.
+child gets a reduced environment (:data:`CHILD_ENV`), without API keys or other secrets.
+
+**The result is JSON, never a pickle.** A child that a hostile file took over controls every byte of
+its answer, so the server decodes nothing that can run code or name a type: the child writes the
+result as ASCII JSON (:func:`~vault.jobs.sandbox_child.encode`: ``None``, booleans, integers, finite
+floats, strings, bytes as ``{"$bytes": "<base64>"}``, lists and tuples as arrays, and dataclass
+instances as objects of their fields), and the server parses it with the standard library's ``json``
+and then builds the value the entry point declares (:attr:`EntryPoint.result_type`, a type checked
+when the entry point is defined) with an explicit converter that accepts only that type's shape: a
+declared dataclass is built from an object with exactly its field names, and nothing in the answer
+chooses a class or a function. Before parsing, the server bounds what the answer can cost, from its
+bytes alone: every JSON value but the outermost follows a ``[``, ``{``, ``,`` or ``:``, so their
+count bounds the values ``json`` builds; an answer that could cost more than
+``max_result_memory_bytes`` (1 GiB by default) or hold more than ``max_result_values`` (4 million)
+values is refused unparsed, because 256 MiB of ``[],`` would otherwise build about 6 GiB in the
+server. Nesting is bounded by :data:`~vault.jobs.sandbox_child.MAX_DEPTH`, integers by their number
+of digits, and ``NaN``, ``Infinity`` and repeated keys are refused.
 
 **Memory cap.** On Windows the child is put in a Job Object with a process and a job memory limit
 (committed memory) and kill-on-close: when the server process ends for any reason, Windows closes
@@ -61,11 +67,11 @@ than they use), so the same number is stricter on Linux; the Linux path is for d
 CI, the product runs on Windows. An allocation that fails raises ``MemoryError`` in the child on
 both systems, and the child reports it as :class:`SandboxMemoryLimitError` at every step that grows
 with the input or the result: reading the input (into one ``bytes`` of the length given on its
-command line, so it is held once), importing and running the target, pickling the result and
+command line, so it is held once), importing and running the target, encoding the result and
 writing the answer. A library that aborts instead shows up as :class:`SandboxCrashError`. The
 parent passes the input as a view and reads the answer into one buffer bounded by
-``max_result_bytes``, unpickling from a view of it, so neither is copied again. Other systems are
-not supported (:class:`SandboxUnavailableError`).
+``max_result_bytes``, decoding its text from a view of it, so the buffer is not copied first.
+Other systems are not supported (:class:`SandboxUnavailableError`).
 
 **Timeout.** The timeout covers the whole run, the child's start included. On expiry the parent
 ends the child's whole process group (Linux, ``start_new_session``) or job (Windows), then reaps
@@ -80,20 +86,23 @@ nothing; the worker logs the job's outcome.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import dataclasses
+import json
 import os
-import pickle
-import pickletools
-import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import types
+import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import IO, TYPE_CHECKING, Final, cast
+from typing import IO, TYPE_CHECKING, Final
 
 from vault.jobs import sandbox_child as child
 
@@ -103,65 +112,33 @@ if TYPE_CHECKING:
 MIB: Final = 1024 * 1024
 MIN_MEMORY_BYTES: Final = 64 * MIB  # the child's interpreter alone takes most of this on Linux
 DEFAULT_MAX_RESULT_BYTES: Final = 256 * MIB
-# What the server may spend to unpickle one answer, and how many pickle opcodes it reads to judge
-# that first (see _check_expansion): far above a real extraction, whose answer is a few large
-# strings, and far below what a hostile answer of 256 MiB of one-byte opcodes would build.
+# What the server may spend to decode one answer, and how many JSON values the answer may hold
+# (see _answer_cost): far above a real extraction, whose answer is a few large strings, and far
+# below what a hostile answer of 256 MiB of ``[],`` would build (about 6 GiB).
 DEFAULT_MAX_RESULT_MEMORY_BYTES: Final = 4 * DEFAULT_MAX_RESULT_BYTES
-DEFAULT_MAX_RESULT_OPCODES: Final = 4_000_000
-# Bytes the unpickler can allocate for one opcode besides the bytes of its argument, measured on
-# CPython 3.12 with tracemalloc and rounded up: an empty set 241, a dict 89, a list 80 (the parent
-# list's growth and a memo entry included), so 256 for the opcodes that make a set and 128 for any
-# other opcode.
-_SET_OPCODE_BYTES: Final = 256
-_OPCODE_BYTES: Final = 128
-_SET_OPCODES: Final = frozenset({"EMPTY_SET", "FROZENSET"})
-# A mark is one slot in the unpickler's array of marks, which doubles as it grows
-# (``load_mark`` in CPython's ``_pickle.c``): at most 16 bytes a mark once the array is grown.
-_MARK_BYTES: Final = 16
-# What one load costs before any opcode: the unpickler's own tables, measured at under 2 KiB.
+DEFAULT_MAX_RESULT_VALUES: Final = 4_000_000
+# What decoding can allocate for each byte of the answer: the answer as text (1), the strings json
+# builds from it (up to 4: one escaped character outside the Basic Multilingual Plane makes every
+# character of its string four bytes wide) and the bytes decoded from base64 together with the
+# ASCII copy ``b64decode`` makes of its string first (2).
+_ANSWER_BYTE_COST: Final = 7
+# What decoding can allocate for each JSON value besides the bytes of its text: the object json
+# builds (an empty list 56 bytes, a one-key dict 184), its slot in the list or dict around it, the
+# scanner's memo entry for a key, the list of pairs ``object_pairs_hook`` receives, and the object
+# the converter builds from it (a tuple, a dataclass instance). Measured with tracemalloc on
+# CPython 3.12 at under 110 bytes for every shape and rounded up; tests compare it with the real
+# peak for each shape.
+_VALUE_COST: Final = 256
+# What one decode costs before any value: the decoder's own objects.
 _LOAD_BYTES: Final = 16 * 1024
-# Opcodes that make nothing.
-_FREE_OPCODES: Final = frozenset({"STOP", "PROTO", "FRAME", "POP", "POP_MARK"})
-# The opcodes the child's pickler writes at ``child.PICKLE_PROTOCOL`` (5) for the values a result
-# holds, and no others: an answer with any other opcode is refused before it is unpickled. This
-# is what bounds the memo. Protocol 5 memoizes with ``MEMOIZE``, whose index is the memo's own
-# length, so the table grows with the number of entries already charged; ``PUT``, ``BINPUT`` and
-# ``LONG_BINPUT`` name an index of their own, and the unpickler grows its table to that index
-# (``_Unpickler_MemoPut``: ``memo_size`` doubles past ``idx``), so nine bytes would allocate
-# gigabytes. Also left out: the text opcodes of protocol 0 (each line is read once more as
-# text), ``DUP``, the extension registry (``EXT1``, ``EXT2``, ``EXT4``), persistent ids and the
-# out-of-band buffer opcodes, none of which the pickler writes for a result. A test pickles
-# every kind of value a result holds and checks that its opcodes are in this set.
-_RESULT_OPCODES: Final = frozenset(
-    {
-        "PROTO", "FRAME", "STOP", "MARK", "POP", "POP_MARK",
-        "MEMOIZE", "BINGET", "LONG_BINGET",
-        "NONE", "NEWTRUE", "NEWFALSE", "BININT", "BININT1", "BININT2", "LONG1", "LONG4",
-        "BINFLOAT",
-        "SHORT_BINBYTES", "BINBYTES", "BINBYTES8", "BYTEARRAY8",
-        "SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8",
-        "EMPTY_TUPLE", "TUPLE1", "TUPLE2", "TUPLE3", "TUPLE",
-        "EMPTY_LIST", "APPEND", "APPENDS", "EMPTY_DICT", "SETITEM", "SETITEMS",
-        "EMPTY_SET", "ADDITEMS", "FROZENSET",
-        "STACK_GLOBAL", "REDUCE", "NEWOBJ", "NEWOBJ_EX", "BUILD",
-    }
-)  # fmt: skip
-# Every kind of argument a pickle opcode has (``pickletools.ArgumentDescriptor.name``), and the
-# types ``pickletools.genops`` decodes them to: numbers, strings, bytes and bytearrays, each
-# charged its size as Python holds it. An opcode with an argument of any other kind, or one decoded
-# to any other type, is refused, so an opcode a later Python adds cannot go uncharged; a test ties
-# this list to ``pickletools.opcodes``.
-_ARGUMENT_KINDS: Final = frozenset(
-    {
-        "uint1", "uint2", "int4", "uint4", "uint8", "long1", "long4",
-        "decimalnl_short", "decimalnl_long", "floatnl", "float8",
-        "string1", "string4", "stringnl", "stringnl_noescape", "stringnl_noescape_pair",
-        "unicodestring1", "unicodestring4", "unicodestring8", "unicodestringnl",
-        "bytes1", "bytes4", "bytes8", "bytearray8",
-    }
-)  # fmt: skip
-_ARGUMENT_TYPES: Final = (int, float, str, bytes, bytearray)
-RESULT_TYPE: Final = re.compile(r"vault(?:\.[a-z_][a-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*")
+# Every JSON value but the outermost follows one of these bytes (an array's first item, an
+# object's first key, every later item or key, every key's value), also in an answer that is not
+# valid JSON, as far as json reads it; so their count plus one bounds the values json builds. The
+# same bytes inside strings are counted too, which only errs on the safe side.
+_VALUE_MARKS: Final = (b"[", b"{", b",", b":")
+# The longest integer literal accepted, sign included: every 64-bit integer fits. A longer one is
+# refused before ``int()`` reads it.
+_MAX_INT_CHARACTERS: Final = 20
 SUPPORTED_PLATFORMS: Final = frozenset({"win32", "linux"})
 # The variables a Python child needs to start and find its temporary folder; nothing else of the
 # server's environment (API keys among it) is passed on.
@@ -239,26 +216,171 @@ class SandboxResultError(SandboxError):
     message = "the sandboxed call's result could not be passed back"
 
 
+class _MismatchError(Exception):
+    """The answer does not have the declared type's shape."""
+
+
+class _Node:
+    """One part of a declared result type: builds that part's value from what json parsed."""
+
+    def build(self, value: object, depth: int) -> object:
+        raise NotImplementedError
+
+
+def _enter(depth: int) -> int:
+    """The depth of a container's items; refuses past ``MAX_DEPTH``, as the child does."""
+    if depth >= child.MAX_DEPTH:
+        raise _MismatchError
+    return depth + 1
+
+
+class _Exact(_Node):
+    """``None``, ``bool``, ``int``, ``float`` or ``str``: json built it; only its type is checked
+    (exactly, so ``True`` is not an ``int`` and ``1`` is not a ``float``)."""
+
+    def __init__(self, kind: type) -> None:
+        self.kind = kind
+
+    def build(self, value: object, depth: int) -> object:
+        if type(value) is not self.kind:
+            raise _MismatchError
+        return value
+
+
+class _Bytes(_Node):
+    """``bytes``: an object whose only key is ``$bytes``, holding strict base64."""
+
+    def build(self, value: object, depth: int) -> object:
+        if type(value) is not dict or len(value) != 1:
+            raise _MismatchError
+        text = value.get(child.BYTES_KEY)
+        if type(text) is not str:
+            raise _MismatchError
+        try:
+            return base64.b64decode(text, validate=True)
+        except (binascii.Error, ValueError):
+            raise _MismatchError from None
+
+
+class _Sequence(_Node):
+    """``list[X]`` or ``tuple[X, ...]``: an array whose every item is an ``X``."""
+
+    def __init__(self, item: _Node, *, as_tuple: bool) -> None:
+        self.item = item
+        self.as_tuple = as_tuple
+
+    def build(self, value: object, depth: int) -> object:
+        if type(value) is not list:
+            raise _MismatchError
+        inner = _enter(depth)
+        items = [self.item.build(item, inner) for item in value]
+        return tuple(items) if self.as_tuple else items
+
+
+class _Tuple(_Node):
+    """``tuple[X, Y]``: an array of exactly that many items, each of its own type."""
+
+    def __init__(self, items: tuple[_Node, ...]) -> None:
+        self.items = items
+
+    def build(self, value: object, depth: int) -> object:
+        if type(value) is not list or len(value) != len(self.items):
+            raise _MismatchError
+        inner = _enter(depth)
+        return tuple(node.build(item, inner) for node, item in zip(self.items, value, strict=True))
+
+
+class _Optional(_Node):
+    """``X | None``: ``null``, or an ``X``."""
+
+    def __init__(self, inner: _Node) -> None:
+        self.inner = inner
+
+    def build(self, value: object, depth: int) -> object:
+        return None if value is None else self.inner.build(value, depth)
+
+
+class _Dataclass(_Node):
+    """A declared dataclass: an object with exactly its field names, each of its field's type.
+
+    The class is the one the entry point declares, never one the answer names; it is built by
+    calling it with the fields as keywords, so its own checks (``__post_init__``) run too.
+    """
+
+    def __init__(self, cls: type) -> None:
+        self.cls = cls
+        self.fields: dict[str, _Node] = {}  # filled after creation, so a class can hold itself
+
+    def build(self, value: object, depth: int) -> object:
+        if type(value) is not dict or value.keys() != self.fields.keys():
+            raise _MismatchError
+        inner = _enter(depth)
+        built = {name: node.build(value[name], inner) for name, node in self.fields.items()}
+        return self.cls(**built)
+
+
+_RESULT_TYPE_RULE: Final = (
+    "a result type is None, bool, int, float, str, bytes, list[X], tuple[X, ...], tuple[X, Y], "
+    "X | None, or a dataclass whose fields are all initialised and of these types"
+)
+
+
+def _compile_result_type(form: object, classes: dict[type, _Dataclass] | None = None) -> _Node:
+    """The converter for a declared result type, or ``ValueError`` if it is not one the sandbox
+    can bring back. Only the forms in ``_RESULT_TYPE_RULE`` are accepted: no ``dict``, ``set``,
+    ``Any``, ``object``, other unions, a class that is not a dataclass, a dataclass instance, a
+    function or a name in a string."""
+    classes = {} if classes is None else classes
+    if form is None or form is type(None):
+        return _Exact(type(None))
+    if any(form is kind for kind in (bool, int, float, str)):
+        return _Exact(typing.cast("type", form))
+    if form is bytes:
+        return _Bytes()
+    origin, args = typing.get_origin(form), typing.get_args(form)
+    if origin is list and len(args) == 1:
+        return _Sequence(_compile_result_type(args[0], classes), as_tuple=False)
+    if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
+        return _Sequence(_compile_result_type(args[0], classes), as_tuple=True)
+    if origin is tuple and all(arg is not Ellipsis for arg in args):
+        return _Tuple(tuple(_compile_result_type(arg, classes) for arg in args))
+    if origin in (types.UnionType, typing.Union) and len(args) == 2 and type(None) in args:
+        (other,) = (arg for arg in args if arg is not type(None))
+        return _Optional(_compile_result_type(other, classes))
+    if origin is None and isinstance(form, type) and dataclasses.is_dataclass(form):
+        if form in classes:
+            return classes[form]
+        node = classes[form] = _Dataclass(form)
+        try:
+            hints = typing.get_type_hints(form)
+        except Exception:
+            raise ValueError(_RESULT_TYPE_RULE) from None
+        for item in dataclasses.fields(form):
+            if not item.init:
+                raise ValueError(_RESULT_TYPE_RULE)
+            node.fields[item.name] = _compile_result_type(hints[item.name], classes)
+        return node
+    raise ValueError(_RESULT_TYPE_RULE)
+
+
 @dataclass(frozen=True)
 class EntryPoint:
     """A function the sandbox may run: ``vault.module:function``, top-level in its module.
 
-    ``result_types`` lists the classes (``vault.module:Class``) its result may contain besides
-    plain values; the unpickler resolves no other global name.
+    ``result_type`` is the type the function returns, as a type object (``str``, ``list[Page]``,
+    a dataclass): checked here, when the entry point is defined, against ``_RESULT_TYPE_RULE``.
+    The server builds only that type from the child's answer.
     """
 
     target: str
-    result_types: frozenset[str] = field(default_factory=frozenset)
+    result_type: object
+    _decoder: _Node = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not child.TARGET.fullmatch(self.target):
             msg = "an entry point is a top-level function of a vault module (vault.x:function)"
             raise ValueError(msg)
-        if not isinstance(self.result_types, frozenset) or not all(
-            isinstance(name, str) and RESULT_TYPE.fullmatch(name) for name in self.result_types
-        ):
-            msg = "result types are classes of vault modules (vault.x:Class)"
-            raise ValueError(msg)
+        object.__setattr__(self, "_decoder", _compile_result_type(self.result_type))
 
 
 # The extractors register their entry points here when the extraction stage is wired in.
@@ -271,7 +393,7 @@ class SandboxLimits:
     memory_bytes: int
     max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES
     max_result_memory_bytes: int = DEFAULT_MAX_RESULT_MEMORY_BYTES
-    max_result_opcodes: int = DEFAULT_MAX_RESULT_OPCODES
+    max_result_values: int = DEFAULT_MAX_RESULT_VALUES
 
     def __post_init__(self) -> None:
         numbers = (
@@ -279,13 +401,13 @@ class SandboxLimits:
             self.memory_bytes,
             self.max_result_bytes,
             self.max_result_memory_bytes,
-            self.max_result_opcodes,
+            self.max_result_values,
         )
         if any(isinstance(n, bool) or not isinstance(n, int | float) for n in numbers):
             msg = "sandbox limits are numbers"
             raise TypeError(msg)
         if not all(isinstance(n, int) for n in numbers[1:]):
-            msg = "sandbox byte and opcode limits are whole numbers"
+            msg = "sandbox byte and value limits are whole numbers"
             raise TypeError(msg)
         if not 0 < self.timeout_seconds < float("inf"):
             msg = "the sandbox timeout must be a positive, finite number of seconds"
@@ -293,8 +415,8 @@ class SandboxLimits:
         if self.memory_bytes < MIN_MEMORY_BYTES or self.max_result_bytes < 1:
             msg = f"the sandbox memory cap must be at least {MIN_MEMORY_BYTES // MIB} MiB"
             raise ValueError(msg)
-        if self.max_result_memory_bytes < 1 or self.max_result_opcodes < 1:
-            msg = "the limits on unpickling a result must be positive"
+        if self.max_result_memory_bytes < 1 or self.max_result_values < 1:
+            msg = "the limits on decoding a result must be positive"
             raise ValueError(msg)
 
     @classmethod
@@ -306,119 +428,66 @@ class SandboxLimits:
         )
 
 
-class _ResultUnpickler(pickle.Unpickler):
-    """Resolves only the classes an entry point lists; plain values need no global lookup."""
+def _answer_cost(answer: bytes | bytearray) -> tuple[int, int]:
+    """What decoding the answer's payload (after its status byte) can cost the server at most, in
+    bytes, and how many JSON values it can hold at most, read from its bytes without parsing them.
 
-    def __init__(self, file: _ViewReader, allowed: frozenset[str]) -> None:
-        super().__init__(file)
-        self._allowed = allowed
-
-    def find_class(self, module: str, name: str, /) -> object:
-        if f"{module}:{name}" not in self._allowed:
-            msg = "the result holds a type this entry point does not allow"
-            raise pickle.UnpicklingError(msg)
-        return super().find_class(module, name)
+    ``bytes.count`` scans the buffer in place, so judging a hostile answer of the largest size
+    allocates nothing and takes a fraction of a second.
+    """
+    values = 1 + sum(answer.count(mark, 1) for mark in _VALUE_MARKS)
+    length = max(len(answer) - 1, 0)
+    return _LOAD_BYTES + _ANSWER_BYTE_COST * length + _VALUE_COST * values, values
 
 
-class _ViewReader:
-    """The file interface the unpickler reads from, over a view: ``io.BytesIO`` would copy it."""
-
-    def __init__(self, view: memoryview) -> None:
-        self._view = view
-        self._position = 0
-
-    def read(self, size: int = -1) -> bytes:
-        end = len(self._view) if size < 0 else min(len(self._view), self._position + size)
-        chunk = bytes(self._view[self._position : end])
-        self._position = end
-        return chunk
-
-    def readinto(self, buffer: memoryview) -> int:
-        target = memoryview(buffer).cast("B")
-        chunk = self._view[self._position : self._position + len(target)]
-        target[: len(chunk)] = chunk
-        self._position += len(chunk)
-        return len(chunk)
-
-    def readline(self) -> bytes:
-        """Up to and including the next newline (old pickle protocols have text lines)."""
-        start = scan = self._position
-        while scan < len(self._view):
-            found = bytes(self._view[scan : scan + 4096]).find(b"\n")
-            if found >= 0:
-                return self.read(scan + found + 1 - start)
-            scan += 4096
-        return self.read()
+def _parse_int(text: str) -> int:
+    if len(text) > _MAX_INT_CHARACTERS:
+        raise _MismatchError
+    return int(text)
 
 
-def _check_expansion(payload: memoryview, max_memory: int, max_opcodes: int) -> int:
-    """Refuse an answer whose unpickling would cost the server more than ``max_memory`` bytes.
+def _refuse_constant(text: str) -> object:
+    raise _MismatchError  # NaN, Infinity, -Infinity: the child refuses to write them
 
-    The answer's size is capped, but a pickle is a program that builds objects, and one byte can
-    build an empty list of 80 bytes: 256 MiB of such opcodes would build gigabytes in the server,
-    which the sandbox exists to protect. So the opcodes are read first, without building anything
-    (``pickletools.genops``, over the same view, so the answer is not copied), and every
-    allocation the unpickler makes from a value in the stream is bounded here:
 
-    - only the opcodes in ``_RESULT_OPCODES`` are accepted, and the first must be ``PROTO`` 5,
-      the protocol the child writes; so the memo grows only by ``MEMOIZE``, one entry per opcode
-      charged, and never to an index the stream names;
-    - each object an opcode makes is charged ``_OPCODE_BYTES`` (``_SET_OPCODE_BYTES`` for a set),
-      which covers the growth of the list, dict or memo it goes into, plus its decoded argument
-      as Python holds it (an argument of a kind ``_ARGUMENT_KINDS`` does not list is refused);
-    - each ``MARK`` is charged its slot in the array of marks (``_MARK_BYTES``);
-    - the load is charged ``_LOAD_BYTES`` and the answer's length once more, for the bytes the
-      unpickler reads out of the view before decoding a string or a frame.
-
-    A length a ``BINBYTES``, ``BINUNICODE`` or ``FRAME`` opcode declares is never allocated
-    unread: genops reads the data whole, so a length longer than the answer is refused here, and
-    the unpickler's reader copies only bytes that exist. The read stops at the first opcode past
-    ``max_opcodes`` or the first byte past ``max_memory``, so judging a hostile answer costs a
-    bounded time too. Objects the unpickler would share (memo lookups) are charged as if new,
-    which only errs on the safe side. No global is resolved here; the unpickler still checks
-    every class it is asked for. Returns the bytes charged."""
-    charged = _LOAD_BYTES + len(payload)
-    if charged > max_memory:
-        raise SandboxResultError
-    for count, (opcode, argument, _position) in enumerate(
-        # genops calls only read and readline (and tell, which the reader has not got).
-        pickletools.genops(cast("IO[bytes]", _ViewReader(payload))),
-        start=1,
-    ):
-        if count > max_opcodes or opcode.name not in _RESULT_OPCODES:
-            raise SandboxResultError
-        if count == 1 and (opcode.name != "PROTO" or argument != child.PICKLE_PROTOCOL):
-            raise SandboxResultError
-        if opcode.name in _FREE_OPCODES:
-            continue
-        if opcode.name == "MARK":
-            charged += _MARK_BYTES
-        elif opcode.name in _SET_OPCODES:
-            charged += _SET_OPCODE_BYTES
-        else:
-            charged += _OPCODE_BYTES
-        if opcode.arg is not None:
-            if opcode.arg.name not in _ARGUMENT_KINDS or not isinstance(argument, _ARGUMENT_TYPES):
-                raise SandboxResultError
-            charged += sys.getsizeof(argument)
-        if charged > max_memory:
-            raise SandboxResultError
-    return charged
+def _object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """A JSON object as a dict, refused if a key repeats (json would keep the last silently)."""
+    built = dict(pairs)
+    if len(built) != len(pairs):
+        raise _MismatchError
+    return built
 
 
 def _load_result(
-    payload: memoryview,
-    allowed: frozenset[str],
+    answer: bytes | bytearray,
+    decoder: _Node,
     max_memory: int = DEFAULT_MAX_RESULT_MEMORY_BYTES,
-    max_opcodes: int = DEFAULT_MAX_RESULT_OPCODES,
+    max_values: int = DEFAULT_MAX_RESULT_VALUES,
 ) -> object:
-    """Unpickle the result, once :func:`_check_expansion` has shown that building it fits the
-    server's budget. A failure, an answer over the budget or running out of the server's memory
-    included, is a :class:`SandboxResultError`; the answer itself is already bounded by
-    ``max_result_bytes``."""
+    """Decode the payload after the status byte into the declared result type.
+
+    Refused unparsed when :func:`_answer_cost` says it could cost more than ``max_memory`` bytes
+    or hold more than ``max_values`` values. Then the payload is read as ASCII (the child escapes
+    everything else) from a view of the buffer, parsed by the standard library's ``json`` with
+    ``NaN``, ``Infinity``, repeated keys and integers longer than ``_MAX_INT_CHARACTERS`` refused,
+    and built by the entry point's converter, which accepts only the declared type's shape and
+    nesting up to ``MAX_DEPTH``. json's own nesting is bounded by CPython's recursion limit, which
+    raises ``RecursionError``. Any failure, running out of the server's memory included, is a
+    :class:`SandboxResultError`; the answer itself is already bounded by ``max_result_bytes``.
+    """
     try:
-        _check_expansion(payload, max_memory, max_opcodes)
-        return _ResultUnpickler(_ViewReader(payload), allowed).load()
+        cost, values = _answer_cost(answer)
+        if cost > max_memory or values > max_values:
+            raise SandboxResultError
+        text = str(memoryview(answer)[1:], "ascii")
+        parsed = json.loads(
+            text,
+            parse_int=_parse_int,
+            parse_constant=_refuse_constant,
+            object_pairs_hook=_object,
+        )
+        del text
+        return decoder.build(parsed, 0)
     except Exception:
         raise SandboxResultError from None
 
@@ -462,23 +531,22 @@ def run(
         raise SandboxCrashError(exit_code)
     return _interpret(
         answer,
-        point.result_types,
+        point._decoder,
         max_memory=limits.max_result_memory_bytes,
-        max_opcodes=limits.max_result_opcodes,
+        max_values=limits.max_result_values,
     )
 
 
 def _interpret(
     answer: bytes | bytearray,
-    allowed: frozenset[str],
+    decoder: _Node,
     *,
     max_memory: int = DEFAULT_MAX_RESULT_MEMORY_BYTES,
-    max_opcodes: int = DEFAULT_MAX_RESULT_OPCODES,
+    max_values: int = DEFAULT_MAX_RESULT_VALUES,
 ) -> object:
-    # A view of the payload, so a result near the cap is not copied again before unpickling.
     status, payload = bytes(answer[:1]), memoryview(answer)[1:]
     if status == child.OK:
-        return _load_result(payload, allowed, max_memory, max_opcodes)
+        return _load_result(answer, decoder, max_memory, max_values)
     if status == child.ERROR:
         name = bytes(payload[:101]).decode("ascii", errors="replace")
         raise SandboxChildError(name if child.ERROR_NAME.fullmatch(name) else child.UNNAMED_ERROR)
@@ -486,7 +554,7 @@ def _interpret(
         raise SandboxResultError
     if status == child.MEMORY:
         raise SandboxMemoryLimitError
-    if status == child.UNPICKLABLE:
+    if status == child.UNENCODABLE:
         raise SandboxResultError
     if status == child.REFUSED:
         raise SandboxRefusedError

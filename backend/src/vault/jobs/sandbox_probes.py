@@ -24,6 +24,50 @@ class ProbeResult:
     head: bytes
 
 
+@dataclass(frozen=True)
+class ProbePage:
+    number: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeKinds:
+    """One field of every kind a result type may have."""
+
+    nothing: None
+    flag: bool
+    count: int
+    ratio: float
+    text: str
+    raw: bytes
+    pages: list[ProbePage]
+    sizes: tuple[int, ...]
+    pair: tuple[str, int]
+    maybe: int | None
+    missing: str | None
+    first: ProbePage | None
+
+
+def every_kind(data: bytes) -> ProbeKinds:
+    """The input as text and as bytes, in a result with a field of every kind."""
+    text = data.decode("utf-8")
+    pages = [ProbePage(number=n, text=line) for n, line in enumerate(text.splitlines(), start=1)]
+    return ProbeKinds(
+        nothing=None,
+        flag=True,
+        count=-(2**63),
+        ratio=0.1,
+        text=text,
+        raw=data,
+        pages=pages,
+        sizes=tuple(len(page.text) for page in pages),
+        pair=(text[:3], 2**63 - 1),
+        maybe=len(data),
+        missing=None,
+        first=pages[0] if pages else None,
+    )
+
+
 def echo(data: bytes) -> bytes:
     return data
 
@@ -93,7 +137,7 @@ def abort(data: bytes) -> None:  # pragma: no cover - runs in the child
     os.abort()
 
 
-def unpicklable(data: bytes) -> object:
+def unencodable(data: bytes) -> object:
     return lambda: data
 
 
@@ -102,7 +146,7 @@ def large(data: bytes) -> bytes:
 
 
 def many_lists(data: bytes) -> list[list[object]]:
-    """``int(data)`` empty lists: a small answer that builds many objects when it is unpickled."""
+    """``int(data)`` empty lists: a small answer that builds many objects when it is decoded."""
     return [[] for _ in range(int(data))]
 
 
