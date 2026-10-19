@@ -28,8 +28,9 @@ What the text holds:
   moved-out text is left out. A deleted paragraph mark still ends its paragraph.
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
   a box twice (a DrawingML shape and a VML copy for old readers, in ``mc:AlternateContent``), so
-  only the first ``mc:Choice`` is read and the ``mc:Fallback`` copy is not; a fallback is read
-  only when there is no choice. The same rule applies wherever alternate content wraps a
+  one representation is read: the first ``mc:Choice`` whose ``Requires`` names only namespaces
+  this extractor understands (``UNDERSTOOD``: WordprocessingML and Word's shapes and shape
+  groups), or else the ``mc:Fallback``. The same rule applies wherever alternate content wraps a
   paragraph, a table, a row or a cell.
 - Inside a paragraph, every element is read through unless ``EXCLUDED`` names it, so text inside a
   container is kept whatever the container: hyperlinks, smart tags, custom XML, inline content
@@ -58,14 +59,20 @@ style's name, which Word writes in English whatever the language of its interfac
 its paragraph's text, so ``text[start:end]`` is the heading as stored, and its title is that text
 with white space collapsed. A style that only looks like a heading, or is based on one, is not one.
 
+Content imported from another file (``w:altChunk``: HTML, RTF or another document kept as a
+separate part, which Word converts when it opens the file) is not read, so a file that holds any,
+in the body, a table cell, a content control or a text box, is refused (``ImportedContentError``)
+rather than reported as read without it.
+
 A Strict Open XML document (Word's "Strict Open XML Document" format, other namespaces) is refused
 rather than read as empty.
 
 DOCX has no reliable pages (Word lays them out when it renders), so the whole text is one page, as
 for text files. The section anchors in the text view come from the headings.
 
-Errors are ``NotDocxError`` with fixed text naming a reason, never the file's name or content, and
-without the library's exception attached, because a library message can quote a part of the file.
+Errors are ``NotDocxError`` or ``ImportedContentError`` with fixed text naming a reason, never the
+file's name or content, and without the library's exception attached, because a library message
+can quote a part of the file.
 """
 
 from __future__ import annotations
@@ -106,6 +113,18 @@ _ALTERNATE, _CHOICE, _FALLBACK = (
     f"{_MC}Choice",
     f"{_MC}Fallback",
 )
+_ALT_CHUNK: Final = qn("w:altChunk")
+# The namespaces an ``mc:Choice`` may require for this extractor to read it (Markup Compatibility,
+# ECMA-376 Part 3): WordprocessingML itself, and the Word 2010 shapes and shape groups that hold a
+# text box's ``w:txbxContent``. A choice that requires anything else is skipped, as the standard
+# asks of a consumer that does not understand it, and the next choice or the fallback is read.
+UNDERSTOOD: Final = frozenset(
+    {
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    }
+)
 # Inside a paragraph every element is read through unless it is named here, so text in a container
 # this module does not list (``w:smartTag``, ``w:hyperlink``, the base of ``w:ruby``, a wrapper a
 # later Word adds) is kept rather than lost. Each of these is left out on purpose (see the module
@@ -139,6 +158,16 @@ _OFF: Final = frozenset({"0", "false", "off"})
 _HEADING_LEVELS: Final = {"title": 1, **{f"heading {n}": n for n in range(1, 10)}}
 _LINE_BREAK: Final = re.compile(r"\r\n?")
 _CELL_SPACE: Final = re.compile(r"[\t\n]+")
+
+
+class ImportedContentError(ExtractionError):
+    """The DOCX shows content imported from another file (``w:altChunk``: HTML, RTF or another
+    document, stored as a separate part that Word converts when it opens the file). This extractor
+    does not read those parts, and a text without them would be incomplete, so the file is refused
+    rather than reported as read."""
+
+    def __init__(self) -> None:
+        super().__init__("The DOCX holds content imported from another file, which is not read.")
 
 
 class NotDocxError(ExtractionError):
@@ -257,6 +286,8 @@ def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[Bas
     for child in container.iterchildren():
         if child.tag in wanted:
             yield child
+        elif child.tag == _ALT_CHUNK:
+            raise ImportedContentError
         elif child.tag == _SDT:
             content = child.find(_SDT_CONTENT)
             if content is not None:
@@ -270,14 +301,25 @@ def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[Bas
 
 
 def _selected(alternate: BaseOxmlElement) -> BaseOxmlElement | None:
-    """The one representation of ``mc:AlternateContent`` that is read: the first ``mc:Choice``,
-    or the ``mc:Fallback`` when there is no choice. Word writes some content twice (a text box
-    as DrawingML and again as VML for old readers), so reading more than one would double it."""
-    choice: BaseOxmlElement | None = alternate.find(_CHOICE)
-    if choice is not None:
-        return choice
+    """The one representation of ``mc:AlternateContent`` that is read: the first ``mc:Choice``
+    whose ``Requires`` names only namespaces in ``UNDERSTOOD``, or else the ``mc:Fallback``, or
+    else nothing. Word writes some content twice (a text box as DrawingML and again as VML for old
+    readers), so reading more than one would double it."""
+    choice: BaseOxmlElement
+    for choice in alternate.iterchildren(_CHOICE):
+        if _understood(choice):
+            return choice
     fallback: BaseOxmlElement | None = alternate.find(_FALLBACK)
     return fallback
+
+
+def _understood(choice: BaseOxmlElement) -> bool:
+    """Whether every prefix in the choice's ``Requires`` (a list separated by white space, which
+    the standard says must not be empty) names an understood namespace in scope there. A prefix
+    with no namespace in scope makes the choice one this extractor cannot read."""
+    prefixes = (choice.get("Requires") or "").split()
+    in_scope = choice.nsmap
+    return bool(prefixes) and all(in_scope.get(prefix) in UNDERSTOOD for prefix in prefixes)
 
 
 def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
@@ -333,9 +375,11 @@ class _Inline:
                 self._field(child.get(_FLD_CHAR_TYPE))
             elif tag == _TXBX_CONTENT:
                 self.boxes.append(child)
+            elif tag == _ALT_CHUNK:  # block content, but refused wherever it is met
+                raise ImportedContentError
             elif tag == _ALTERNATE:
                 # Word writes some content twice (a text box as DrawingML and again as VML for old
-                # readers): the first choice is read and the fallback never is.
+                # readers): one representation is read, never both.
                 chosen = _selected(child)
                 if chosen is not None:
                     self.walk(chosen)

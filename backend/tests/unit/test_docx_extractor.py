@@ -523,7 +523,7 @@ def test_alternate_content_in_a_paragraph_is_read_from_the_first_choice_only() -
     def fill(document: DocumentObject) -> None:
         add_xml(
             document,
-            f'<w:p {W} {MC}><mc:AlternateContent><mc:Choice Requires="w14">'
+            f'<w:p {W} {MC}><mc:AlternateContent><mc:Choice Requires="w">'
             f"<w:r><w:t>new form</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>{CANARY}</w:t>"
             "</w:r></mc:Fallback></mc:AlternateContent></w:p>",
         )
@@ -542,9 +542,115 @@ def test_alternate_content_with_only_a_fallback_reads_the_fallback() -> None:
     assert text_of(build(fill)) == "only form"
 
 
+W14 = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+
+
+@pytest.mark.parametrize(
+    ("choices", "expected"),
+    [
+        pytest.param(
+            [("w14", CANARY), ("wps", "understood")], "understood", id="next choice understood"
+        ),
+        pytest.param([("w14", CANARY)], "fallback", id="none understood, fallback read"),
+        pytest.param([("w wps", "both known")], "both known", id="every prefix understood"),
+        pytest.param([("w w14", CANARY)], "fallback", id="one prefix not understood"),
+        pytest.param([("nowhere", CANARY)], "fallback", id="prefix not in scope"),
+        pytest.param([("x", CANARY)], "fallback", id="namespace of another kind"),
+        pytest.param([("", CANARY)], "fallback", id="nothing required"),
+        pytest.param([(None, CANARY)], "fallback", id="no Requires"),
+    ],
+)
+def test_a_choice_is_read_only_when_every_namespace_it_requires_is_understood(
+    choices: list[tuple[str | None, str]], expected: str
+) -> None:
+    def fill(document: DocumentObject) -> None:
+        options = "".join(
+            f"<mc:Choice{'' if requires is None else ' Requires=' + repr(requires)}>{run(text)}"
+            "</mc:Choice>"
+            for requires, text in choices
+        )
+        add_xml(
+            document,
+            f"<w:p {W} {MC} {WPS} {W14} {FUTURE}><mc:AlternateContent>{options}"
+            f"<mc:Fallback>{run('fallback')}</mc:Fallback></mc:AlternateContent></w:p>",
+        )
+
+    assert text_of(build(fill)) == expected
+
+
+def test_alternate_content_with_no_readable_choice_and_no_fallback_gives_nothing() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f'<w:p {W} {MC} {W14}>{run("[")}<mc:AlternateContent><mc:Choice Requires="w14">'
+            f"{run(CANARY)}</mc:Choice></mc:AlternateContent>{run(']')}</w:p>",
+        )
+
+    assert text_of(build(fill)) == "[]"
+
+
+ALT_CHUNK = '<w:altChunk r:id="rIdImported"/>'
+R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(f"<w:body {W} {R}>{ALT_CHUNK}</w:body>", id="body"),
+        pytest.param(
+            f"<w:body {W} {R}><w:tbl><w:tr><w:tc>{ALT_CHUNK}<w:p/></w:tc></w:tr></w:tbl></w:body>",
+            id="table cell",
+        ),
+        pytest.param(
+            f"<w:body {W} {R}><w:sdt><w:sdtContent>{ALT_CHUNK}</w:sdtContent></w:sdt></w:body>",
+            id="content control",
+        ),
+        pytest.param(
+            f'<w:body {W} {R}><w:customXml w:element="x">{ALT_CHUNK}</w:customXml></w:body>',
+            id="custom xml",
+        ),
+        pytest.param(
+            f'<w:body {W} {R} {MC}><mc:AlternateContent><mc:Choice Requires="w">{ALT_CHUNK}'
+            "</mc:Choice></mc:AlternateContent></w:body>",
+            id="alternate content",
+        ),
+        pytest.param(
+            f'<w:body {W} {R} {MC} {WPS}><w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps">'
+            f"<w:drawing><wps:wsp><wps:txbx><w:txbxContent>{ALT_CHUNK}</w:txbxContent></wps:txbx>"
+            "</wps:wsp></w:drawing></mc:Choice></mc:AlternateContent></w:r></w:p></w:body>",
+            id="text box",
+        ),
+        pytest.param(f"<w:body {W} {R}><w:p>{ALT_CHUNK}</w:p></w:body>", id="inside a paragraph"),
+    ],
+)
+def test_content_imported_from_another_file_is_refused_wherever_it_is(block: str) -> None:
+    def fill(document: DocumentObject) -> None:
+        body = document.element.body
+        add_xml(document, f"<w:p {W}>{run(CANARY)}</w:p>")
+        for element in parse_xml(block):
+            body.insert(len(body) - 1, element)
+
+    with pytest.raises(extractor.ImportedContentError) as raised:
+        extract(build(fill))
+    assert isinstance(raised.value, ExtractionError)
+    assert CANARY not in str(raised.value)
+    assert "rIdImported" not in str(raised.value)
+
+
+def test_imported_content_in_a_representation_that_is_not_read_is_not_refused() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f'<w:p {W} {MC} {R}><mc:AlternateContent><mc:Choice Requires="w">{run("shown")}'
+            f"</mc:Choice><mc:Fallback>{ALT_CHUNK}</mc:Fallback></mc:AlternateContent></w:p>",
+        )
+
+    assert text_of(build(fill)) == "shown"
+
+
 def alternate(choice: str, fallback: str = "") -> str:
     tail = f"<mc:Fallback>{fallback}</mc:Fallback>" if fallback else ""
-    head = '<mc:AlternateContent><mc:Choice Requires="w14">'
+    head = '<mc:AlternateContent><mc:Choice Requires="w">'
     return f"{head}{choice}</mc:Choice>{tail}</mc:AlternateContent>"
 
 
@@ -615,13 +721,13 @@ INCLUDED_CONTAINERS = [
     ("bidirectional override", f'<w:bdo w:val="ltr">{run("ltr")}</w:bdo>', "ltr"),
     (
         "alternate content in a paragraph",
-        f'<mc:AlternateContent><mc:Choice Requires="w14">{run("choice")}</mc:Choice>'
+        f'<mc:AlternateContent><mc:Choice Requires="w">{run("choice")}</mc:Choice>'
         f"<mc:Fallback>{run(CANARY)}</mc:Fallback></mc:AlternateContent>",
         "choice",
     ),
     (
         "alternate content in a run",
-        f'<w:r><mc:AlternateContent><mc:Choice Requires="w14"><w:t>in run</w:t></mc:Choice>'
+        f'<w:r><mc:AlternateContent><mc:Choice Requires="w"><w:t>in run</w:t></mc:Choice>'
         f"<mc:Fallback><w:t>{CANARY}</w:t></mc:Fallback></mc:AlternateContent></w:r>",
         "in run",
     ),
@@ -725,7 +831,7 @@ def test_included_containers_nested_in_each_other_still_give_their_text() -> Non
         ('<w:moveTo w:id="2" w:author="A">', "</w:moveTo>"),
         ('<w:dir w:val="rtl">', "</w:dir>"),
         ('<w:bdo w:val="ltr">', "</w:bdo>"),
-        ('<mc:AlternateContent><mc:Choice Requires="w14">', "</mc:Choice></mc:AlternateContent>"),
+        ('<mc:AlternateContent><mc:Choice Requires="w">', "</mc:Choice></mc:AlternateContent>"),
         ("<x:later>", "</x:later>"),
     ]
     pairs = [(outer, inner) for outer in wrappers for inner in wrappers]
