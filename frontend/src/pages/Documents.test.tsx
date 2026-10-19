@@ -761,6 +761,152 @@ describe("trash and restore", () => {
   });
 });
 
+describe("retry failed steps", () => {
+  const failed = detail({ state: "failed" });
+  const queuedAgain = detail({
+    state: "processing",
+    jobs: [
+      {
+        stage: "extract",
+        status: "queued",
+        attempts: 0,
+        max_attempts: 3,
+        last_error: "ExtractionTimeout",
+        finished_at: null,
+      },
+    ],
+  });
+  const RETRY = "Retry failed steps";
+  const SERVER_TEXT = "Lease agreement.pdf: private server detail";
+
+  function retryingBackend(start: DocumentDetail, answer?: () => Response) {
+    let current = start;
+    return backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}` && request.method === "GET") {
+        return jsonResponse(current);
+      }
+      if (request.method === "POST" && url.pathname === `/api/documents/${ID}/retry`) {
+        current = queuedAgain;
+        return answer?.() ?? jsonResponse(current);
+      }
+      return undefined;
+    });
+  }
+
+  function retries(spy: ReturnType<typeof backend>): Request[] {
+    return spy.mock.calls
+      .map(([input]) => input as Request)
+      .filter((r) => r.method === "POST" && new URL(r.url).pathname.endsWith("/retry"));
+  }
+
+  it("queues the failed steps again and shows them queued", async () => {
+    const spy = retryingBackend(failed);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: RETRY }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Queued again");
+    expect(screen.getByText("Queued")).toBeInTheDocument();
+    // Neither the document's state nor its step says Failed any more.
+    expect(screen.queryByText("Failed")).toBeNull();
+    expect(screen.queryByRole("button", { name: RETRY })).toBeNull();
+    const [request] = retries(spy);
+    expect(request?.headers.get("authorization")).toBe(`Bearer ${TEST_TOKEN}`);
+    expect(retries(spy)).toHaveLength(1);
+  });
+
+  it.each([
+    ["nothing failed", detail({ jobs: queuedAgain.jobs })],
+    [
+      "the document is in the trash",
+      detail({ state: "trashed", trashed_at: "2026-10-05T09:30:00Z" }),
+    ],
+    [
+      "a later job replaced the failed one",
+      detail({
+        jobs: [
+          ...failed.jobs,
+          {
+            stage: "extract",
+            status: "done",
+            attempts: 1,
+            max_attempts: 3,
+            last_error: null,
+            finished_at: "2026-10-02T12:00:00Z",
+          },
+        ],
+      }),
+    ],
+  ])("is not offered when %s", async (_case, document) => {
+    const spy = retryingBackend(document);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    expect(await screen.findByText("Processing", { selector: "h3" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: RETRY })).toBeNull();
+  });
+
+  it.each([
+    ["a 409", 409, /Restore it first/],
+    ["a 404", 404, /There is no such document/],
+    ["a 422", 422, /Nothing was queued/],
+  ])("says the retry was refused after %s, with a fixed text", async (_case, status, text) => {
+    const spy = retryingBackend(failed, () => jsonResponse({ detail: SERVER_TEXT }, status));
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: RETRY }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Not retried");
+    expect(alert).toHaveTextContent(text);
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    expect(screen.getByRole("button", { name: RETRY })).toBeEnabled();
+  });
+
+  it.each([
+    ["a 500", () => jsonResponse({ detail: SERVER_TEXT }, 500)],
+    ["an answer for another document", () => jsonResponse({ ...queuedAgain, id: "C".repeat(26) })],
+    [
+      "a lost connection",
+      (): Response => {
+        throw new TypeError(SERVER_TEXT);
+      },
+    ],
+  ])("loads the document again after %s and shows it as it is", async (_case, answer) => {
+    const spy = retryingBackend(failed, answer);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    await userEvent.click(await screen.findByRole("button", { name: RETRY }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(MOVE_UNKNOWN_TEXT);
+    expect(screen.queryByText(new RegExp(SERVER_TEXT))).toBeNull();
+    expect(screen.getByText("Queued")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: RETRY })).toBeNull();
+  });
+
+  it("sends one request however often the button is clicked while it runs", async () => {
+    const answers: ((response: Response) => void)[] = [];
+    const spy = backend((request, url) => {
+      if (url.pathname === `/api/documents/${ID}/retry`) {
+        return new Promise<Response>((resolve) => answers.push(resolve));
+      }
+      return request.method === "GET" && url.pathname === `/api/documents/${ID}`
+        ? jsonResponse(failed)
+        : undefined;
+    });
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    const button = await screen.findByRole("button", { name: RETRY });
+    await userEvent.dblClick(button);
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(answers).toHaveLength(1);
+    });
+    expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move to trash" })).toBeDisabled();
+    expect(retries(spy)).toHaveLength(1);
+
+    answers[0]?.(jsonResponse(queuedAgain));
+    expect(await screen.findByRole("status")).toHaveTextContent("Queued again");
+    expect(retries(spy)).toHaveLength(1);
+  });
+});
+
 describe("permanent delete", () => {
   const inTrash = detail({ state: "trashed", trashed_at: "2026-10-05T09:30:00Z" });
   const SERVER_TEXT = "Lease agreement.pdf: private server detail";
