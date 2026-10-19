@@ -222,7 +222,7 @@ class DocumentDetail:
     version_no: int
     version_origin: str
     sources: tuple[SourceDetail, ...]  # oldest first; the first one names the document
-    jobs: tuple[JobDetail, ...]  # in the order of the pipeline's stages
+    jobs: tuple[JobDetail, ...]  # by the pipeline's stages, each oldest first by queue time
 
 
 def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
@@ -286,7 +286,12 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
             last_error=job.last_error,
             finished_at=None if job.finished_at is None else _utc(job.finished_at),
         )
-        for job in sorted(job_rows, key=lambda job: (stage_order[job.stage], job.id))
+        # Within a stage by the time it was queued, the id breaking a tie: the rule by which
+        # vault.jobs.queue.JobQueue.retry_document finds a stage's latest job. ULIDs made in the
+        # same millisecond sort at random, so the id alone could put an older job last.
+        for job in sorted(
+            job_rows, key=lambda job: (stage_order[job.stage], job.created_at, job.id)
+        )
     )
     return DocumentDetail(
         summary=summary,

@@ -28,12 +28,16 @@ import {
   MOVE_UNKNOWN_RELOAD_FAILED_TEXT,
   MOVE_UNKNOWN_TEXT,
   type MoveAction,
+  RETRY_ERROR_TEXT,
+  type RetryError,
   STATE_LABEL,
   deleteDocument,
   fileName,
   formatDate,
   formatSize,
   moveDocument,
+  retryDocument,
+  retryableJobs,
   saveOriginal,
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
@@ -135,6 +139,8 @@ type MoveOutcome =
   | { kind: "done"; action: MoveAction }
   | { kind: "refused"; action: MoveAction; error: DocumentsError }
   | { kind: "delete-refused"; error: DeleteError }
+  | { kind: "retried" }
+  | { kind: "retry-refused"; error: RetryError }
   | { kind: "unknown" }
   | { kind: "unknown-reload-failed"; error: DocumentsError };
 
@@ -152,18 +158,20 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
   const [document, setDocument] = useState(loaded);
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [confirming, setConfirming] = useState(false);
   // Set at once on a click, before React re-renders the disabled button, so a second click that
-  // arrives in between sends nothing. One flag for moves and deletes: only one runs at a time.
+  // arrives in between sends nothing. One flag for moves, deletes and retries: one at a time.
   const movingNow = useRef(false);
   const [outcome, setOutcome] = useState<MoveOutcome | null>(null);
   const trashed = document.state === "trashed";
   const navigate = useNavigate();
 
-  const settle = (next: MoveOutcome, error?: DeleteError) => {
+  const settle = (next: MoveOutcome, error?: DeleteError | RetryError) => {
     movingNow.current = false;
     setMoving(false);
     setDeleting(false);
+    setRetrying(false);
     setOutcome(next);
     if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
   };
@@ -228,6 +236,34 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
     });
   };
 
+  const retry = () => {
+    if (movingNow.current) return;
+    movingNow.current = true;
+    setRetrying(true);
+    setOutcome(null);
+    void retryDocument(api, document.id).then(async (result) => {
+      if (result.status === "ok") {
+        setDocument(result.document);
+        settle({ kind: "retried" });
+        return;
+      }
+      if (result.status === "error") {
+        settle({ kind: "retry-refused", error: result.error }, result.error);
+        return;
+      }
+      // The steps may have been queued: show the document as the backend now has it. Pressing
+      // Retry again is safe either way, as the same work is queued once.
+      const reloaded = await loadDocument(api, document.id);
+      if (reloaded.status === "ok") {
+        setDocument(reloaded.data);
+        settle({ kind: "unknown" });
+      } else {
+        settle({ kind: "unknown-reload-failed", error: reloaded.error }, reloaded.error);
+      }
+    });
+  };
+  const canRetry = !trashed && retryableJobs(document).length > 0;
+
   const download = () => {
     setSaving(true);
     setSaveError(null);
@@ -277,6 +313,7 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
                 move("trash");
               }}
               loading={moving}
+              disabled={retrying}
             >
               Move to trash
             </Button>
@@ -331,6 +368,16 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
       {outcome?.kind === "delete-refused" && (
         <Alert color="red" title="Not deleted">
           {DELETE_ERROR_TEXT[outcome.error]}
+        </Alert>
+      )}
+      {outcome?.kind === "retried" && (
+        <Alert color="green" title="Queued again" role="status">
+          The failed steps will run again with all their attempts.
+        </Alert>
+      )}
+      {outcome?.kind === "retry-refused" && (
+        <Alert color="red" title="Not retried">
+          {RETRY_ERROR_TEXT[outcome.error]}
         </Alert>
       )}
       {outcome?.kind === "unknown" && (
@@ -407,7 +454,14 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
         </Table>
       </Table.ScrollContainer>
 
-      <Title order={3}>Processing</Title>
+      <Group justify="space-between" align="center">
+        <Title order={3}>Processing</Title>
+        {canRetry && (
+          <Button variant="light" onClick={retry} loading={retrying} disabled={moving}>
+            Retry failed steps
+          </Button>
+        )}
+      </Group>
       {document.jobs.length === 0 ? (
         <Text size="sm" c="dimmed">
           No processing steps yet.
@@ -424,8 +478,9 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {document.jobs.map((job) => (
-                <Table.Tr key={job.stage}>
+              {document.jobs.map((job, index) => (
+                // A step can have several jobs (an earlier version's, or one a later job replaced).
+                <Table.Tr key={`${job.stage}:${String(index)}`}>
                   <Table.Td>{STAGE_LABEL[job.stage]}</Table.Td>
                   <Table.Td>
                     {JOB_LABEL[job.status]}
