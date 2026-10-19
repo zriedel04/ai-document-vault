@@ -7,7 +7,12 @@ The pause lasts until a resume or until the server stops: the pool starts unpaus
 Both run in a worker thread, because a pause waits for claims in progress, which can wait on
 SQLite's busy timeout, and that must not hold the event loop.
 
-The answer holds a flag and counts only. Nothing here logs; the pool logs its own pause and
+A pause or resume answers with the flag alone (``ProcessingState``) and reads nothing after the
+change: an answer that also read the counts could fail after the pool had changed, and an error
+would then report as not done what was done. So an error from either means the pool was not
+changed, and the counts come from ``GET /api/processing``.
+
+The answers hold a flag and counts only. Nothing here logs; the pool logs its own pause and
 resume as fixed events.
 """
 
@@ -37,6 +42,12 @@ class StageJobs(BaseModel):
     running: int
     done: int
     failed: int
+
+
+class ProcessingState(BaseModel):
+    """Whether the pool takes new jobs, as a pause or resume left it."""
+
+    paused: bool
 
 
 class ProcessingStatus(BaseModel):
@@ -82,19 +93,19 @@ async def read_processing(
 @router.post("/processing/pause")
 async def pause_processing(
     request: Request, _user: Annotated[LocalUser, Depends(current_user)]
-) -> ProcessingStatus:
+) -> ProcessingState:
     """Stop taking new jobs. Running jobs finish; once this answers, no new job starts until a
     resume or a restart of the server. Pausing twice is the same as once."""
-    engine, workers = _vault(request)
+    _engine, workers = _vault(request)
     await run_in_threadpool(workers.pause)
-    return await run_in_threadpool(_status, engine, workers)
+    return ProcessingState(paused=workers.paused)
 
 
 @router.post("/processing/resume")
 async def resume_processing(
     request: Request, _user: Annotated[LocalUser, Depends(current_user)]
-) -> ProcessingStatus:
+) -> ProcessingState:
     """Take new jobs again. Resuming when not paused changes nothing."""
-    engine, workers = _vault(request)
+    _engine, workers = _vault(request)
     await run_in_threadpool(workers.resume)
-    return await run_in_threadpool(_status, engine, workers)
+    return ProcessingState(paused=workers.paused)

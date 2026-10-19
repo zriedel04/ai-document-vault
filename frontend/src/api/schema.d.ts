@@ -498,6 +498,14 @@ export interface components {
             /** Text */
             text: string;
         };
+        /**
+         * ProcessingState
+         * @description Whether the pool takes new jobs, as a pause or resume left it.
+         */
+        ProcessingState: {
+            /** Paused */
+            paused: boolean;
+        };
         /** ProcessingStatus */
         ProcessingStatus: {
             /** Paused */
@@ -1091,7 +1099,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessingStatus"];
+                    "application/json": components["schemas"]["ProcessingState"];
                 };
             };
         };
@@ -1111,7 +1119,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProcessingStatus"];
+                    "application/json": components["schemas"]["ProcessingState"];
                 };
             };
         };

@@ -1,11 +1,13 @@
 import { Alert, Button, Card, Group, Stack, Table, Text, Title } from "@mantine/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useApi } from "../api/api-context";
 import {
   ACTION_FAILED_TEXT,
+  POLL_INTERVAL_MS,
   PROCESSING_ERROR_TEXT,
   type ProcessingError,
+  type ProcessingState,
   type ProcessingStatus,
   STAGE_NAME,
   activeStages,
@@ -24,13 +26,37 @@ function answered(data: ProcessingStatus | undefined, response: Response): Loade
     : { status: "error", error: processingError(response.status) };
 }
 
-/** Whether background processing runs, how many jobs each stage has, and Pause or Resume. */
+/** The flag of a pause or resume's answer, or undefined for anything that is not one. */
+function actionAnswer(data: ProcessingState | undefined): ProcessingState | undefined {
+  return typeof data?.paused === "boolean" ? { paused: data.paused } : undefined;
+}
+
+/**
+ * Whether background processing runs, how many jobs each stage has, and Pause or Resume.
+ *
+ * The status is asked for every POLL_INTERVAL_MS while the card is shown. A pause or resume
+ * takes over from the polling while it runs: it ends by loading the status itself, whatever its
+ * outcome, so what the card shows afterwards is what the backend said after the action (or that
+ * it could not be loaded), never the status from before it. A poll sent before an action started
+ * or ended is dropped when it answers, so an older answer cannot replace a newer one.
+ */
 export function ProcessingCard() {
   const api = useApi();
   const { state: session } = useSessionState();
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [busy, setBusy] = useState(false);
   const [actionFailed, setActionFailed] = useState(false);
+  // Bumped when an action starts and when it ends; a poll's answer is used only if unchanged.
+  const epoch = useRef(0);
+  const acting = useRef(false);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const fetchStatus = useCallback(async (): Promise<Loaded> => {
     try {
@@ -42,36 +68,68 @@ export function ProcessingCard() {
   }, [api]);
 
   // Only with access: without a token the request would be refused. A token pasted on this page
-  // loads it. No session recheck on a refusal, since asking again after each one could loop.
+  // starts it. No session recheck on a refusal, since asking again after each one could loop.
   const signedIn = session.status === "signed-in";
   useEffect(() => {
     if (!signedIn) return;
-    let cancelled = false;
-    void fetchStatus().then((state) => {
-      if (!cancelled) setLoaded(state);
-    });
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function poll(first: boolean) {
+      // The first load always runs; later ones wait while the tab is hidden. None runs during an
+      // action, which loads the status itself when it ends.
+      if (!acting.current && (first || document.visibilityState !== "hidden")) {
+        const started = epoch.current;
+        const state = await fetchStatus();
+        if (stopped) return;
+        if (epoch.current === started) setLoaded(state);
+      }
+      // Planned only after the answer, so two polls never overlap.
+      if (!stopped) timer = setTimeout(() => void poll(false), POLL_INTERVAL_MS);
+    }
+    void poll(true);
     return () => {
-      cancelled = true;
+      stopped = true;
+      clearTimeout(timer);
     };
   }, [fetchStatus, signedIn]);
 
+  // A function, so the check is read again after each await (a narrowed `.current` is not).
+  const unmounted = () => !mounted.current;
+
   async function toggle(pause: boolean) {
+    acting.current = true;
+    epoch.current += 1;
     setBusy(true);
     setActionFailed(false);
+    let answer: ProcessingState | undefined;
     try {
-      const { data, response } = await (pause
+      const { data } = await (pause
         ? api.POST("/api/processing/pause")
         : api.POST("/api/processing/resume"));
-      const state = answered(data, response);
-      setLoaded(state);
-      if (state.status === "error") setActionFailed(true);
+      answer = actionAnswer(data);
     } catch {
-      // The request may or may not have reached the backend: show what is true now.
-      setActionFailed(true);
-      setLoaded(await fetchStatus());
-    } finally {
-      setBusy(false);
+      answer = undefined;
     }
+    if (unmounted()) return;
+    if (answer === undefined) {
+      // Refused, an error or no answer: the action may or may not have reached the backend, so
+      // the status shown before it is no longer known to be current.
+      setActionFailed(true);
+      setLoaded({ status: "loading" });
+    } else {
+      const { paused } = answer;
+      setLoaded((last) =>
+        last.status === "ok" ? { status: "ok", data: { ...last.data, paused } } : last,
+      );
+    }
+    // Every outcome loads the status: the counts after the action, or what is true after one that
+    // failed. If that load fails too, the card says that the status could not be loaded.
+    const state = await fetchStatus();
+    if (unmounted()) return;
+    setLoaded(state);
+    epoch.current += 1;
+    acting.current = false;
+    setBusy(false);
   }
 
   return (

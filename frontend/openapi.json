@@ -489,6 +489,20 @@
         "title": "Page",
         "type": "object"
       },
+      "ProcessingState": {
+        "description": "Whether the pool takes new jobs, as a pause or resume left it.",
+        "properties": {
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "paused"
+        ],
+        "title": "ProcessingState",
+        "type": "object"
+      },
       "ProcessingStatus": {
         "properties": {
           "paused": {
@@ -1499,7 +1513,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProcessingStatus"
+                  "$ref": "#/components/schemas/ProcessingState"
                 }
               }
             },
@@ -1521,7 +1535,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProcessingStatus"
+                  "$ref": "#/components/schemas/ProcessingState"
                 }
               }
             },

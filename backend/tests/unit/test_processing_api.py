@@ -96,6 +96,31 @@ def test_a_paused_pool_starts_no_job_until_it_is_resumed(
     assert ran == [document_id]
 
 
+@pytest.mark.parametrize(("action", "paused"), [("pause", True), ("resume", False)])
+def test_a_pause_or_resume_answers_with_the_flag_and_reads_no_counts(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, action: str, paused: bool
+) -> None:
+    # The counts failing (a busy or broken database) must not turn a pause that took effect into
+    # an error: the page would then believe nothing changed.
+    def broken(self: JobQueue) -> dict[tuple[str, str], int]:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(JobQueue, "counts", broken)
+    client = TestClient(
+        app,
+        base_url=LOCAL,
+        headers={"Authorization": f"Bearer {app.state.token}", "Origin": LOCAL},
+        raise_server_exceptions=False,
+    )
+    if not paused:
+        app.state.workers.pause()
+    response = client.post(f"{URL}/{action}")
+    assert response.status_code == 200
+    assert response.json() == {"paused": paused}
+    assert app.state.workers.paused is paused
+    assert client.get(URL).status_code == 500  # the counts really fail
+
+
 class SlowQueue(JobQueue):
     """A queue whose claims wait until ``go`` is set, like a claim held up by SQLite's busy
     timeout while another writer works."""
