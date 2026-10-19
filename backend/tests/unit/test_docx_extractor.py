@@ -1148,6 +1148,108 @@ def test_a_vml_only_text_box_is_read() -> None:
     assert text_of(build(fill)) == "Old box"
 
 
+# The namespaces Word writes in ``mc:Choice Requires``, each decided: (prefix, namespace).
+WORD_NAMESPACES = {
+    "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+    "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "wpc": "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
+    "wpi": "http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
+    "wp14": "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+    "a14": "http://schemas.microsoft.com/office/drawing/2010/main",
+    "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+    "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+    "w16se": "http://schemas.microsoft.com/office/word/2015/wordml/symex",
+    "cx1": "http://schemas.microsoft.com/office/drawing/2015/9/8/chartex",
+}
+DECLARED = " ".join(f'xmlns:{prefix}="{uri}"' for prefix, uri in WORD_NAMESPACES.items())
+PICTURE = (
+    '<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/'
+    'wordprocessingDrawing"><wp:docPr id="1" name="Picture"/></wp:inline></w:drawing>'
+)
+
+
+def box(text: str) -> str:
+    return f"<w:txbxContent><w:p>{run(text)}</w:p></w:txbxContent>"
+
+
+def shape(text: str) -> str:
+    return f"<wps:wsp><wps:spPr/><wps:txbx>{box(text)}</wps:txbx><wps:bodyPr/></wps:wsp>"
+
+
+# For each understood namespace, a drawing as Word writes it with text-box text inside, whose
+# fallback is only a picture: the text is found only by reading the choice.
+TEXT_BEARING = {
+    "wps": shape("in a shape"),
+    "wpg": f"<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr/>{shape('in a group')}</wpg:wgp>",
+    "wpc": (
+        "<wpc:wpc><wpc:bg/><wpc:whole/>"
+        f"{shape('in a canvas')}"
+        f"<wpg:wgp><wpg:grpSpPr/>{shape('in a group in a canvas')}</wpg:wgp></wpc:wpc>"
+    ),
+}
+
+
+@pytest.mark.parametrize("prefix", TEXT_BEARING)
+def test_text_in_every_understood_drawing_container_is_read(prefix: str) -> None:
+    graphic = (
+        '<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/'
+        'wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/'
+        f'2006/main"><a:graphicData uri="{WORD_NAMESPACES[prefix]}">{TEXT_BEARING[prefix]}'
+        "</a:graphicData></a:graphic></wp:inline></w:drawing>"
+    )
+
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f"<w:p {W} {MC} {DECLARED}>{run('Anchor')}<w:r><mc:AlternateContent>"
+            f'<mc:Choice Requires="{prefix}">{graphic}</mc:Choice>'
+            f"<mc:Fallback>{PICTURE}</mc:Fallback></mc:AlternateContent></w:r></w:p>",
+        )
+
+    expected = {
+        "wps": ["in a shape"],
+        "wpg": ["in a group"],
+        "wpc": ["in a canvas", "in a group in a canvas"],
+    }[prefix]
+    assert text_of(build(fill)).split(PARAGRAPH_BREAK) == ["Anchor", *expected]
+
+
+# Each namespace that is not understood, with what Word writes in the fallback for it.
+NOT_UNDERSTOOD = {
+    "wpi": "",  # ink: a picture, no text
+    "wp14": "",  # relative position or size: the absolute one, no text
+    "a14": "",  # DrawingML extension: no text
+    "w14": "same text",
+    "w15": "same text",
+    "w16se": "\U0001f600",  # an emoji: w16se:symEx names it, the fallback writes it
+    "cx1": "",  # chartex: a picture; the chart's text is in its own part
+}
+
+
+@pytest.mark.parametrize("prefix", NOT_UNDERSTOOD)
+def test_a_choice_requiring_a_namespace_not_understood_falls_back(prefix: str) -> None:
+    fallback = run(NOT_UNDERSTOOD[prefix]) if NOT_UNDERSTOOD[prefix] else PICTURE
+
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f"<w:p {W} {MC} {DECLARED}>{run('[')}<mc:AlternateContent>"
+            f'<mc:Choice Requires="{prefix}"><w:r><w:drawing>{shape(CANARY)}</w:drawing></w:r>'
+            f"{run(CANARY)}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback>"
+            f"</mc:AlternateContent>{run(']')}</w:p>",
+        )
+
+    assert text_of(build(fill)) == f"[{NOT_UNDERSTOOD[prefix]}]"
+
+
+def test_every_namespace_word_requires_is_decided() -> None:
+    assert set(TEXT_BEARING) | set(NOT_UNDERSTOOD) == set(WORD_NAMESPACES)
+    assert not set(TEXT_BEARING) & set(NOT_UNDERSTOOD)
+    assert {WORD_NAMESPACES[prefix] for prefix in TEXT_BEARING} == extractor.UNDERSTOOD - {
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    }
+
+
 # Refused input
 
 

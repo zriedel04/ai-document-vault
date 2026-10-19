@@ -31,9 +31,9 @@ What the text holds:
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
   a box twice (a DrawingML shape and a VML copy for old readers, in ``mc:AlternateContent``), so
   one representation is read: the first ``mc:Choice`` whose ``Requires`` names only namespaces
-  this extractor understands (``UNDERSTOOD``: WordprocessingML and Word's shapes and shape
-  groups), or else the ``mc:Fallback``. The same rule applies wherever alternate content wraps a
-  paragraph, a table, a row or a cell.
+  this extractor understands (``UNDERSTOOD``: WordprocessingML and Word's shapes, shape groups
+  and drawing canvases, whose text boxes it reads), or else the ``mc:Fallback``. The same rule
+  applies wherever alternate content wraps a paragraph, a table, a row or a cell.
 - Inside a paragraph, every element is read through unless ``EXCLUDED`` names it, so text inside a
   container is kept whatever the container: hyperlinks, smart tags, custom XML, inline content
   controls, simple fields, insertions and moves (``w:ins``, ``w:moveTo``), text direction
@@ -124,14 +124,23 @@ _ALTERNATE, _CHOICE, _FALLBACK = (
 )
 _ALT_CHUNK: Final = qn("w:altChunk")
 # The namespaces an ``mc:Choice`` may require for this extractor to read it (Markup Compatibility,
-# ECMA-376 Part 3): WordprocessingML itself, and the Word 2010 shapes and shape groups that hold a
-# text box's ``w:txbxContent``. A choice that requires anything else is skipped, as the standard
-# asks of a consumer that does not understand it, and the next choice or the fallback is read.
+# ECMA-376 Part 3): WordprocessingML itself, and the Word 2010 drawing containers whose text is a
+# text box's ``w:txbxContent``, which the paragraph walker reaches inside any drawing: a shape
+# (``wps``), a group of shapes (``wpg``) and a drawing canvas (``wpc``, which holds shapes and
+# groups). Their fallback may be only a picture, so reading it would lose the text. A choice that
+# requires anything else is skipped, as the standard asks of a consumer that does not understand
+# it, and the next choice or the fallback is read. The other namespaces Word requires, decided one
+# by one: ink (``wpi``), Word 2010 drawing positions and sizes (``wp14``) and DrawingML extensions
+# (``a14``) hold no text; Word's own extensions (``w14``, ``w15``, ``w16se`` and the other ``w16``
+# namespaces) have a fallback in plain WordprocessingML that carries the same text (an emoji that
+# ``w16se:symEx`` names by code point is a ``w:t`` in the fallback); and a chart (``cx1`` to
+# ``cx8``, chartex) keeps its text in a separate part, which is not read, like any other chart.
 UNDERSTOOD: Final = frozenset(
     {
         "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
         "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
         "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
     }
 )
 # Inside a paragraph every element is read through unless it is named here, so text in a container
