@@ -254,7 +254,8 @@ export type RetryResult =
 
 /**
  * The jobs a Retry queues again: of each step, the latest job, when it failed. The backend lists a
- * document's jobs by step and, within a step, oldest first, and retries by the same rule.
+ * document's jobs by step and, within a step, oldest first by queue time with the id breaking a tie,
+ * and retries by the same rule.
  */
 export function retryableJobs(document: DocumentDetail): DocumentDetail["jobs"] {
   const latest = new Map<string, DocumentDetail["jobs"][number]>();

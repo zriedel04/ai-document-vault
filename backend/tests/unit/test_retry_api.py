@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from datetime import timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -204,3 +206,40 @@ def test_without_a_vault_there_is_nothing_to_retry() -> None:
         app, base_url=LOCAL, headers={"Authorization": f"Bearer {app.state.token}", "Origin": LOCAL}
     )
     assert client.post(f"{URL}/{ids.new_ulid()}/retry").status_code == 503
+
+
+def test_jobs_are_listed_in_queue_order_so_the_page_sees_the_job_a_retry_would_queue(
+    app: FastAPI, client: TestClient, library: Library, workers: Workers
+) -> None:
+    # Two ULIDs made in the same millisecond sort at random, so an older job of the same step can
+    # have the higher id. Retry takes the latest job by queue time; the list must agree with it.
+    document_id = library.add(NAME, "body")
+    failed = fail_extraction(app, document_id)
+    with app.state.engine.begin() as connection:
+        created = connection.execute(
+            select(jobs.c.created_at).where(jobs.c.id == failed)
+        ).scalar_one()
+        older = ids.new_ulid(now_ms=int(time.time() * 1000) + 60_000)  # a higher id
+        assert older > failed
+        connection.execute(
+            jobs.insert().values(
+                id=older,
+                document_id=document_id,
+                stage="extract",
+                status="done",
+                priority=0,
+                attempts=1,
+                max_attempts=3,
+                run_after=created - timedelta(seconds=1),
+                input_hash="0" * 64,
+                created_at=created - timedelta(seconds=1),
+                finished_at=created,
+            )
+        )
+    listed = client.get(f"{URL}/{document_id}").json()["jobs"]
+    assert [job["status"] for job in listed] == ["done", "failed"]
+    assert client.post(f"{URL}/{document_id}/retry").status_code == 200
+    with app.state.engine.connect() as connection:
+        assert connection.execute(
+            select(jobs.c.status).where(jobs.c.id == failed)
+        ).scalar_one() == ("queued")
