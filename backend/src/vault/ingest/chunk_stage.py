@@ -13,11 +13,15 @@ nothing to do and ends without changing anything (a newer version brings its own
    (``PagesChangedError``), so it runs again on the new pages, instead of storing chunks whose
    section paths come from headings that are gone. ``vault.db.chunks.write_chunks`` then
    replaces the version's chunks and checks them against the pages once more.
-3. In the same transaction the document becomes ``searchable``: from ``processing`` or
-   ``failed``, and from ``ready`` too, since its new chunks have no vectors yet. A document in the
-   trash stays there, and ``searchable`` is the state a restore brings back. A version with no
-   visible text has no chunks and is searchable all the same: nothing in it can be found, but
-   every stage it needed has run.
+3. In the same transaction the document becomes ``searchable``, and the job (when there is one)
+   is marked done (``vault.jobs.queue.Completion``): the chunks, the state and the job's end commit
+   together, so a crash cannot leave the document searchable behind a job still ``running``, which
+   start-up recovery would fail with its document on the job's last attempt. A worker that no
+   longer holds the job gets ``JobLostError`` there and nothing is stored. The document becomes
+   ``searchable`` from ``processing`` or ``failed``, and from ``ready`` too, since its new chunks
+   have no vectors yet. A document in the trash stays there, and ``searchable`` is the state a
+   restore brings back. A version with no visible text has no chunks and is searchable all the
+   same: nothing in it can be found, but every stage it needed has run.
 
 The next stage, ``embed``, has no handler yet, so this stage queues nothing after it: a job that
 nothing would ever claim would show the document as waiting for ever.
@@ -32,7 +36,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import Engine, case, select, update
+from sqlalchemy import Connection, Engine, case, select, update
 
 from vault.db import ids
 from vault.db.chunks import check_chunks, write_chunks
@@ -40,7 +44,7 @@ from vault.db.engine import read_snapshot, write_transaction
 from vault.db.pages import StoredPages, pages_of
 from vault.db.schema import TRASHED, document_versions, documents
 from vault.ingest.chunking import structural_v1
-from vault.jobs.queue import Job
+from vault.jobs.queue import Completion, Job, JobQueue
 from vault.jobs.worker import Handler
 
 CHUNK_STAGE: Final = "chunk"
@@ -66,9 +70,18 @@ class Outcome(StrEnum):
     STALE = "stale"  # the document is gone or no longer holds these bytes
 
 
-def chunk_document(engine: Engine, document_id: str, sha256: str) -> Outcome:
-    """Chunk the current version of the document if it holds the bytes ``sha256``."""
+def chunk_document(
+    engine: Engine,
+    document_id: str,
+    sha256: str,
+    *,
+    finish: tuple[JobQueue, Job] | None = None,
+) -> Outcome:
+    """Chunk the current version of the document if it holds the bytes ``sha256``. With
+    ``finish``, the job is completed whenever this returns: in the transaction that stores the
+    chunks, or once it is clear there is nothing to store. When it raises, the job is not."""
     if not ids.is_ulid(document_id):
+        _finish_alone(finish)
         return Outcome.STALE
     current = (
         select(document_versions.c.id)
@@ -85,12 +98,14 @@ def chunk_document(engine: Engine, document_id: str, sha256: str) -> Outcome:
         version_id = connection.execute(current).scalar_one_or_none()
         stored = None if version_id is None else pages_of(connection, version_id)
     if version_id is None:
+        _finish_alone(finish)
         return Outcome.STALE
     if stored is None:
         raise PagesMissingError
     chunked = check_chunks(structural_v1.chunk_pages(stored.pages), structural_v1.CHUNKER_VERSION)
     with write_transaction(engine) as connection:
         if connection.execute(current).scalar_one_or_none() != version_id:
+            _finish(finish, connection)
             return Outcome.STALE
         if not _same(pages_of(connection, version_id), stored):
             raise PagesChangedError
@@ -105,17 +120,33 @@ def chunk_document(engine: Engine, document_id: str, sha256: str) -> Outcome:
                 state_before_trash=case((in_trash, SEARCHABLE), else_=None),
             )
         )
+        _finish(finish, connection)
     return Outcome.STORED
+
+
+def _finish(finish: tuple[JobQueue, Job] | None, connection: Connection) -> None:
+    if finish is not None:
+        queue, job = finish
+        queue.complete(job.id, job.worker_id, connection=connection)
+
+
+def _finish_alone(finish: tuple[JobQueue, Job] | None) -> None:
+    """Complete the job in a transaction of its own: nothing was or will be written for it."""
+    if finish is not None:
+        queue, job = finish
+        queue.complete(job.id, job.worker_id)
 
 
 def _same(now: StoredPages | None, chunked: StoredPages) -> bool:
     return now is not None and now.pages == chunked.pages
 
 
-def handler(engine: Engine) -> Handler:
-    """The worker pool's handler for ``chunk`` jobs."""
+def handler(engine: Engine, queue: JobQueue) -> Handler:
+    """The worker pool's handler for ``chunk`` jobs, which completes each job in ``queue`` in the
+    transaction that stores its result."""
 
-    def run(job: Job) -> None:
-        chunk_document(engine, job.document_id, job.input_hash)
+    def run(job: Job) -> Completion:
+        chunk_document(engine, job.document_id, job.input_hash, finish=(queue, job))
+        return Completion.RECORDED
 
     return run

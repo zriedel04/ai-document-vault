@@ -7,18 +7,23 @@ A job is one processing stage (``extract``, ``ocr``, ...) for one document. Its 
 - ``claim`` hands the most urgent ready job of the given stages to one worker and marks it
   ``running`` under that worker's id. It is one ``UPDATE ... RETURNING`` statement, so two workers
   (threads, or connections) can never claim the same job.
-- ``complete`` marks it ``done``. ``fail`` records the exception's class name (never its message,
-  which can quote document content) and queues it again after a back-off, or marks it ``failed``
-  once its attempts are used up, and the document ``failed`` with it in the same transaction (a
-  document in the trash keeps ``failed`` as the state a restore brings back). Both act only for
-  the worker that holds the job, and say so (``JobLostError``) if it no longer does.
+- ``complete`` marks it ``done``. A handler that stores its result in ``vault.db`` does it in the
+  same transaction (``connection``), so a crash can never leave a stored result behind a job that
+  is still ``running`` (see ``Completion``). ``fail`` records the exception's class name (never
+  its message, which can quote document content) and queues it again after a back-off, or marks
+  it ``failed`` once its attempts are used up, and the document ``failed`` with it in the same
+  transaction (a document in the trash keeps ``failed`` as the state a restore brings back),
+  unless a later job of the same stage has replaced it: that job decides the document's state.
+  Both act only for the worker that holds the job, and say so (``JobLostError``) if it no longer
+  does.
 - ``release`` gives a claimed job back unstarted, with the attempt it counted returned (the
   worker pool calls it when it was paused or stopped while the claim was on its way).
 - ``retry`` queues a failed job again with fresh attempts. ``retry_document`` does it for every
   stage of one document whose latest job failed (the owner's Retry button on a document's page).
 - ``recover`` runs at start-up, before any worker: a job left ``running`` by a process that was
   killed is queued again, or failed if that attempt was its last (its document too, as ``fail``
-  does). Nothing is lost by a crash.
+  does). Nothing is lost by a crash, and nothing that succeeded is failed by one: a job still
+  ``running`` has stored nothing, since a stage's result and its ``done`` commit together.
 
 Times are naive UTC, as everywhere in ``vault.db``. The worker pool that calls this arrives with
 the first stage that has work to do.
@@ -37,6 +42,7 @@ from sqlalchemy import (
     ColumnElement,
     Connection,
     Engine,
+    FromClause,
     and_,
     case,
     exists,
@@ -79,6 +85,7 @@ class Job:
     """A claimed job: what the worker needs to do the work and report back."""
 
     id: str
+    worker_id: str  # the worker that holds it, which ``complete`` and ``fail`` need
     document_id: str
     stage: str
     input_hash: str
@@ -122,6 +129,22 @@ def _check_stages(stages: Iterable[str]) -> tuple[str, ...]:
     return chosen
 
 
+class Completion(StrEnum):
+    """What a handler returns when it marked its own job done.
+
+    A handler that writes its result to ``vault.db`` calls ``JobQueue.complete`` with the
+    connection of the transaction that writes it, and returns ``RECORDED``; the worker pool then
+    does not complete the job again. The result and the job's ``done`` commit together, so there
+    is no moment at which a crash leaves the result stored and the job ``running`` (start-up
+    recovery would run it again, or on its last attempt fail it and its document). It also fences
+    the write: a worker that no longer holds the job gets ``JobLostError`` inside the transaction,
+    and its result is rolled back. A handler that stores nothing returns None, and the pool
+    completes the job.
+    """
+
+    RECORDED = "recorded"
+
+
 class RetryRefusal(StrEnum):
     """Why ``retry_document`` queued nothing although there may be failed jobs."""
 
@@ -137,15 +160,33 @@ class Recovery:
     failed: int
 
 
-def _mark_failed(connection: Connection, document_ids: Sequence[str]) -> None:
-    """Mark the documents ``failed`` in the caller's transaction: a stage each one needs has used
-    up its attempts. A document in the trash stays there and comes back failed."""
-    if not document_ids:
+def _replaced(job: FromClause, later: FromClause) -> ColumnElement[bool]:
+    """A later job of the same document and stage exists: by the time it was queued, and the id
+    (a ULID) breaks a tie in the same instant. The one rule for "the latest job of its stage", used
+    by ``retry_document`` and by the document state a failed job sets."""
+    return exists().where(
+        later.c.document_id == job.c.document_id,
+        later.c.stage == job.c.stage,
+        or_(
+            later.c.created_at > job.c.created_at,
+            and_(later.c.created_at == job.c.created_at, later.c.id > job.c.id),
+        ),
+    )
+
+
+def _mark_failed(connection: Connection, job_ids: Sequence[str]) -> None:
+    """Mark ``failed``, in the caller's transaction, the documents of these jobs, which have used
+    up their attempts. A job that a later job of the same stage replaced (a new version's input) is
+    history: the later job decides, so its document keeps its state. A document in the trash stays
+    there and comes back failed."""
+    if not job_ids:
         return
+    later = jobs.alias("later")
+    needed = select(jobs.c.document_id).where(jobs.c.id.in_(set(job_ids)), ~_replaced(jobs, later))
     in_trash = documents.c.state == TRASHED
     connection.execute(
         update(documents)
-        .where(documents.c.id.in_(set(document_ids)))
+        .where(documents.c.id.in_(needed))
         .values(
             # SET reads the row as it was, so both columns see the same state.
             state=case((in_trash, documents.c.state), else_=FAILED),
@@ -259,6 +300,7 @@ class JobQueue:
             return None
         return Job(
             id=row.id,
+            worker_id=worker_id,
             document_id=row.document_id,
             stage=row.stage,
             input_hash=row.input_hash,
@@ -270,16 +312,23 @@ class JobQueue:
     def _held(job_id: str, worker_id: str) -> ColumnElement[bool]:
         return and_(jobs.c.id == job_id, jobs.c.status == "running", jobs.c.locked_by == worker_id)
 
-    def complete(self, job_id: str, worker_id: str) -> None:
-        """Mark the worker's job done."""
+    def complete(
+        self, job_id: str, worker_id: str, *, connection: Connection | None = None
+    ) -> None:
+        """Mark the worker's job done. With ``connection`` it is written in the caller's
+        transaction, which a handler uses to commit its result and the job's end together
+        (``Completion``); ``JobLostError`` raised there rolls the result back with it."""
         _check_worker(worker_id)
-        now = self._clock()
-        with self._engine.begin() as connection:
-            result = connection.execute(
-                update(jobs)
-                .where(self._held(job_id, worker_id))
-                .values(status="done", locked_by=None, locked_at=None, finished_at=now)
-            )
+        statement = (
+            update(jobs)
+            .where(self._held(job_id, worker_id))
+            .values(status="done", locked_by=None, locked_at=None, finished_at=self._clock())
+        )
+        if connection is not None:
+            result = connection.execute(statement)
+        else:
+            with self._engine.begin() as own:
+                result = own.execute(statement)
         if result.rowcount != 1:
             msg = "the worker no longer holds this job"
             raise JobLostError(msg)
@@ -331,7 +380,7 @@ class JobQueue:
                 msg = "the worker no longer holds this job"
                 raise JobLostError(msg)
             if ended:
-                _mark_failed(connection, [row.document_id])
+                _mark_failed(connection, [job_id])
         return "failed" if ended else "queued"
 
     def retry(self, job_id: str) -> bool:
@@ -372,21 +421,12 @@ class JobQueue:
                 return RetryRefusal.NOT_FOUND
             if state == TRASHED:
                 return RetryRefusal.IN_TRASH
-            # Later by the time it was queued; the id (a ULID) breaks a tie in the same instant.
-            replaced = or_(
-                later.c.created_at > jobs.c.created_at,
-                and_(later.c.created_at == jobs.c.created_at, later.c.id > jobs.c.id),
-            )
             queued = connection.execute(
                 update(jobs)
                 .where(
                     jobs.c.document_id == document_id,
                     jobs.c.status == "failed",
-                    ~exists().where(
-                        later.c.document_id == jobs.c.document_id,
-                        later.c.stage == jobs.c.stage,
-                        replaced,
-                    ),
+                    ~_replaced(jobs, later),
                     # Never two open jobs for the same work (the database refuses it too).
                     ~exists().where(
                         later.c.document_id == jobs.c.document_id,
@@ -407,7 +447,12 @@ class JobQueue:
 
     def recover(self) -> Recovery:
         """Take back every job left running by a process that ended. Call it at start-up, before
-        any worker runs: a job that some live worker holds would be taken from it too."""
+        any worker runs: a job that some live worker holds would be taken from it too.
+
+        A job still ``running`` stored nothing (a handler commits its result with the job's
+        ``done``, ``Completion``), so it is run again; on its last attempt it is failed instead,
+        since the attempt counted at its claim is what stops a job that ends the process every
+        time from running for ever."""
         now = self._clock()
         with self._engine.begin() as connection:
             ended = connection.execute(
@@ -420,10 +465,10 @@ class JobQueue:
                     last_error=INTERRUPTED,
                     finished_at=now,
                 )
-                .returning(jobs.c.document_id)
+                .returning(jobs.c.id)
             ).all()
             failed = len(ended)
-            _mark_failed(connection, [job.document_id for job in ended])
+            _mark_failed(connection, [job.id for job in ended])
             requeued = connection.execute(
                 update(jobs)
                 .where(jobs.c.status == "running")

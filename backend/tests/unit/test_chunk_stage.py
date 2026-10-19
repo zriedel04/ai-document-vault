@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, delete, select, update
+from sqlalchemy import Connection, Engine, delete, select, update
 
 from tests.conftest import LOCAL
 from tests.unit.test_chunks import assert_index_in_step, course_pages
@@ -28,7 +29,7 @@ from vault.ingest.chunk_stage import (
     chunk_document,
 )
 from vault.ingest.chunking import structural_v1
-from vault.jobs.queue import JobQueue
+from vault.jobs.queue import Completion, Job, JobLostError, JobQueue, Recovery
 from vault.jobs.worker import WorkerPool
 
 CANARY = "canary-chunk-stage-xyzzy"
@@ -300,7 +301,7 @@ def test_the_worker_pool_runs_chunk_jobs_and_records_a_missing_page_by_class(
     waiting_job = queue.enqueue(waiting_id, CHUNK_STAGE, waiting_sha)
     pool = WorkerPool(
         queue,
-        handlers={CHUNK_STAGE: chunk_stage.handler(engine)},
+        handlers={CHUNK_STAGE: chunk_stage.handler(engine, queue)},
         limits={CHUNK_STAGE: 1},
         idle_seconds=0.05,
     )
@@ -322,3 +323,117 @@ def test_the_app_runs_chunk_jobs(app: FastAPI, library: Library, engine: Engine)
         app.state.workers.wake()
         wait_for(lambda: job_row(engine, job_id).status == "done")
     assert state(engine, document_id) == ("searchable", None)
+
+
+# --- the job ends with the result -----------------------------------------------------------
+
+WORKER = ids.new_ulid()
+
+
+class CrashingQueue(JobQueue):
+    """A queue whose own ``complete`` fails as a process killed before reporting would: only a
+    completion inside the handler's transaction reaches the database."""
+
+    def complete(
+        self, job_id: str, worker_id: str, *, connection: Connection | None = None
+    ) -> None:
+        if connection is None:
+            raise OSError
+        super().complete(job_id, worker_id, connection=connection)
+
+
+def last_attempt(engine: Engine, document_id: str, sha256: str) -> tuple[JobQueue, Job]:
+    """The document's chunk job, claimed on its one and only attempt."""
+    queue = JobQueue(engine)
+    queue.enqueue(document_id, CHUNK_STAGE, sha256, max_attempts=1)
+    job = queue.claim(WORKER, [CHUNK_STAGE])
+    assert job is not None
+    assert job.attempts == job.max_attempts
+    return queue, job
+
+
+def test_a_crash_after_the_last_attempt_stored_its_chunks_leaves_the_document_searchable(
+    library: Library, engine: Engine
+) -> None:
+    document_id, version_id, sha256 = imported(library)
+    queue, job = last_attempt(engine, document_id, sha256)
+    # The pool runs the handler; the process ends before the pool could report anything.
+    assert chunk_stage.handler(engine, queue)(job) is Completion.RECORDED
+    assert JobQueue(engine).recover() == Recovery(requeued=0, failed=0)  # the next start-up
+    assert job_row(engine, job.id).status == "done"
+    assert state(engine, document_id) == ("searchable", None)
+    assert stored_chunks(engine, version_id) != []
+
+
+def test_through_the_pool_a_lost_report_cannot_fail_a_stored_last_attempt(
+    library: Library, engine: Engine
+) -> None:
+    document_id, _, sha256 = imported(library)
+    queue = CrashingQueue(engine)
+    job_id = queue.enqueue(document_id, CHUNK_STAGE, sha256, max_attempts=1)
+    pool = WorkerPool(
+        queue,
+        handlers={CHUNK_STAGE: chunk_stage.handler(engine, queue)},
+        limits={CHUNK_STAGE: 1},
+        idle_seconds=0.05,
+    )
+    pool.start()
+    try:
+        wait_for(lambda: job_row(engine, job_id).status != "queued")
+        wait_for(lambda: state(engine, document_id)[0] != "processing")
+    finally:
+        pool.stop(10)
+    assert JobQueue(engine).recover() == Recovery(requeued=0, failed=0)
+    assert job_row(engine, job_id).status == "done"
+    assert state(engine, document_id) == ("searchable", None)
+
+
+def test_a_worker_that_lost_its_chunk_job_stores_nothing(library: Library, engine: Engine) -> None:
+    document_id, version_id, sha256 = imported(library)
+    queue = JobQueue(engine)
+    queue.enqueue(document_id, CHUNK_STAGE, sha256)
+    job = queue.claim(WORKER, [CHUNK_STAGE])
+    assert job is not None
+    queue.recover()  # taken back while the worker ran it
+    with pytest.raises(JobLostError):
+        chunk_stage.handler(engine, queue)(job)
+    assert stored_chunks(engine, version_id) == []
+    assert state(engine, document_id) == ("processing", None)
+
+
+def test_a_chunk_job_with_nothing_to_store_is_completed_by_its_handler(
+    library: Library, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id, version_id, sha256 = imported(library)
+    queue, job = last_attempt(engine, document_id, OTHER_SHA)  # bytes it does not hold
+    assert chunk_stage.handler(engine, queue)(job) is Completion.RECORDED
+    assert job_row(engine, job.id).status == "done"
+    queue, job = last_attempt(engine, document_id, sha256)  # an id that names no document
+    assert chunk_stage.handler(engine, queue)(replace(job, document_id="not-an-id"))
+    assert job_row(engine, job.id).status == "done"
+    # Found stale under the write lock: completed in that transaction.
+    other_id, other_version, _ = imported(library)
+    queue, job = last_attempt(engine, document_id, sha256)
+
+    def move_it() -> None:
+        with engine.begin() as connection:
+            connection.execute(
+                update(document_versions)
+                .where(document_versions.c.id == version_id)
+                .values(blob_sha256=stored_sha(engine, other_version))
+            )
+
+    chunking_with(monkeypatch, move_it)
+    assert chunk_stage.handler(engine, queue)(job) is Completion.RECORDED
+    assert job_row(engine, job.id).status == "done"
+    assert JobQueue(engine).recover() == Recovery(requeued=0, failed=0)
+    assert state(engine, document_id) == ("processing", None)
+    assert other_id != document_id
+
+
+def test_a_chunk_job_that_raises_is_not_completed(library: Library, engine: Engine) -> None:
+    document_id, _, sha256 = imported(library, extracted=False)
+    queue, job = last_attempt(engine, document_id, sha256)
+    with pytest.raises(PagesMissingError):
+        chunk_stage.handler(engine, queue)(job)
+    assert job_row(engine, job.id).status == "running"  # the pool records the failure

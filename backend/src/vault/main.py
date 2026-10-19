@@ -67,7 +67,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         upgrade_to_latest(paths.db)
         engine = create_vault_engine(paths.db)
         # Before any worker runs: jobs a killed process left running are queued again.
-        recovery = JobQueue(engine).recover()
+        queue = JobQueue(engine)
+        recovery = queue.recover()
         log_event(
             logger,
             "jobs.recovered",
@@ -86,8 +87,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         importer = Importer(engine, blobs)
         # Only the chunk stage has a handler so far; jobs of the others wait in the queue.
         workers = WorkerPool(
-            JobQueue(engine),
-            handlers={chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine)},
+            queue,
+            handlers={chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine, queue)},
             limits=settings.workers.limits(),
         )
     else:

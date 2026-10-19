@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, select
+from sqlalchemy import Connection, Engine, select, update
 
 from vault.core.config import Settings, WorkerSettings
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
-from vault.db.schema import JOB_STAGES, jobs
-from vault.jobs.queue import Job, JobQueue
+from vault.db.schema import JOB_STAGES, documents, jobs
+from vault.jobs.queue import Completion, Job, JobQueue, Recovery
 from vault.jobs.worker import DEFAULT_LIMITS, Stage, WorkerPool
 from vault.main import create_app
 
@@ -272,10 +272,12 @@ def test_a_database_error_while_reporting_leaves_the_job_for_recovery(
     first, second = enqueue(engine, queue, 2)
 
     class Broken(JobQueue):
-        def complete(self, job_id: str, worker_id: str) -> None:
+        def complete(
+            self, job_id: str, worker_id: str, *, connection: Connection | None = None
+        ) -> None:
             if job_id == first:
                 raise OSError(SECRET)
-            super().complete(job_id, worker_id)
+            super().complete(job_id, worker_id, connection=connection)
 
         def fail(self, job_id: str, worker_id: str, error: BaseException) -> str:
             if job_id == first:
@@ -521,3 +523,66 @@ def test_without_a_vault_there_is_no_pool() -> None:
     assert app.state.workers is None
     with TestClient(app):
         pass
+
+
+# --- a handler that stores its result ---------------------------------------------------------
+
+
+class ReportLost(JobQueue):
+    """The pool's own ``complete`` never arrives, as when the process is killed after the handler
+    returned; a completion in the handler's transaction does."""
+
+    def __init__(self, engine: Engine, clock: Clock) -> None:
+        super().__init__(engine, clock=clock)
+        self.reports: list[str] = []  # the pool's own attempts to complete a job
+
+    def complete(
+        self, job_id: str, worker_id: str, *, connection: Connection | None = None
+    ) -> None:
+        if connection is None:
+            self.reports.append(job_id)
+            raise OSError(SECRET)
+        super().complete(job_id, worker_id, connection=connection)
+
+
+def document_state(engine: Engine, document_id: str) -> str:
+    with engine.connect() as connection:
+        value: str = connection.execute(
+            select(documents.c.state).where(documents.c.id == document_id)
+        ).scalar_one()
+    return value
+
+
+@pytest.mark.parametrize("stage", JOB_STAGES)
+@pytest.mark.parametrize("in_transaction", [True, False])
+def test_a_result_stored_with_its_job_survives_a_crash_on_the_last_attempt(
+    engine: Engine, clock: Clock, pools: list[WorkerPool], stage: str, in_transaction: bool
+) -> None:
+    queue = ReportLost(engine, clock)
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, stage, "ab" * 32, max_attempts=1)
+
+    def handler(job: Job) -> Completion | None:
+        with engine.begin() as connection:
+            connection.execute(
+                update(documents).where(documents.c.id == job.document_id).values(state="ready")
+            )
+            if not in_transaction:
+                return None  # stored, but the job's end is left to the pool
+            queue.complete(job.id, job.worker_id, connection=connection)
+        return Completion.RECORDED
+
+    pool = start(pools, WorkerPool(queue, {stage: handler}, {stage: 1}, idle_seconds=0.05))
+    until(lambda: document_state(engine, document_id) == "ready")
+    pool.stop(5)
+    recovery = JobQueue(engine, clock=clock).recover()  # the next start-up
+    if in_transaction:
+        assert queue.reports == []  # the pool does not complete it a second time
+        assert recovery == Recovery(requeued=0, failed=0)
+        assert statuses(engine)[job_id] == "done"
+        assert document_state(engine, document_id) == "ready"
+    else:
+        # The window the contract closes: the stored result is failed with its document.
+        assert queue.reports == [job_id]
+        assert recovery == Recovery(requeued=0, failed=1)
+        assert document_state(engine, document_id) == "failed"

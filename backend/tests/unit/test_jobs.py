@@ -24,6 +24,7 @@ from vault.jobs.queue import (
     UNNAMED_ERROR,
     JobLostError,
     JobQueue,
+    Recovery,
     RetryRefusal,
     backoff,
     error_name,
@@ -803,3 +804,78 @@ def test_recovery_that_fails_a_job_fails_its_document(engine: Engine, queue: Job
     assert document_state(engine, last_try) == ("failed", None)
     assert document_state(engine, retried) == ("processing", None)
     assert document_state(engine, trashed) == ("trashed", "failed")
+
+
+def test_a_job_completed_in_the_callers_transaction_commits_and_rolls_back_with_it(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    job = queue.claim(WORKER, ["chunk"])
+    assert job is not None
+    assert job.worker_id == WORKER
+    searchable = update(documents).where(documents.c.id == document_id).values(state="searchable")
+
+    def store_then_crash() -> None:
+        with engine.begin() as connection:
+            connection.execute(searchable)
+            queue.complete(job.id, job.worker_id, connection=connection)
+            raise RuntimeError
+
+    with pytest.raises(RuntimeError):
+        store_then_crash()
+    assert status_of(engine, job_id) == "running"  # the result and the job's end, both undone
+    assert document_state(engine, document_id) == ("processing", None)
+    with engine.begin() as connection:
+        connection.execute(searchable)
+        queue.complete(job.id, job.worker_id, connection=connection)
+    # A crash now finds nothing running: the last attempt cannot fail what it stored.
+    assert queue.recover() == Recovery(requeued=0, failed=0)
+    assert status_of(engine, job_id) == "done"
+    assert document_state(engine, document_id) == ("searchable", None)
+
+
+def test_a_worker_that_lost_its_job_stores_nothing_in_the_completing_transaction(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH)
+    job = queue.claim(WORKER, ["chunk"])
+    assert job is not None
+    queue.recover()  # taken back while the worker ran it
+
+    def store() -> None:
+        with engine.begin() as connection:
+            connection.execute(
+                update(documents).where(documents.c.id == document_id).values(state="searchable")
+            )
+            queue.complete(job.id, job.worker_id, connection=connection)
+
+    with pytest.raises(JobLostError):
+        store()
+    assert document_state(engine, document_id) == ("processing", None)
+    assert status_of(engine, job_id) == "queued"
+
+
+@pytest.mark.parametrize("ending", ["fail", "recover"])
+def test_a_job_replaced_by_a_later_job_of_its_stage_fails_without_its_document(
+    engine: Engine, queue: JobQueue, clock: Clock, ending: str
+) -> None:
+    replaced, not_replaced = add_document(engine), add_document(engine)
+    for document_id in (replaced, not_replaced):
+        set_document_state(engine, document_id, "searchable")
+    old = queue.enqueue(replaced, "chunk", HASH, max_attempts=1)
+    kept = queue.enqueue(not_replaced, "chunk", HASH, max_attempts=1)
+    for _ in range(2):
+        assert queue.claim(WORKER, ["chunk"]) is not None
+    clock.advance(timedelta(seconds=1))
+    queue.enqueue(replaced, "chunk", OTHER_HASH)  # a new version's input: it decides now
+    queue.enqueue(not_replaced, "extract", OTHER_HASH)  # another stage replaces nothing
+    if ending == "fail":
+        assert queue.fail(old, WORKER, RuntimeError()) == "failed"
+        assert queue.fail(kept, WORKER, RuntimeError()) == "failed"
+    else:
+        assert queue.recover().failed == 2
+    assert status_of(engine, old) == "failed"
+    assert document_state(engine, replaced) == ("searchable", None)
+    assert document_state(engine, not_replaced) == ("failed", None)
