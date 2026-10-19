@@ -147,6 +147,8 @@ def _started(start: object) -> bool:  # pragma: no cover - runs in the child
 
 def start_processes(data: bytes) -> list[str]:  # pragma: no cover - runs in the child
     """Try every way of starting a process; return the names of the ways that worked."""
+    if sys.platform == "win32":  # the probe is for the Linux filter; Windows has no fork
+        raise NotImplementedError
     import ctypes
     import platform
 
