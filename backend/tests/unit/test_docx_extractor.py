@@ -25,6 +25,7 @@ from vault.ingest.extractors.docx import (
     EXCLUDED,
     PARAGRAPH_BREAK,
     VERSION,
+    CompatibilityError,
     NotDocxError,
     extract,
 )
@@ -543,21 +544,22 @@ def test_alternate_content_with_only_a_fallback_reads_the_fallback() -> None:
 
 
 W14 = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+W15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"'
 
 
 @pytest.mark.parametrize(
     ("choices", "expected"),
     [
         pytest.param(
-            [("w14", CANARY), ("wps", "understood")], "understood", id="next choice understood"
+            [("w15", CANARY), ("wps", "understood")], "understood", id="next choice understood"
         ),
-        pytest.param([("w14", CANARY)], "fallback", id="none understood, fallback read"),
+        pytest.param([("w15", CANARY)], "fallback", id="none understood, fallback read"),
         pytest.param([("w wps", "both known")], "both known", id="every prefix understood"),
-        pytest.param([("w w14", CANARY)], "fallback", id="one prefix not understood"),
-        pytest.param([("nowhere", CANARY)], "fallback", id="prefix not in scope"),
+        pytest.param([("w w15", CANARY)], "fallback", id="one prefix not understood"),
         pytest.param([("x", CANARY)], "fallback", id="namespace of another kind"),
-        pytest.param([("", CANARY)], "fallback", id="nothing required"),
-        pytest.param([(None, CANARY)], "fallback", id="no Requires"),
+        pytest.param(
+            [("wps", "taken"), ("nowhere", CANARY)], "taken", id="choice after the taken one unread"
+        ),
     ],
 )
 def test_a_choice_is_read_only_when_every_namespace_it_requires_is_understood(
@@ -571,18 +573,40 @@ def test_a_choice_is_read_only_when_every_namespace_it_requires_is_understood(
         )
         add_xml(
             document,
-            f"<w:p {W} {MC} {WPS} {W14} {FUTURE}><mc:AlternateContent>{options}"
+            f"<w:p {W} {MC} {WPS} {W15} {FUTURE}><mc:AlternateContent>{options}"
             f"<mc:Fallback>{run('fallback')}</mc:Fallback></mc:AlternateContent></w:p>",
         )
 
     assert text_of(build(fill)) == expected
 
 
+@pytest.mark.parametrize(
+    "requires",
+    [
+        pytest.param(' Requires="nowhere"', id="prefix not in scope"),
+        pytest.param(' Requires="w nowhere"', id="one prefix not in scope"),
+        pytest.param(' Requires=""', id="nothing required"),
+        pytest.param(' Requires=" "', id="only white space"),
+        pytest.param("", id="no Requires"),
+    ],
+)
+def test_a_choice_whose_requires_is_an_error_refuses_the_file(requires: str) -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f"<w:p {W} {MC}><mc:AlternateContent><mc:Choice{requires}>{run(CANARY)}</mc:Choice>"
+            f"<mc:Fallback>{run('fallback')}</mc:Fallback></mc:AlternateContent></w:p>",
+        )
+
+    with pytest.raises(CompatibilityError):
+        extract(build(fill))
+
+
 def test_alternate_content_with_no_readable_choice_and_no_fallback_gives_nothing() -> None:
     def fill(document: DocumentObject) -> None:
         add_xml(
             document,
-            f'<w:p {W} {MC} {W14}>{run("[")}<mc:AlternateContent><mc:Choice Requires="w14">'
+            f'<w:p {W} {MC} {W15}>{run("[")}<mc:AlternateContent><mc:Choice Requires="w15">'
             f"{run(CANARY)}</mc:Choice></mc:AlternateContent>{run(']')}</w:p>",
         )
 
@@ -1176,42 +1200,53 @@ def shape(text: str) -> str:
     return f"<wps:wsp><wps:spPr/><wps:txbx>{box(text)}</wps:txbx><wps:bodyPr/></wps:wsp>"
 
 
-# For each understood namespace, a drawing as Word writes it with text-box text inside, whose
-# fallback is only a picture: the text is found only by reading the choice.
+def graphic(prefix: str, content: str) -> str:
+    return (
+        '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/'
+        'wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/'
+        f'2006/main"><a:graphicData uri="{WORD_NAMESPACES[prefix]}">{content}'
+        "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+    )
+
+
+# For each understood namespace, content as Word writes it with text inside, in a choice whose
+# fallback is only a picture: the text is found only by reading the choice. (the choice's content,
+# the paragraphs it gives after the anchor's own text)
 TEXT_BEARING = {
-    "wps": shape("in a shape"),
-    "wpg": f"<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr/>{shape('in a group')}</wpg:wgp>",
+    "wps": (graphic("wps", shape("in a shape")), ["Anchor", "in a shape"]),
+    "wpg": (
+        graphic("wpg", f"<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr/>{shape('in a group')}</wpg:wgp>"),
+        ["Anchor", "in a group"],
+    ),
     "wpc": (
-        "<wpc:wpc><wpc:bg/><wpc:whole/>"
-        f"{shape('in a canvas')}"
-        f"<wpg:wgp><wpg:grpSpPr/>{shape('in a group in a canvas')}</wpg:wgp></wpc:wpc>"
+        graphic(
+            "wpc",
+            "<wpc:wpc><wpc:bg/><wpc:whole/>"
+            f"{shape('in a canvas')}"
+            f"<wpg:wgp><wpg:grpSpPr/>{shape('in a group in a canvas')}</wpg:wgp></wpc:wpc>",
+        ),
+        ["Anchor", "in a canvas", "in a group in a canvas"],
+    ),
+    "w14": (
+        f'<w14:conflictIns w:id="1" w:author="A">{run(" agreed")}</w14:conflictIns>',
+        ["Anchor agreed"],
     ),
 }
 
 
 @pytest.mark.parametrize("prefix", TEXT_BEARING)
-def test_text_in_every_understood_drawing_container_is_read(prefix: str) -> None:
-    graphic = (
-        '<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/'
-        'wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/'
-        f'2006/main"><a:graphicData uri="{WORD_NAMESPACES[prefix]}">{TEXT_BEARING[prefix]}'
-        "</a:graphicData></a:graphic></wp:inline></w:drawing>"
-    )
+def test_text_in_every_understood_namespace_is_read(prefix: str) -> None:
+    content, expected = TEXT_BEARING[prefix]
 
     def fill(document: DocumentObject) -> None:
         add_xml(
             document,
-            f"<w:p {W} {MC} {DECLARED}>{run('Anchor')}<w:r><mc:AlternateContent>"
-            f'<mc:Choice Requires="{prefix}">{graphic}</mc:Choice>'
-            f"<mc:Fallback>{PICTURE}</mc:Fallback></mc:AlternateContent></w:r></w:p>",
+            f"<w:p {W} {MC} {DECLARED}>{run('Anchor')}<mc:AlternateContent>"
+            f'<mc:Choice Requires="{prefix}">{content}</mc:Choice>'
+            f"<mc:Fallback><w:r>{PICTURE}</w:r></mc:Fallback></mc:AlternateContent></w:p>",
         )
 
-    expected = {
-        "wps": ["in a shape"],
-        "wpg": ["in a group"],
-        "wpc": ["in a canvas", "in a group in a canvas"],
-    }[prefix]
-    assert text_of(build(fill)).split(PARAGRAPH_BREAK) == ["Anchor", *expected]
+    assert text_of(build(fill)).split(PARAGRAPH_BREAK) == expected
 
 
 # Each namespace that is not understood, with what Word writes in the fallback for it.
@@ -1219,7 +1254,6 @@ NOT_UNDERSTOOD = {
     "wpi": "",  # ink: a picture, no text
     "wp14": "",  # relative position or size: the absolute one, no text
     "a14": "",  # DrawingML extension: no text
-    "w14": "same text",
     "w15": "same text",
     "w16se": "\U0001f600",  # an emoji: w16se:symEx names it, the fallback writes it
     "cx1": "",  # chartex: a picture; the chart's text is in its own part
@@ -1248,6 +1282,340 @@ def test_every_namespace_word_requires_is_decided() -> None:
     assert {WORD_NAMESPACES[prefix] for prefix in TEXT_BEARING} == extractor.UNDERSTOOD - {
         "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     }
+
+
+# mc:Ignorable, mc:ProcessContent and mc:MustUnderstand (ECMA-376 Part 3), checked against .NET's
+# XmlCompatibilityReader, the reference reader: an element's own attributes apply to itself.
+
+MC_URI = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+IGNORE_X = 'mc:Ignorable="x"'
+
+
+def add_blocks(document: DocumentObject, body_xml: str) -> None:
+    """Append the children of a ``w:body`` written as XML (so they can share its namespace
+    declarations) to the document's body, before the section properties."""
+    body = document.element.body
+    for block in list(parse_xml(body_xml)):
+        body.insert(len(body) - 1, block)
+
+
+LATER = f"<x:later>{run(CANARY)}</x:later>"
+
+
+def nested_in_a_text_box_in_a_cell(levels: dict[str, str], wrapper: str = LATER) -> str:
+    """A table whose cell holds a paragraph anchoring a text box whose paragraph holds
+    ``wrapper``. ``levels`` gives extra attributes for any of: table, row, cell, paragraph, run,
+    box, inner (the text box's paragraph)."""
+
+    def at(level: str) -> str:
+        return " " + levels[level] if level in levels else ""
+
+    return (
+        f"<w:tbl {W} {MC} {WPS} {FUTURE}{at('table')}><w:tr{at('row')}><w:tc{at('cell')}>"
+        f"<w:p{at('paragraph')}>{run('Anchor')}<w:r{at('run')}><w:drawing><wps:wsp><wps:txbx>"
+        f"<w:txbxContent{at('box')}><w:p{at('inner')}>{wrapper}{run('boxed')}</w:p>"
+        "</w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p></w:tc></w:tr></w:tbl>"
+    )
+
+
+@pytest.mark.parametrize(
+    "level", ["table", "row", "cell", "paragraph", "run", "box", "inner", "wrapper itself"]
+)
+def test_an_ignorable_element_is_dropped_whichever_ancestor_declares_it(level: str) -> None:
+    wrapper = f"<x:later {IGNORE_X}>{run(CANARY)}</x:later>" if level == "wrapper itself" else LATER
+
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, nested_in_a_text_box_in_a_cell({level: IGNORE_X}, wrapper))
+
+    assert text_of(build(fill)) == "Anchor boxed"
+
+
+def test_without_mc_ignorable_an_unknown_wrapper_is_read_through() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, nested_in_a_text_box_in_a_cell({}, f"<x:later>{run('kept ')}</x:later>"))
+
+    assert text_of(build(fill)) == "Anchor kept boxed"
+
+
+def test_ignorable_declared_on_the_body_and_on_the_document_root_is_inherited() -> None:
+    # The template's root declares ``mc:Ignorable="w14 wp14"``, as Word does; the body here
+    # declares the ink namespace, whose prefix the root binds.
+    wpi = 'xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"'
+    wp14 = 'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"'
+
+    def fill(document: DocumentObject) -> None:
+        body = document.element.body
+        assert "wp14" in document.element.get(f"{{{MC_URI}}}Ignorable", "").split()
+        body.set(f"{{{MC_URI}}}Ignorable", "wpi")
+        add_xml(document, paragraph(f"{run('a')}<wpi:x {wpi}>{run(CANARY)}</wpi:x>{run('b')}"))
+        add_xml(document, paragraph(f"{run('c')}<wp14:x {wp14}>{run(CANARY)}</wp14:x>"))
+
+    assert text_of(build(fill)) == f"ab{PARAGRAPH_BREAK}c"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        pytest.param("w14", id="w14 (Word declares it ignorable in every document)"),
+        pytest.param("w", id="WordprocessingML"),
+    ],
+)
+def test_an_understood_namespace_declared_ignorable_is_never_ignored(prefix: str) -> None:
+    content = {
+        "w14": f'<w14:conflictIns w:id="1" w:author="A">{run("agreed")}</w14:conflictIns>',
+        "w": run("plain"),
+    }[prefix]
+
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, f'<w:p {W} {MC} {W14} mc:Ignorable="{prefix}">{content}</w:p>')
+
+    assert text_of(build(fill)) == {"w14": "agreed", "w": "plain"}[prefix]
+
+
+def test_a_text_box_shape_declared_ignorable_is_still_read() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            nested_in_a_text_box_in_a_cell({"paragraph": 'mc:Ignorable="wps"'}, run("in box ")),
+        )
+
+    assert text_of(build(fill)) == "Anchor in box boxed"
+
+
+def test_a_prefix_is_resolved_where_mc_ignorable_is_written() -> None:
+    # ``x`` means urn:a where the attribute is; deeper, ``x`` is bound to urn:b, which is not
+    # ignorable, and urn:a is written with another prefix, which still is.
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f'<w:p {W} {MC} xmlns:x="urn:a" mc:Ignorable="x">{run("a")}'
+            f'<z:dropped xmlns:z="urn:a">{run(CANARY)}</z:dropped>'
+            f'<x:kept xmlns:x="urn:b">{run("b")}</x:kept></w:p>',
+        )
+
+    assert text_of(build(fill)) == "ab"
+
+
+@pytest.mark.parametrize(
+    ("process", "expected"),
+    [
+        pytest.param('mc:ProcessContent="x:later"', "[in]", id="named"),
+        pytest.param('mc:ProcessContent="x:*"', "[in]", id="wildcard"),
+        pytest.param('mc:ProcessContent="x:other"', "[]", id="another name"),
+        pytest.param("", "[]", id="none"),
+    ],
+)
+def test_process_content_keeps_the_content_of_an_ignored_element(
+    process: str, expected: str
+) -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            paragraph(f"{run('[')}<x:later {IGNORE_X} {process}>{run('in')}</x:later>{run(']')}"),
+        )
+
+    assert text_of(build(fill)) == expected
+
+
+def test_process_content_is_inherited_and_the_nearest_declaration_for_a_namespace_wins() -> None:
+    # The table processes every x element; the inner paragraph names only x:a for x, so x:b
+    # there is dropped with its content, while x:b in the outer paragraph is processed.
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            nested_in_a_text_box_in_a_cell(
+                {
+                    "table": 'mc:Ignorable="x" mc:ProcessContent="x:*"',
+                    "inner": 'mc:Ignorable="x" mc:ProcessContent="x:a"',
+                },
+                f"<x:a>{run('a ')}</x:a><x:b>{run(CANARY)}</x:b>",
+            ),
+        )
+
+    assert text_of(build(fill)) == "Anchor a boxed"
+
+
+@pytest.mark.parametrize("wrapped", ["paragraph", "row", "cell"])
+@pytest.mark.parametrize("processed", [True, False], ids=["processed", "not processed"])
+def test_an_ignorable_wrapper_around_a_block_is_read_through_only_when_processed(
+    wrapped: str, processed: bool
+) -> None:
+    attributes = f'{IGNORE_X} mc:ProcessContent="x:wrap"' if processed else IGNORE_X
+    text = "wrapped" if processed else CANARY
+
+    def wrap(xml: str) -> str:
+        return f"<x:wrap {attributes}>{xml}</x:wrap>"
+
+    cell_xml = cell(text)
+    row_xml = f"<w:tr>{cell('first')}{cell_xml}</w:tr>"
+    blocks = {
+        "paragraph": wrap(f"<w:p>{run(text)}</w:p>"),
+        "row": f"<w:tbl><w:tr>{cell('first')}</w:tr>{wrap(row_xml)}</w:tbl>",
+        "cell": f"<w:tbl><w:tr>{cell('first')}{wrap(cell_xml)}</w:tr></w:tbl>",
+    }[wrapped]
+
+    def fill(document: DocumentObject) -> None:
+        add_blocks(document, f"<w:body {W} {MC} {FUTURE}>{blocks}</w:body>")
+
+    expected = {
+        ("paragraph", True): "wrapped",
+        ("paragraph", False): "",
+        ("row", True): "first\nfirst\twrapped",
+        ("row", False): "first",
+        ("cell", True): "first\twrapped",
+        ("cell", False): "first",
+    }[wrapped, processed]
+    assert text_of(build(fill)) == expected
+
+
+def test_a_heading_style_inside_an_ignorable_wrapper_counts_only_when_processed() -> None:
+    def styles_with(attributes: str) -> Callable[[DocumentObject], None]:
+        def fill(document: DocumentObject) -> None:
+            document.styles.element.append(
+                parse_xml(
+                    f"<x:wrap {W} {MC} {FUTURE} {attributes}>"
+                    '<w:style w:type="paragraph" w:styleId="Wrapped"><w:name w:val="heading 3"/>'
+                    "</w:style></x:wrap>"
+                )
+            )
+            add_xml(
+                document,
+                f'<w:p {W}><w:pPr><w:pStyle w:val="Wrapped"/></w:pPr>{run("Section")}</w:p>',
+            )
+
+        return fill
+
+    processed = extract(build(styles_with(f'{IGNORE_X} mc:ProcessContent="x:wrap"'))).pages[0]
+    ignored = extract(build(styles_with(IGNORE_X))).pages[0]
+    read_through = extract(build(styles_with(""))).pages[0]
+
+    assert [(h.level, h.title) for h in processed.headings] == [(3, "Section")]
+    assert ignored.headings == ()
+    assert read_through.headings == ()  # the style reader looks only at the styles' own children
+
+
+def test_content_of_an_ignored_element_is_not_examined() -> None:
+    # Imported content inside an ignored element is gone, so the file is not refused for it.
+    def fill(document: DocumentObject) -> None:
+        add_blocks(
+            document,
+            f'<w:body {W} {MC} {FUTURE} {R}><x:wrap {IGNORE_X}><w:altChunk r:id="rIdImported"/>'
+            '<w:p mc:MustUnderstand="x"/></x:wrap></w:body>',
+        )
+
+    assert text_of(build(fill)) == ""
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        pytest.param('mc:MustUnderstand="w"', id="WordprocessingML"),
+        pytest.param('mc:MustUnderstand="w w14 wps wpg wpc"', id="every understood namespace"),
+    ],
+)
+def test_must_understand_naming_only_understood_namespaces_is_read(attributes: str) -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, f"<w:p {W} {MC} {DECLARED} {attributes}>{run('ok')}</w:p>")
+
+    assert text_of(build(fill)) == "ok"
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        pytest.param(f'<w:p {W} {MC} {FUTURE} mc:MustUnderstand="x"/>', id="must understand"),
+        pytest.param(
+            f'<w:p {W} {MC} {FUTURE} mc:MustUnderstand="w x"/>', id="must understand, one of two"
+        ),
+        pytest.param(
+            f'<w:p {W} {MC} {W15} mc:MustUnderstand="w15"/>', id="must understand a Word extension"
+        ),
+        pytest.param(
+            f'<w:p {W} {MC} mc:MustUnderstand="nowhere"/>', id="must understand undeclared"
+        ),
+        pytest.param(f'<w:p {W} {MC} mc:Ignorable="nowhere"/>', id="ignorable undeclared"),
+        pytest.param(
+            f'<w:p {W} {MC} {FUTURE} {IGNORE_X} mc:ProcessContent="y:a"/>',
+            id="process content undeclared",
+        ),
+        pytest.param(
+            f'<w:p {W} {MC} {FUTURE} mc:ProcessContent="x:a"/>', id="process content not ignorable"
+        ),
+        pytest.param(
+            f'<w:tbl {W} {MC} {FUTURE} {IGNORE_X}><w:tr mc:ProcessContent="x:a"/></w:tbl>',
+            id="process content ignorable only on an ancestor",
+        ),
+        *(
+            pytest.param(
+                f'<w:p {W} {MC} {FUTURE} {IGNORE_X} mc:ProcessContent="{entry}"/>',
+                id=f"process content {entry!r}",
+            )
+            for entry in ["x", "x:", ":a", "x:a:b", "x:1a", "x:a b:"]
+        ),
+        pytest.param(
+            f"<w:p {W} {MC}><mc:Choice Requires='w'>{run(CANARY)}</mc:Choice></w:p>",
+            id="choice outside alternate content",
+        ),
+        pytest.param(
+            f"<w:p {W} {MC}><mc:Fallback>{run(CANARY)}</mc:Fallback></w:p>",
+            id="fallback outside alternate content",
+        ),
+        pytest.param(f"<w:p {W} {MC}><mc:Unknown/></w:p>", id="unknown compatibility element"),
+        pytest.param(
+            f"<w:p {W} {MC} {FUTURE}><w:r><mc:AlternateContent><mc:Choice Requires='w'>"
+            f'<w:t mc:MustUnderstand="x">{CANARY}</w:t></mc:Choice></mc:AlternateContent></w:r>'
+            "</w:p>",
+            id="must understand inside the chosen representation",
+        ),
+    ],
+)
+def test_compatibility_markup_that_is_an_error_refuses_the_file(markup: str) -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, markup)
+
+    with pytest.raises(CompatibilityError) as caught:
+        extract(build(fill))
+    assert (
+        str(caught.value) == "The DOCX uses markup compatibility rules this extractor cannot apply."
+    )
+    assert CANARY not in str(caught.value)
+
+
+def test_must_understand_in_a_representation_that_is_not_read_is_not_examined() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            f"<w:p {W} {MC} {FUTURE}><mc:AlternateContent><mc:Choice Requires='w'>{run('read')}"
+            f'</mc:Choice><mc:Fallback><w:r mc:MustUnderstand="x"/></mc:Fallback>'
+            "</mc:AlternateContent></w:p>",
+        )
+
+    assert text_of(build(fill)) == "read"
+
+
+def test_comments_and_processing_instructions_are_passed_over() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, paragraph(f"{run('a')}<!-- {CANARY} --><?pi {CANARY}?>{run('b')}"))
+
+    assert text_of(build(fill)) == "ab"
+
+
+def test_a_body_inside_an_ignored_element_leaves_no_document() -> None:
+    document_xml = (
+        f"<w:document {W} {MC} {FUTURE} {IGNORE_X}><x:wrap><w:body><w:p>{run(CANARY)}</w:p>"
+        "</w:body></x:wrap></w:document>"
+    ).encode()
+
+    with pytest.raises(NotDocxError):
+        extract(replace_member(build(), "word/document.xml", document_xml))
+
+
+def test_a_must_understand_error_in_the_styles_part_refuses_the_file() -> None:
+    def fill(document: DocumentObject) -> None:
+        document.styles.element.append(parse_xml(f'<x:s {W} {MC} {FUTURE} mc:MustUnderstand="x"/>'))
+
+    with pytest.raises(CompatibilityError):
+        extract(build(fill))
 
 
 # Refused input

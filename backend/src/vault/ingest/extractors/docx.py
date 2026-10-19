@@ -31,9 +31,18 @@ What the text holds:
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
   a box twice (a DrawingML shape and a VML copy for old readers, in ``mc:AlternateContent``), so
   one representation is read: the first ``mc:Choice`` whose ``Requires`` names only namespaces
-  this extractor understands (``UNDERSTOOD``: WordprocessingML and Word's shapes, shape groups
-  and drawing canvases, whose text boxes it reads), or else the ``mc:Fallback``. The same rule
+  this extractor understands (``UNDERSTOOD``: WordprocessingML, its Word 2010 extensions, and
+  Word's shapes, shape groups and drawing canvases, whose text boxes it reads), or else the
+  ``mc:Fallback``. The same rule
   applies wherever alternate content wraps a paragraph, a table, a row or a cell.
+- Markup Compatibility (ECMA-376 Part 3) is applied to the document and the styles before they are
+  read, as by a consumer that understands ``UNDERSTOOD``: an element from a namespace declared
+  ``mc:Ignorable`` on it or any ancestor (the document root included), and not understood, is left
+  out with everything in it, unless ``mc:ProcessContent`` in scope names it, and then its content
+  is read in its place. Prefixes are resolved where the attribute is written. Word declares its
+  later extensions ignorable in every document; none of them holds body text (see
+  ``UNDERSTOOD``). ``mc:MustUnderstand`` naming a namespace not understood, and compatibility
+  markup the standard makes an error, are refused (``CompatibilityError``).
 - Inside a paragraph, every element is read through unless ``EXCLUDED`` names it, so text inside a
   container is kept whatever the container: hyperlinks, smart tags, custom XML, inline content
   controls, simple fields, insertions and moves (``w:ins``, ``w:moveTo``), text direction
@@ -78,9 +87,9 @@ rather than read as empty.
 DOCX has no reliable pages (Word lays them out when it renders), so the whole text is one page, as
 for text files. The section anchors in the text view come from the headings.
 
-Errors are ``NotDocxError`` or ``ImportedContentError`` with fixed text naming a reason, never the
-file's name or content, and without the library's exception attached, because a library message
-can quote a part of the file.
+Errors are ``NotDocxError``, ``ImportedContentError`` or ``CompatibilityError`` with fixed text
+naming a reason, never the file's name or content, and without the library's exception attached,
+because a library message can quote a part of the file.
 """
 
 from __future__ import annotations
@@ -89,7 +98,8 @@ import io
 import re
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from typing import Final
 
 from docx import Document
@@ -123,21 +133,39 @@ _ALTERNATE, _CHOICE, _FALLBACK = (
     f"{_MC}Fallback",
 )
 _ALT_CHUNK: Final = qn("w:altChunk")
-# The namespaces an ``mc:Choice`` may require for this extractor to read it (Markup Compatibility,
-# ECMA-376 Part 3): WordprocessingML itself, and the Word 2010 drawing containers whose text is a
-# text box's ``w:txbxContent``, which the paragraph walker reaches inside any drawing: a shape
-# (``wps``), a group of shapes (``wpg``) and a drawing canvas (``wpc``, which holds shapes and
-# groups). Their fallback may be only a picture, so reading it would lose the text. A choice that
-# requires anything else is skipped, as the standard asks of a consumer that does not understand
-# it, and the next choice or the fallback is read. The other namespaces Word requires, decided one
-# by one: ink (``wpi``), Word 2010 drawing positions and sizes (``wp14``) and DrawingML extensions
-# (``a14``) hold no text; Word's own extensions (``w14``, ``w15``, ``w16se`` and the other ``w16``
-# namespaces) have a fallback in plain WordprocessingML that carries the same text (an emoji that
-# ``w16se:symEx`` names by code point is a ``w:t`` in the fallback); and a chart (``cx1`` to
-# ``cx8``, chartex) keeps its text in a separate part, which is not read, like any other chart.
+_MC_NAMESPACE: Final = _MC[1:-1]
+_IGNORABLE, _PROCESS_CONTENT, _MUST_UNDERSTAND = (
+    f"{_MC}Ignorable",
+    f"{_MC}ProcessContent",
+    f"{_MC}MustUnderstand",
+)
+# The local part of a qualified name (an XML NCName), or the wildcard of ``mc:ProcessContent``.
+_QNAME_PART: Final = re.compile(r"\*|[^\W\d][\w.\-]*")
+# The namespaces this extractor understands, in the sense of Markup Compatibility (ECMA-376 Part
+# 3): an ``mc:Choice`` that requires only these is read, an element in one of them is never
+# ignored (``mc:Ignorable`` applies only to namespaces a consumer does not understand), and
+# ``mc:MustUnderstand`` may name only these. They are WordprocessingML itself; Word 2010's
+# extensions to it (``w14``), whose elements that hold text are the co-authoring conflicts this
+# module reads (the others are properties, which are left out, or markers); and the Word 2010
+# drawing containers whose text is a text box's ``w:txbxContent``, which the paragraph walker
+# reaches inside any drawing: a shape (``wps``), a group of shapes (``wpg``) and a drawing canvas
+# (``wpc``, which holds shapes and groups). Their fallback may be only a picture, so reading it
+# would lose the text. Every Word document declares ``w14`` ignorable, so not understanding it
+# would drop the text of a co-authoring conflict. The other namespaces Word requires or declares
+# ignorable, decided one by one: ink (``wpi``), Word 2010 drawing positions and sizes (``wp14``)
+# and DrawingML extensions (``a14``) hold no text; Word's later extensions (``w15``, ``w16se`` and
+# the other ``w16`` namespaces) hold properties, attributes and markers in the body, and where
+# they hold a character in alternate content, the fallback carries it in plain WordprocessingML
+# (an emoji that ``w16se:symEx`` names by code point is a ``w:t`` in the fallback); and a chart
+# (``cx1`` to ``cx8``, chartex) keeps its text in a separate part, which is not read, like any
+# other chart. A choice that requires anything else is skipped, and an element in any other
+# namespace declared ignorable is dropped, as the standard asks of a consumer that does not
+# understand it. An element in a namespace that is neither understood nor ignorable is read
+# through, as any unknown wrapper is.
 UNDERSTOOD: Final = frozenset(
     {
         "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        _W14[1:-1],
         "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
         "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
         "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
@@ -193,6 +221,16 @@ class ImportedContentError(ExtractionError):
         super().__init__("The DOCX holds content imported from another file, which is not read.")
 
 
+class CompatibilityError(ExtractionError):
+    """The DOCX uses Markup Compatibility (ECMA-376 Part 3) in a way this extractor cannot apply:
+    ``mc:MustUnderstand`` names a namespace it does not understand, or the compatibility markup is
+    an error under the standard. Reading on would give a text the producer said was not the
+    document's, so the file is refused."""
+
+    def __init__(self) -> None:
+        super().__init__("The DOCX uses markup compatibility rules this extractor cannot apply.")
+
+
 class NotDocxError(ExtractionError):
     """The blob is not a DOCX this extractor can read. ``reason`` is the validator's reason when its
     DOCX rule refused the bytes, and None when python-docx could not read a part."""
@@ -221,10 +259,16 @@ def extract(data: bytes, limits: Limits = DEFAULT_LIMITS) -> Extraction:
     # A Strict Open XML document (or any other namespace) passes the content type check but has no
     # element this module knows: refuse it instead of returning an empty text.
     root = document.element
-    body = root.find(_BODY) if root.tag == _DOCUMENT else None
+    if root.tag != _DOCUMENT:
+        raise NotDocxError
+    # Every part read is seen as a consumer that understands ``UNDERSTOOD`` sees it.
+    styles = document.styles.element
+    for part in (root, styles):
+        _apply_compatibility(part, _scope_of(part, _Scope()))
+    body = root.find(_BODY)
     if body is None:
         raise NotDocxError
-    levels = _heading_styles(document.styles.element)
+    levels = _heading_styles(styles)
     parts: list[str] = []
     headings: list[Heading] = []
     position = 0
@@ -304,8 +348,8 @@ def _segments(
 
 
 def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[BaseOxmlElement]:
-    """The children of ``container`` with a ``wanted`` tag, looking through content controls,
-    custom XML wrappers and alternate content (the representation ``_selected`` picks)."""
+    """The children of ``container`` with a ``wanted`` tag, looking through content controls and
+    custom XML wrappers. Alternate content is already resolved (``_apply_compatibility``)."""
     for child in container.iterchildren():
         if child.tag in wanted:
             yield child
@@ -317,10 +361,103 @@ def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[Bas
                 yield from _blocks(content, wanted)
         elif child.tag == _CUSTOM_XML:
             yield from _blocks(child, wanted)
-        elif child.tag == _ALTERNATE:
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """The markup compatibility rules in force at an element: the namespaces declared ignorable
+    there or on an ancestor, and for each ignorable namespace the element names whose content is
+    processed (``*`` for all), from the nearest element that declares any for that namespace."""
+
+    ignorable: frozenset[str] = frozenset()
+    process: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+
+def _apply_compatibility(element: BaseOxmlElement, scope: _Scope) -> None:
+    """Apply Markup Compatibility (ECMA-376 Part 3) to the content of ``element``, in place, the way
+    a consumer that understands only ``UNDERSTOOD`` must, so that every reader after it sees the
+    document as such a consumer would:
+
+    - ``mc:AlternateContent`` is replaced by the content of the representation ``_selected`` picks
+      (nothing if none), so no other representation is ever read.
+    - An element whose namespace is ignorable in its scope (``mc:Ignorable`` on it or an ancestor,
+      its prefixes resolved where declared) and not understood is removed with everything in it,
+      unless ``mc:ProcessContent`` in scope names it (or ``prefix:*``): then it is replaced by its
+      content, which is processed under the element's own scope first.
+    - ``mc:MustUnderstand`` naming a namespace not understood is refused, and so is compatibility
+      markup the standard calls an error: an undeclared prefix, a ``ProcessContent`` entry that is
+      not ``prefix:name`` or whose namespace is not declared ignorable on the same element, and a
+      Markup Compatibility element outside its place (a choice outside alternate content, or an
+      element the standard does not define).
+
+    Every element's own compatibility attributes apply to the element itself and its content, and
+    each subtree is processed before it moves, because prefixes in attribute values are resolved
+    in the place where they are written. A representation of alternate content that is not read is
+    not looked at, as the reference reader (.NET's ``XmlCompatibilityReader``) skips it."""
+    for child in list(element.iterchildren()):
+        tag = child.tag
+        if not isinstance(tag, str):  # a comment or processing instruction
+            continue
+        inner = _scope_of(child, scope)
+        namespace = tag[1:].partition("}")[0] if tag.startswith("{") else ""
+        if namespace == _MC_NAMESPACE:
+            if tag != _ALTERNATE:
+                raise CompatibilityError
             chosen = _selected(child)
-            if chosen is not None:
-                yield from _blocks(chosen, wanted)
+            if chosen is None:
+                element.remove(child)
+                continue
+            _apply_compatibility(chosen, _scope_of(chosen, inner))
+            _unwrap(element, child, chosen)
+        elif namespace not in UNDERSTOOD and namespace in inner.ignorable:
+            names = inner.process.get(namespace, frozenset())
+            if "*" in names or tag.partition("}")[2] in names:
+                _apply_compatibility(child, inner)
+                _unwrap(element, child, child)
+            else:
+                element.remove(child)
+        else:
+            _apply_compatibility(child, inner)
+
+
+def _unwrap(parent: BaseOxmlElement, child: BaseOxmlElement, content: BaseOxmlElement) -> None:
+    """Put the children of ``content`` in the place of ``child`` (a child of ``parent``)."""
+    position = parent.index(child)
+    for offset, moved in enumerate(list(content.iterchildren())):
+        parent.insert(position + offset, moved)
+    parent.remove(child)
+
+
+def _scope_of(element: BaseOxmlElement, outer: _Scope) -> _Scope:
+    """The scope inside ``element``: ``outer`` with the element's own compatibility attributes."""
+    in_scope = element.nsmap
+    must = element.get(_MUST_UNDERSTAND)
+    if must is not None and not set(_namespaces(must, in_scope)) <= UNDERSTOOD:
+        raise CompatibilityError
+    declared = element.get(_IGNORABLE)
+    own = frozenset(_namespaces(declared, in_scope)) if declared is not None else frozenset()
+    contents = element.get(_PROCESS_CONTENT)
+    if not own and contents is None:
+        return outer
+    process = dict(outer.process)
+    if contents is not None:
+        named: dict[str, set[str]] = {}
+        for entry in contents.split():
+            prefix, _, name = entry.partition(":")
+            namespace = in_scope.get(prefix) if prefix else None
+            if namespace is None or namespace not in own or not _QNAME_PART.fullmatch(name):
+                raise CompatibilityError
+            named.setdefault(namespace, set()).add(name)
+        process.update((namespace, frozenset(names)) for namespace, names in named.items())
+    return _Scope(outer.ignorable | own, process)
+
+
+def _namespaces(prefixes: str, in_scope: Mapping[str | None, str]) -> Iterator[str]:
+    for prefix in prefixes.split():
+        namespace = in_scope.get(prefix)
+        if namespace is None:
+            raise CompatibilityError
+        yield namespace
 
 
 def _selected(alternate: BaseOxmlElement) -> BaseOxmlElement | None:
@@ -337,12 +474,14 @@ def _selected(alternate: BaseOxmlElement) -> BaseOxmlElement | None:
 
 
 def _understood(choice: BaseOxmlElement) -> bool:
-    """Whether every prefix in the choice's ``Requires`` (a list separated by white space, which
-    the standard says must not be empty) names an understood namespace in scope there. A prefix
-    with no namespace in scope makes the choice one this extractor cannot read."""
-    prefixes = (choice.get("Requires") or "").split()
-    in_scope = choice.nsmap
-    return bool(prefixes) and all(in_scope.get(prefix) in UNDERSTOOD for prefix in prefixes)
+    """Whether every prefix in the choice's ``Requires`` (a list separated by white space) names an
+    understood namespace in scope there. The standard makes a missing or empty ``Requires``, and a
+    prefix with no namespace in scope, an error, so the file is refused (``CompatibilityError``),
+    as the reference reader does for each choice it looks at."""
+    namespaces = list(_namespaces(choice.get("Requires") or "", choice.nsmap))
+    if not namespaces:
+        raise CompatibilityError
+    return set(namespaces) <= UNDERSTOOD
 
 
 def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
@@ -407,12 +546,6 @@ class _Inline:
                     self.boxes.append(child)
             elif tag == _ALT_CHUNK:  # block content, but refused wherever it is met
                 raise ImportedContentError
-            elif tag == _ALTERNATE:
-                # Word writes some content twice (a text box as DrawingML and again as VML for old
-                # readers): one representation is read, never both.
-                chosen = _selected(child)
-                if chosen is not None:
-                    self.walk(chosen, shown=shown)
             else:
                 self.walk(child, shown=shown and not (tag == _R and _hidden(child)))
 
