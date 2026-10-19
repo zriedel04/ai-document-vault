@@ -189,6 +189,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Search Documents
+         * @description One page of the documents in use whose current text matches ``query``, best first, each
+         *     with its best passage: the page it is on, its place in that page's text, its section and a
+         *     snippet whose matched words are marked. ``total`` counts the matching documents.
+         *
+         *     The query goes in the body, never in the address, because it says what the owner is looking
+         *     for. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with
+         *     no letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose
+         *     message does not repeat it. Nothing here is logged.
+         */
+        post: operations["search_documents_api_search_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -392,6 +419,71 @@ export interface components {
          * @enum {string}
          */
         Reason: "not_a_file" | "unreadable" | "empty" | "too_large" | "unsupported_extension" | "content_mismatch" | "legacy_or_encrypted_office" | "unreadable_archive" | "encrypted_archive" | "unsafe_archive";
+        /** SearchHit */
+        SearchHit: {
+            /** Char End */
+            char_end: number;
+            /** Char Start */
+            char_start: number;
+            /** Chunk Id */
+            chunk_id: number;
+            /** Document Id */
+            document_id: string;
+            /** Extension */
+            extension: string;
+            /** Matches */
+            matches: number;
+            /** Name */
+            name: string | null;
+            /** Name Highlight */
+            name_highlight: components["schemas"]["Segment"][];
+            /** Page */
+            page: number;
+            /** Section Highlight */
+            section_highlight: components["schemas"]["Segment"][][];
+            /** Section Path */
+            section_path: string[];
+            /** Snippet */
+            snippet: components["schemas"]["Segment"][];
+        };
+        /** SearchRequest */
+        SearchRequest: {
+            /**
+             * Limit
+             * @default 20
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /** Query */
+            query: string;
+            /**
+             * Types
+             * @default []
+             */
+            types: ("pdf" | "docx" | "png" | "jpg" | "txt" | "md")[];
+        };
+        /** SearchResults */
+        SearchResults: {
+            /** Items */
+            items: components["schemas"]["SearchHit"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
+        /** Segment */
+        Segment: {
+            /** Match */
+            match: boolean;
+            /** Text */
+            text: string;
+        };
         /**
          * SortKey
          * @enum {string}
@@ -806,6 +898,37 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    search_documents_api_search_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchResults"];
+                };
+            };
+            /** @description The query cannot be searched */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
