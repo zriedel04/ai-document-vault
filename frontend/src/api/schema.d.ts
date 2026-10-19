@@ -189,6 +189,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/processing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Processing
+         * @description Whether processing is paused, and how many jobs each stage has in each status.
+         */
+        get: operations["read_processing_api_processing_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/processing/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause Processing
+         * @description Stop taking new jobs. Running jobs finish; once this answers, no new job starts until a
+         *     resume or a restart of the server. Pausing twice is the same as once.
+         */
+        post: operations["pause_processing_api_processing_pause_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/processing/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Processing
+         * @description Take new jobs again. Resuming when not paused changes nothing.
+         */
+        post: operations["resume_processing_api_processing_resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -387,6 +448,13 @@ export interface components {
             /** Text */
             text: string;
         };
+        /** ProcessingStatus */
+        ProcessingStatus: {
+            /** Paused */
+            paused: boolean;
+            /** Stages */
+            stages: components["schemas"]["StageJobs"][];
+        };
         /**
          * Reason
          * @enum {string}
@@ -421,6 +489,25 @@ export interface components {
             original_mtime: string | null;
             /** Original Path */
             original_path: string | null;
+        };
+        /**
+         * StageJobs
+         * @description How many jobs of one stage are in each status.
+         */
+        StageJobs: {
+            /** Done */
+            done: number;
+            /** Failed */
+            failed: number;
+            /** Queued */
+            queued: number;
+            /** Running */
+            running: number;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "extract" | "ocr" | "metadata" | "chunk" | "embed" | "enrich";
         };
         /** UploadResult */
         UploadResult: {
@@ -805,6 +892,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_processing_api_processing_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessingStatus"];
+                };
+            };
+        };
+    };
+    pause_processing_api_processing_pause_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessingStatus"];
+                };
+            };
+        };
+    };
+    resume_processing_api_processing_resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessingStatus"];
                 };
             };
         };

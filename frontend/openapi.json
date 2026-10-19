@@ -489,6 +489,27 @@
         "title": "Page",
         "type": "object"
       },
+      "ProcessingStatus": {
+        "properties": {
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/StageJobs"
+            },
+            "title": "Stages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "paused",
+          "stages"
+        ],
+        "title": "ProcessingStatus",
+        "type": "object"
+      },
       "Reason": {
         "enum": [
           "not_a_file",
@@ -584,6 +605,48 @@
           "imported_at"
         ],
         "title": "Source",
+        "type": "object"
+      },
+      "StageJobs": {
+        "description": "How many jobs of one stage are in each status.",
+        "properties": {
+          "done": {
+            "title": "Done",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "title": "Running",
+            "type": "integer"
+          },
+          "stage": {
+            "enum": [
+              "extract",
+              "ocr",
+              "metadata",
+              "chunk",
+              "embed",
+              "enrich"
+            ],
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "queued",
+          "running",
+          "done",
+          "failed"
+        ],
+        "title": "StageJobs",
         "type": "object"
       },
       "UploadResult": {
@@ -1170,6 +1233,72 @@
         "summary": "Upload",
         "tags": [
           "imports"
+        ]
+      }
+    },
+    "/api/processing": {
+      "get": {
+        "description": "Whether processing is paused, and how many jobs each stage has in each status.",
+        "operationId": "read_processing_api_processing_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessingStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Processing",
+        "tags": [
+          "processing"
+        ]
+      }
+    },
+    "/api/processing/pause": {
+      "post": {
+        "description": "Stop taking new jobs. Running jobs finish; once this answers, no new job starts until a\nresume or a restart of the server. Pausing twice is the same as once.",
+        "operationId": "pause_processing_api_processing_pause_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessingStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pause Processing",
+        "tags": [
+          "processing"
+        ]
+      }
+    },
+    "/api/processing/resume": {
+      "post": {
+        "description": "Take new jobs again. Resuming when not paused changes nothing.",
+        "operationId": "resume_processing_api_processing_resume_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessingStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Resume Processing",
+        "tags": [
+          "processing"
         ]
       }
     },
