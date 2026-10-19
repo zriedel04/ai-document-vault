@@ -544,3 +544,67 @@ def test_the_database_refuses_a_worker_id_that_is_not_a_ulid(
             ),
             {"id": job_id},
         )
+
+
+def document_state(engine: Engine, document_id: str) -> tuple[str, str | None]:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(documents.c.state, documents.c.state_before_trash).where(
+                documents.c.id == document_id
+            )
+        ).one()
+    return row.state, row.state_before_trash
+
+
+def trash(engine: Engine, document_id: str) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            update(documents)
+            .where(documents.c.id == document_id)
+            .values(state="trashed", state_before_trash=documents.c.state, trashed_at=START)
+        )
+
+
+@pytest.mark.parametrize("before", ["processing", "searchable", "ready", "failed"])
+def test_a_job_that_uses_up_its_attempts_fails_its_document(
+    engine: Engine, queue: JobQueue, before: str
+) -> None:
+    document_id = add_document(engine)
+    other = add_document(engine)
+    with engine.begin() as connection:
+        connection.execute(update(documents).values(state=before))
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=2)
+    queue.claim(WORKER, ["chunk"])
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "queued"
+    assert document_state(engine, document_id) == (before, None)  # attempts are left
+    with engine.begin() as connection:
+        connection.execute(update(jobs).values(run_after=START))
+    queue.claim(WORKER, ["chunk"])
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "failed"
+    assert document_state(engine, document_id) == ("failed", None)
+    assert document_state(engine, other) == (before, None)
+
+
+def test_a_document_in_the_trash_keeps_failed_for_its_restore(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    queue.claim(WORKER, ["chunk"])
+    trash(engine, document_id)
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "failed"
+    assert document_state(engine, document_id) == ("trashed", "failed")
+
+
+def test_recovery_that_fails_a_job_fails_its_document(engine: Engine, queue: JobQueue) -> None:
+    last_try, retried, trashed = (add_document(engine) for _ in range(3))
+    queue.enqueue(last_try, "extract", HASH, max_attempts=1)
+    queue.enqueue(retried, "extract", HASH)
+    queue.enqueue(trashed, "extract", HASH, max_attempts=1)
+    for _ in range(3):
+        assert queue.claim(WORKER, ["extract"]) is not None
+    trash(engine, trashed)
+    assert queue.recover().failed == 2
+    assert document_state(engine, last_try) == ("failed", None)
+    assert document_state(engine, retried) == ("processing", None)
+    assert document_state(engine, trashed) == ("trashed", "failed")

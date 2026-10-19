@@ -9,13 +9,15 @@ A job is one processing stage (``extract``, ``ocr``, ...) for one document. Its 
   (threads, or connections) can never claim the same job.
 - ``complete`` marks it ``done``. ``fail`` records the exception's class name (never its message,
   which can quote document content) and queues it again after a back-off, or marks it ``failed``
-  once its attempts are used up. Both act only for the worker that holds the job, and say so
-  (``JobLostError``) if it no longer does.
+  once its attempts are used up, and the document ``failed`` with it in the same transaction (a
+  document in the trash keeps ``failed`` as the state a restore brings back). Both act only for
+  the worker that holds the job, and say so (``JobLostError``) if it no longer does.
 - ``release`` gives a claimed job back unstarted, with the attempt it counted returned (the
   worker pool calls it when it was paused or stopped while the claim was on its way).
 - ``retry`` queues a failed job again with fresh attempts (the owner's Retry button).
 - ``recover`` runs at start-up, before any worker: a job left ``running`` by a process that was
-  killed is queued again, or failed if that attempt was its last. Nothing is lost by a crash.
+  killed is queued again, or failed if that attempt was its last (its document too, as ``fail``
+  does). Nothing is lost by a crash.
 
 Times are naive UTC, as everywhere in ``vault.db``. The worker pool that calls this arrives with
 the first stage that has work to do.
@@ -24,17 +26,17 @@ the first stage that has work to do.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
-from sqlalchemy import ColumnElement, Connection, Engine, and_, func, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, and_, case, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from vault.db import ids
-from vault.db.schema import JOB_STAGES, jobs
+from vault.db.schema import JOB_STAGES, TRASHED, documents, jobs
 
 DEFAULT_MAX_ATTEMPTS: Final = 3
 BACKOFF_BASE: Final = timedelta(seconds=30)
@@ -47,6 +49,7 @@ UNNAMED_ERROR: Final = "Error"
 INTERRUPTED: Final = "Interrupted"
 SHA256: Final = re.compile(r"[0-9a-f]{64}")
 _OPEN: Final = ("queued", "running")
+FAILED: Final = "failed"  # the document state for a stage that cannot complete
 
 
 class JobError(Exception):
@@ -111,6 +114,23 @@ class Recovery:
 
     requeued: int
     failed: int
+
+
+def _mark_failed(connection: Connection, document_ids: Sequence[str]) -> None:
+    """Mark the documents ``failed`` in the caller's transaction: a stage each one needs has used
+    up its attempts. A document in the trash stays there and comes back failed."""
+    if not document_ids:
+        return
+    in_trash = documents.c.state == TRASHED
+    connection.execute(
+        update(documents)
+        .where(documents.c.id.in_(set(document_ids)))
+        .values(
+            # SET reads the row as it was, so both columns see the same state.
+            state=case((in_trash, documents.c.state), else_=FAILED),
+            state_before_trash=case((in_trash, FAILED), else_=None),
+        )
+    )
 
 
 class JobQueue:
@@ -270,7 +290,9 @@ class JobQueue:
         name = error_name(error)
         with self._engine.begin() as connection:
             row = connection.execute(
-                select(jobs.c.attempts, jobs.c.max_attempts).where(self._held(job_id, worker_id))
+                select(jobs.c.document_id, jobs.c.attempts, jobs.c.max_attempts).where(
+                    self._held(job_id, worker_id)
+                )
             ).first()
             if row is None:
                 msg = "the worker no longer holds this job"
@@ -287,6 +309,8 @@ class JobQueue:
             if result.rowcount != 1:  # taken back between the two statements
                 msg = "the worker no longer holds this job"
                 raise JobLostError(msg)
+            if ended:
+                _mark_failed(connection, [row.document_id])
         return "failed" if ended else "queued"
 
     def retry(self, job_id: str) -> bool:
@@ -309,7 +333,7 @@ class JobQueue:
         any worker runs: a job that some live worker holds would be taken from it too."""
         now = self._clock()
         with self._engine.begin() as connection:
-            failed = connection.execute(
+            ended = connection.execute(
                 update(jobs)
                 .where(jobs.c.status == "running", jobs.c.attempts >= jobs.c.max_attempts)
                 .values(
@@ -319,7 +343,10 @@ class JobQueue:
                     last_error=INTERRUPTED,
                     finished_at=now,
                 )
-            ).rowcount
+                .returning(jobs.c.document_id)
+            ).all()
+            failed = len(ended)
+            _mark_failed(connection, [job.document_id for job in ended])
             requeued = connection.execute(
                 update(jobs)
                 .where(jobs.c.status == "running")
