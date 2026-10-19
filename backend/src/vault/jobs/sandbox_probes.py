@@ -129,6 +129,62 @@ def spawn_sleeper(data: bytes) -> None:  # pragma: no cover - runs in the child
     time.sleep(60)
 
 
+def _started(start: object) -> bool:  # pragma: no cover - runs in the child
+    """True if ``start()`` made a new process (which is ended at once), False if it failed."""
+    try:
+        made = start()  # type: ignore[operator]
+    except OSError:
+        return False
+    if made == 0:  # pragma: no cover - the new process of a fork that succeeded
+        os._exit(0)
+    if isinstance(made, subprocess.Popen):
+        made.kill()
+        made.wait()
+    elif isinstance(made, int) and made > 0:
+        os.waitpid(made, 0)
+    return True
+
+
+def start_processes(data: bytes) -> list[str]:  # pragma: no cover - runs in the child
+    """Try every way of starting a process; return the names of the ways that worked."""
+    import ctypes
+    import platform
+
+    command = [sys.executable, "-I", "-c", "pass"]
+    null = subprocess.DEVNULL
+    ways: dict[str, object] = {
+        "os.fork": os.fork,
+        "subprocess": lambda: subprocess.Popen(command, stdin=null, stdout=null),  # noqa: S603
+        "subprocess with fork": lambda: subprocess.Popen(  # noqa: S603
+            command, stdin=null, stdout=null, preexec_fn=lambda: None
+        ),
+        "os.posix_spawn": lambda: os.posix_spawn(sys.executable, command, os.environ),
+        "libc fork": lambda: _checked(ctypes.CDLL(None, use_errno=True).fork()),
+    }
+    if platform.machine() == "x86_64":
+        syscall = ctypes.CDLL(None, use_errno=True).syscall
+        ways["fork system call"] = lambda: _checked(syscall(57))
+    return [name for name, start in ways.items() if _started(start)]
+
+
+def _checked(result: int) -> int:  # pragma: no cover - runs in the child
+    """A libc return value, as OSError when it failed."""
+    if result < 0:
+        raise OSError
+    return result
+
+
+def start_thread(data: bytes) -> int:  # pragma: no cover - runs in the child
+    """Start a thread, which the Linux filter still allows, and return what it computed."""
+    import threading
+
+    results: list[int] = []
+    thread = threading.Thread(target=lambda: results.append(len(data)))
+    thread.start()
+    thread.join()
+    return results[0]
+
+
 def exit_now(data: bytes) -> None:  # pragma: no cover - runs in the child
     os._exit(int(data))
 

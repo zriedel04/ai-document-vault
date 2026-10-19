@@ -7,8 +7,10 @@ parent's process id and the input's length, never document content. The child th
 1. keeps its standard output for the answer and points file descriptors 1 and 2 at the null
    device, so nothing a library prints or logs reaches the server's console (the parent starts it
    with standard error on the null device too);
-2. on Linux, asks to be killed when the parent dies and caps its address space with
-   ``RLIMIT_AS`` (on Windows the parent puts it in a Job Object instead, before sending input);
+2. on Linux, asks to be killed when the parent dies, caps its address space with ``RLIMIT_AS``
+   and installs a seccomp filter that refuses to start another process, since each process
+   would get a cap of its own (on Windows the parent puts it in a Job Object instead, whose cap
+   is the total of every process in it, before sending input);
 3. reads the input bytes from standard input into one ``bytes`` object of the announced length
    (one allocation, no second copy: the input may be close to the memory cap);
 4. calls the target and writes one answer: a status byte followed by the result as ASCII JSON
@@ -193,7 +195,8 @@ def _silence_output() -> int:  # pragma: no cover - runs in the child process
 
 
 def _limit_linux(memory_bytes: int, parent_pid: int) -> bool:  # pragma: no cover - child only
-    """Die with the parent (``PR_SET_PDEATHSIG``) and cap the address space. False on failure.
+    """Die with the parent (``PR_SET_PDEATHSIG``), cap the address space and forbid starting
+    another process (:func:`_forbid_new_processes`), so the cap is the total. False on failure.
 
     The death signal is sent when the parent thread that started the child ends; the runner's
     call is synchronous, so that thread outlives the child. A parent that died before the call
@@ -215,9 +218,106 @@ def _limit_linux(memory_bytes: int, parent_pid: int) -> bool:  # pragma: no cove
         _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
         cap = memory_bytes if hard == resource.RLIM_INFINITY else min(memory_bytes, hard)
         resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+        return _forbid_new_processes()
     except (OSError, ValueError, AttributeError):
         return False
-    return True
+
+
+# Linux system call numbers and audit architectures for the no-new-process filter
+# (``_forbid_new_processes``). ``None``: the call does not exist on that architecture.
+_AUDIT_ARCH_X86_64: Final = 0xC000003E
+_AUDIT_ARCH_AARCH64: Final = 0xC00000B7
+_SYSCALLS: Final = {
+    # machine: (audit arch, clone, clone3, fork, vfork)
+    "x86_64": (_AUDIT_ARCH_X86_64, 56, 435, 57, 58),
+    "aarch64": (_AUDIT_ARCH_AARCH64, 220, 435, None, None),
+}
+_X32_SYSCALL_BIT: Final = 0x40000000
+_CLONE_THREAD: Final = 0x00010000
+_EPERM: Final = 1
+_ENOSYS: Final = 38
+
+
+def no_new_process_filter(machine: str) -> list[tuple[int, int, int, int]] | None:
+    """A classic BPF seccomp program that refuses to create a process, or None for an
+    architecture it does not know.
+
+    It allows every system call but these: ``fork`` and ``vfork`` fail with ``EPERM``, ``clone``
+    fails with ``EPERM`` unless its flags hold ``CLONE_THREAD`` (a new thread shares the process's
+    memory, so its address space limit too), and ``clone3``, whose flags sit in memory a filter
+    cannot read, fails with ``ENOSYS``, on which glibc starts threads with ``clone`` instead. A
+    call from another architecture's ABI (32-bit ``int 0x80``, x32) fails with ``EPERM``, so its
+    own numbers for ``fork`` cannot get around the filter. Each instruction is
+    ``(code, jump if true, jump if false, k)`` as ``struct sock_filter`` holds it.
+    """
+    numbers = _SYSCALLS.get(machine)
+    if numbers is None:
+        return None
+    arch, clone, clone3, fork, vfork = numbers
+    ld_w_abs, jeq_k, jge_k, jset_k, ret_k = 0x20, 0x15, 0x35, 0x45, 0x06
+    allow, errno = 0x7FFF0000, 0x00050000  # SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO
+    deny, unsupported = errno | _EPERM, errno | _ENOSYS
+    refused = [number for number in (fork, vfork) if number is not None]
+    program: list[tuple[int, int, int, int]] = [
+        (ld_w_abs, 0, 0, 4),  # seccomp_data.arch
+        (jeq_k, 1, 0, arch),
+        (ret_k, 0, 0, deny),
+        (ld_w_abs, 0, 0, 0),  # seccomp_data.nr
+        (jge_k, 0, 1, _X32_SYSCALL_BIT),
+        (ret_k, 0, 0, deny),
+        (jeq_k, 0, 1, clone3),
+        (ret_k, 0, 0, unsupported),
+    ]
+    for number in refused:
+        program += [(jeq_k, 0, 1, number), (ret_k, 0, 0, deny)]
+    program += [
+        (jeq_k, 1, 0, clone),
+        (ret_k, 0, 0, allow),
+        (ld_w_abs, 0, 0, 16),  # the low 32 bits of seccomp_data.args[0], the flags
+        (jset_k, 0, 1, _CLONE_THREAD),
+        (ret_k, 0, 0, allow),
+        (ret_k, 0, 0, deny),
+    ]
+    return program
+
+
+def _forbid_new_processes() -> bool:  # pragma: no cover - runs in the child process
+    """Install :func:`no_new_process_filter` on this process. False when it cannot be.
+
+    ``RLIMIT_AS`` caps one process, and a process it starts gets a cap of its own, so the
+    memory cap is a total only while the child is the only process: with this filter it stays
+    so, as the Job Object keeps it a total on Windows. It also keeps every process the sandbox
+    runs in its process group and under the parent-death signal. ``PR_SET_NO_NEW_PRIVS`` comes
+    first, as the kernel requires of a process without ``CAP_SYS_ADMIN``; a filter cannot be
+    removed once installed, and it is inherited by nothing, since nothing can be started.
+    """
+    import ctypes
+    import platform
+
+    program = no_new_process_filter(platform.machine())
+    if program is None:
+        return False
+
+    class _Instruction(ctypes.Structure):
+        _fields_ = [
+            ("code", ctypes.c_uint16),
+            ("jt", ctypes.c_uint8),
+            ("jf", ctypes.c_uint8),
+            ("k", ctypes.c_uint32),
+        ]
+
+    class _Program(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(_Instruction))]
+
+    pr_set_no_new_privs, pr_set_seccomp, seccomp_mode_filter = 38, 22, 2
+    instructions = (_Instruction * len(program))(*(_Instruction(*item) for item in program))
+    fprog = _Program(len(program), instructions)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, *[ctypes.c_ulong] * 4]
+    if libc.prctl(pr_set_no_new_privs, 1, 0, 0, 0) != 0:
+        return False
+    installed = libc.prctl(pr_set_seccomp, seccomp_mode_filter, ctypes.addressof(fprog), 0, 0)
+    return bool(installed == 0)
 
 
 def _prepare_windows(answer_fd: int) -> None:  # pragma: no cover - Windows only, child only

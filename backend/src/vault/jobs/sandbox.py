@@ -49,36 +49,41 @@ of digits, and ``NaN``, ``Infinity`` and repeated keys are refused.
 
 **Memory cap.** On Windows the child is put in a Job Object with a process and a job memory limit
 (committed memory) and kill-on-close: when the server process ends for any reason, Windows closes
-the job's handle and ends every process in it, so a crash of the server leaves no orphan. The
-child starts suspended and runs only once it is in the job: in a virtual environment
-``sys.executable`` is a launcher that starts the real interpreter as its own child, and a process
-started before its parent joined the job would stay outside it. Processes started inside the job
-are in it too, so the cap and the kill cover the real interpreter and anything it starts. Before
-the first child, the server puts itself in a kill-on-close job of its own (:func:`server_job`), so
-every child is in that job from the moment it is created: a server that dies while a child is
-still suspended and outside its own job takes the child with it. ``subprocess`` cannot create a
-process directly in a job (``PROC_THREAD_ATTRIBUTE_JOB_LIST``), which would be the other way to
-close that window. On Linux the child caps its own address space with ``RLIMIT_AS`` before it
-reads the input, and asks the kernel to kill it when the parent dies
-(``PR_SET_PDEATHSIG``), then checks that its parent is still the server, so a server that died
-before that call is caught too; until the child has its input it waits on a pipe that the
-server's death closes. Address space is larger than committed memory (libraries reserve more
-than they use), so the same number is stricter on Linux; the Linux path is for development and
-CI, the product runs on Windows. An allocation that fails raises ``MemoryError`` in the child on
-both systems, and the child reports it as :class:`SandboxMemoryLimitError` at every step that grows
-with the input or the result: reading the input (into one ``bytes`` of the length given on its
-command line, so it is held once), importing and running the target, encoding the result and
-writing the answer. A library that aborts instead shows up as :class:`SandboxCrashError`. The
-parent passes the input as a view and reads the answer into one buffer bounded by
-``max_result_bytes``, decoding its text from a view of it, so the buffer is not copied first.
-Other systems are not supported (:class:`SandboxUnavailableError`).
+the job's handle and ends every process in it, so a crash of the server leaves no orphan. The child
+starts suspended and runs only once it is in the job: in a virtual environment ``sys.executable`` is
+a launcher that starts the real interpreter as its own child, and a process started before its
+parent joined the job would stay outside it. Processes started inside the job are in it too, so the
+cap and the kill cover the real interpreter and anything it starts. Before the first child, the
+server puts itself in a kill-on-close job of its own (:func:`server_job`), so every child is in that
+job from the moment it is created: a server that dies while a child is still suspended and outside
+its own job takes the child with it. ``subprocess`` cannot create a process directly in a job
+(``PROC_THREAD_ATTRIBUTE_JOB_LIST``), which would be the other way to close that window. On Linux
+the child caps its own address space with ``RLIMIT_AS`` before it reads the input, and asks the
+kernel to kill it when the parent dies (``PR_SET_PDEATHSIG``), then checks that its parent is still
+the server, so a server that died before that call is caught too; until the child has its input it
+waits on a pipe that the server's death closes. ``RLIMIT_AS`` caps one process, and a process it
+started would get a cap of its own (and no death signal), so the child then installs a seccomp
+filter that refuses to start another process (``fork``, ``vfork``, and ``clone`` without
+``CLONE_THREAD``; threads still start): on Linux the target runs as one process, so the cap is the
+total, as the job makes it on Windows, and a target that starts a program fails (with
+``PermissionError``) instead of escaping the cap. A kernel or an architecture where the filter
+cannot be installed (other than x86-64 and ARM64) is :class:`SandboxUnavailableError`. Address space
+is larger than committed memory (libraries reserve more than they use), so the same number is
+stricter on Linux; the Linux path is for development and CI, the product runs on Windows. An
+allocation that fails raises ``MemoryError`` in the child on both systems, and the child reports it
+as :class:`SandboxMemoryLimitError` at every step that grows with the input or the result: reading
+the input (into one ``bytes`` of the length given on its command line, so it is held once),
+importing and running the target, encoding the result and writing the answer. A library that aborts
+instead shows up as :class:`SandboxCrashError`. The parent passes the input as a view and reads the
+answer into one buffer bounded by ``max_result_bytes``, decoding its text from a view of it, so the
+buffer is not copied first. Other systems are not supported (:class:`SandboxUnavailableError`).
 
 **Timeout.** The timeout covers the whole run, the child's start included. On expiry the parent
 ends the child's whole process group (Linux, ``start_new_session``) or job (Windows), then reaps
 the child. On Linux the parent notices the exit without reaping (``waitid`` with ``WNOWAIT``), so
-the group's id stays reserved until the group has been killed, also after a normal exit. A
-process the target starts that leaves the group on purpose (``setsid``) escapes that kill on
-Linux; on Windows the job allows no breakaway.
+the group's id stays reserved until the group has been killed, also after a normal exit. On
+Linux the target cannot start a process that could leave the group; on Windows the job allows
+no breakaway.
 
 Nothing calls this yet: the extraction stage's handler will be the first caller. The runner logs
 nothing; the worker logs the job's outcome.
@@ -90,6 +95,7 @@ import base64
 import binascii
 import contextlib
 import dataclasses
+import inspect
 import json
 import os
 import signal
@@ -304,7 +310,8 @@ class _Dataclass(_Node):
     """A declared dataclass: an object with exactly its field names, each of its field's type.
 
     The class is the one the entry point declares, never one the answer names; it is built by
-    calling it with the fields as keywords, so its own checks (``__post_init__``) run too.
+    calling its generated ``__init__`` with the fields as keywords (:func:`_round_trips` refused
+    any class whose own code could run there).
     """
 
     def __init__(self, cls: type) -> None:
@@ -321,8 +328,61 @@ class _Dataclass(_Node):
 
 _RESULT_TYPE_RULE: Final = (
     "a result type is None, bool, int, float, str, bytes, list[X], tuple[X, ...], tuple[X, Y], "
-    "X | None, or a dataclass whose fields are all initialised and of these types"
+    "X | None, or a plain dataclass whose fields are all initialised and of these types"
 )
+
+
+def _generated(function: object) -> bool:
+    """True for a method ``dataclasses`` wrote (CPython 3.12 compiles each in ``__create_fn__``).
+
+    Should a later Python name it otherwise, every dataclass is refused, never one let through.
+    """
+    code = getattr(function, "__code__", None)
+    return isinstance(code, types.CodeType) and code.co_qualname.startswith("__create_fn__.")
+
+
+def _round_trips(cls: type) -> bool:
+    """True when the converter's call ``cls(**fields)`` rebuilds exactly what the child wrote
+    from ``dataclasses.fields`` of an instance, with nothing of the class's own code in between.
+
+    Refused: a field with ``init=False`` (the child writes it, ``__init__`` does not take it), an
+    ``InitVar`` (``__init__`` requires it, the child cannot write it), an ``__init__`` the class
+    or a base wrote itself (``dataclass`` keeps it, and it may take other arguments or change the
+    values), a ``__post_init__`` (it may change what ``__init__`` stored), a ``__new__``,
+    ``__setattr__`` (other than a frozen dataclass's own), ``__getattribute__`` or ``__getattr__``
+    of the class's own, a metaclass, and a field whose class attribute is a descriptor (it would
+    run on every read and write). A ``ClassVar`` is no field, so it is neither written nor read,
+    and ``kw_only`` fields are passed by name: both are accepted.
+    """
+    fields = dataclasses.fields(cls)
+    if type(cls) is not type or any(not item.init for item in fields):
+        return False
+    init = cls.__dict__.get("__init__")
+    if init is None or not _generated(init):
+        return False
+    try:
+        parameters = list(inspect.signature(init).parameters.values())[1:]
+    except (TypeError, ValueError):
+        return False
+    kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    if [parameter.name for parameter in parameters] != [item.name for item in fields] or any(
+        parameter.kind not in kinds for parameter in parameters
+    ):
+        return False
+    if getattr(cls, "__post_init__", None) is not None or getattr(cls, "__getattr__", None):
+        return False
+    new, get, set_ = (getattr(cls, name) for name in ("__new__", "__getattribute__", "__setattr__"))
+    if new is not object.__new__ or get is not object.__getattribute__:
+        return False
+    if set_ is not object.__setattr__ and not _generated(set_):
+        return False
+    for item in fields:
+        attribute = inspect.getattr_static(cls, item.name, None)
+        if hasattr(type(attribute), "__get__") and not isinstance(
+            attribute, types.MemberDescriptorType
+        ):
+            return False
+    return True
 
 
 def _compile_result_type(form: object, classes: dict[type, _Dataclass] | None = None) -> _Node:
@@ -350,14 +410,14 @@ def _compile_result_type(form: object, classes: dict[type, _Dataclass] | None = 
     if origin is None and isinstance(form, type) and dataclasses.is_dataclass(form):
         if form in classes:
             return classes[form]
+        if not _round_trips(form):
+            raise ValueError(_RESULT_TYPE_RULE)
         node = classes[form] = _Dataclass(form)
         try:
             hints = typing.get_type_hints(form)
         except Exception:
             raise ValueError(_RESULT_TYPE_RULE) from None
         for item in dataclasses.fields(form):
-            if not item.init:
-                raise ValueError(_RESULT_TYPE_RULE)
             node.fields[item.name] = _compile_result_type(hints[item.name], classes)
         return node
     raise ValueError(_RESULT_TYPE_RULE)

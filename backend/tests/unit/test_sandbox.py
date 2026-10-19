@@ -21,10 +21,10 @@ import time
 import tracemalloc
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from enum import IntFlag
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import pytest
 
@@ -67,6 +67,8 @@ RESULT_TYPES: dict[str, object] = {
     "exit_system": None,
     "environment_names": list[str],
     "every_kind": ProbeKinds,
+    "start_processes": list[str],
+    "start_thread": int,
 }
 NAMES = tuple(RESULT_TYPES)
 ENTRIES = {name: EntryPoint(f"{PROBES}:{name}", kind) for name, kind in RESULT_TYPES.items()}
@@ -232,11 +234,93 @@ def test_a_timeout_kills_and_reaps_the_child(
     assert gone(process.pid)
 
 
-def test_a_timeout_also_ends_what_the_child_started(tmp_path: Path) -> None:
+@pytest.mark.skipif(sys.platform != "win32", reason="Linux: the child cannot start a process")
+def test_a_timeout_also_ends_what_the_child_started(tmp_path: Path) -> None:  # pragma: no cover
+    """Windows: the job holds what the child starts, under the same cap, and ends it."""
     pid_file = tmp_path / "grandchild.pid"
     with pytest.raises(SandboxTimeoutError):
         run("spawn_sleeper", str(pid_file).encode(), SandboxLimits(5, 256 * MIB))
     assert gone(wait_for_file(pid_file))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the seccomp filter is Linux only")
+def test_the_child_cannot_start_a_process_on_linux(tmp_path: Path) -> None:
+    """``RLIMIT_AS`` caps each process, so a second process would have a cap of its own: the
+    filter refuses every way of starting one, and a target that tries fails."""
+    assert run("start_processes") == []
+    with pytest.raises(SandboxChildError) as caught:
+        run("spawn_sleeper", str(tmp_path / "never.pid").encode())
+    assert caught.value.error_class == "PermissionError"
+    assert not (tmp_path / "never.pid").exists()
+
+
+def test_a_process_can_be_started_without_the_filter() -> None:
+    """The control: in this process, without the filter, the probe does start processes, so the
+    empty list above is the filter's doing."""
+    if sys.platform != "linux":  # pragma: no cover - os.fork is POSIX
+        pytest.skip("the probe forks")
+    assert "subprocess" in sandbox_probes.start_processes(b"")
+
+
+def test_threads_still_start_in_the_child() -> None:
+    """glibc starts a thread with ``clone3`` and, on ``ENOSYS``, with ``clone``."""
+    assert run("start_thread", b"abcd") == 4
+
+
+def run_filter(program: list[tuple[int, int, int, int]], arch: int, nr: int, flags: int) -> int:
+    """An interpreter for the instructions the filter uses, over one ``seccomp_data``."""
+    data = {0: nr, 4: arch, 16: flags & 0xFFFFFFFF}
+    accumulator, pc = 0, 0
+    while True:
+        code, jt, jf, k = program[pc]
+        if code == 0x20:
+            accumulator = data[k]
+            pc += 1
+        elif code == 0x06:
+            return k
+        else:
+            taken = {0x15: accumulator == k, 0x35: accumulator >= k, 0x45: accumulator & k != 0}
+            pc += 1 + (jt if taken[code] else jf)
+
+
+ALLOW, EPERM, ENOSYS = 0x7FFF0000, 0x00050001, 0x00050026
+THREAD = 0x003D0F00  # the flags glibc's pthread_create passes, CLONE_THREAD among them
+FILTER_CASES = {
+    "x86_64": [
+        ((0xC000003E, 0, 0), ALLOW),  # read
+        ((0xC000003E, 59, 0), ALLOW),  # execve: replaces this process, under its cap
+        ((0xC000003E, 57, 0), EPERM),  # fork
+        ((0xC000003E, 58, 0), EPERM),  # vfork
+        ((0xC000003E, 56, 0x11), EPERM),  # clone as fork does it (SIGCHLD)
+        ((0xC000003E, 56, 0x4111), EPERM),  # clone as posix_spawn does it (CLONE_VM|VFORK)
+        ((0xC000003E, 56, THREAD), ALLOW),
+        ((0xC000003E, 435, 0), ENOSYS),  # clone3
+        ((0xC000003E, 0x40000000 | 57, 0), EPERM),  # x32
+        ((0x40000003, 2, 0), EPERM),  # i386: fork is 2
+        ((0x40000003, 0, 0), EPERM),
+    ],
+    "aarch64": [
+        ((0xC00000B7, 63, 0), ALLOW),  # read
+        ((0xC00000B7, 220, 0x11), EPERM),
+        ((0xC00000B7, 220, THREAD), ALLOW),
+        ((0xC00000B7, 435, 0), ENOSYS),
+        ((0x40000028, 2, 0), EPERM),  # arm: fork is 2
+    ],
+}
+
+
+@pytest.mark.parametrize("machine", FILTER_CASES)
+def test_the_filter_refuses_every_way_to_start_a_process(machine: str) -> None:
+    program = sandbox_child.no_new_process_filter(machine)
+    assert program is not None
+    for (arch, nr, flags), action in FILTER_CASES[machine]:
+        assert run_filter(program, arch, nr, flags) == action, (arch, nr, flags)
+
+
+def test_an_unknown_architecture_has_no_filter() -> None:
+    """The child then reports that it cannot limit itself: SandboxUnavailableError."""
+    assert sandbox_child.no_new_process_filter("riscv64") is None
+    assert sandbox_child.no_new_process_filter("i686") is None
 
 
 def kill_server_after(script: str, pid_file: Path) -> int:
@@ -507,6 +591,130 @@ class Plain:
     a: int
 
 
+# Dataclass shapes the converter could not rebuild exactly: refused at definition.
+@dataclass
+class WithInitVar:
+    a: int
+    scale: InitVar[int]
+
+
+@dataclass
+class WithDefaultInitVar:
+    a: int
+    scale: InitVar[int] = 1
+
+
+@dataclass
+class OwnInit:
+    a: int
+
+    def __init__(self, a: int) -> None:
+        self.a = a * 2
+
+
+class InitBase:
+    def __init__(self, a: int) -> None:
+        self.a = a + 1
+
+
+@dataclass(init=False)
+class InheritedInit(InitBase):
+    a: int
+
+
+@dataclass
+class PostInitChanges:
+    text: str
+
+    def __post_init__(self) -> None:
+        self.text = self.text.strip()
+
+
+@dataclass
+class OwnSetattr:
+    a: int
+
+    def __setattr__(self, name: str, value: object) -> None:
+        object.__setattr__(self, name, value)
+
+
+@dataclass
+class OwnNew:
+    a: int
+
+    def __new__(cls, *args: object, **kwargs: object) -> OwnNew:
+        return super().__new__(cls)
+
+
+@dataclass
+class OwnGetattribute:
+    a: int
+
+    def __getattribute__(self, name: str) -> object:
+        return object.__getattribute__(self, name)
+
+
+@dataclass
+class OwnGetattr:
+    a: int
+
+    def __getattr__(self, name: str) -> object:
+        raise AttributeError(name)
+
+
+class Meta(type):
+    pass
+
+
+@dataclass
+class WithMeta(metaclass=Meta):
+    a: int
+
+
+class Doubling:
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = "_" + name
+
+    def __get__(self, instance: object, owner: type | None = None) -> int:
+        return 0 if instance is None else int(getattr(instance, self.name))
+
+    def __set__(self, instance: object, value: int) -> None:
+        setattr(instance, self.name, value * 2)
+
+
+@dataclass
+class DescriptorField:
+    a: int = Doubling()  # type: ignore[assignment]
+
+
+@dataclass
+class Base:
+    a: int
+
+
+@dataclass(init=False)
+class InheritsGeneratedInit(Base):
+    b: int = 0
+
+
+# Shapes that do rebuild exactly: accepted.
+@dataclass
+class WithClassVar:
+    limit: ClassVar[int] = 5
+    a: int
+
+
+@dataclass
+class Derived(Base):
+    b: str
+
+
+@dataclass(kw_only=True)
+class KeywordOnly:
+    a: int
+    b: str = "x"
+
+
 class Flag(IntFlag):
     A = 1
 
@@ -555,6 +763,9 @@ ROUND_TRIPS: list[tuple[object, object]] = [
     (ProbeResult(size=3, head=b"abc"), ProbeResult),
     ([ProbePage(1, "a"), ProbePage(2, "b")], list[ProbePage]),
     (ProbePage(1, "a"), ProbePage | None),
+    (WithClassVar(a=1), WithClassVar),
+    (Derived(a=1, b="b"), Derived),
+    (KeywordOnly(a=1), KeywordOnly),
     (sandbox_probes.every_kind(b"one\ntwo, three"), ProbeKinds),
     (sandbox_probes.every_kind(b""), ProbeKinds),
 ]
@@ -648,6 +859,21 @@ def test_a_recursive_value_is_refused_by_the_child() -> None:
         Unresolvable,
         list[WithDict],
         Callable[[], int],
+        WithInitVar,
+        WithDefaultInitVar,
+        OwnInit,
+        InheritedInit,
+        Checked,  # a __post_init__ that only checks is refused too: it cannot be told apart
+        PostInitChanges,
+        OwnSetattr,
+        OwnNew,
+        OwnGetattribute,
+        OwnGetattr,
+        WithMeta,
+        DescriptorField,
+        InheritsGeneratedInit,
+        list[WithInitVar],
+        ProbePage | PostInitChanges,
     ],
     ids=repr,
 )
@@ -678,7 +904,6 @@ def test_an_entry_point_declares_its_result_type() -> None:
         (b'{"size":1,"size":2,"head":{"$bytes":""}}', ProbeResult),
         (b'{"size":"1","head":{"$bytes":""}}', ProbeResult),
         (b'[1,{"$bytes":""}]', ProbeResult),
-        (b'{"count":-1}', Checked),  # the class's own check refuses it
         # Each kind against the others.
         (b"true", int),
         (b"1.0", int),
@@ -726,6 +951,9 @@ def test_nothing_in_the_answer_is_called_but_the_declared_class(
     """An answer shaped like another dataclass's fields builds the declared class or nothing."""
     called: list[str] = []
     real_init = ProbePage.__init__
+    # Compiled first: a class whose __init__ is not the generated one is refused at definition.
+    as_result, as_page = decoder(ProbeResult), decoder(ProbePage)
+    answer = sandbox_child.OK + b'{"number":1,"text":"a"}'
 
     def recording_init(self: ProbePage, *args: object, **kwargs: object) -> None:
         called.append("ProbePage")
@@ -733,9 +961,9 @@ def test_nothing_in_the_answer_is_called_but_the_declared_class(
 
     monkeypatch.setattr(ProbePage, "__init__", recording_init)
     with pytest.raises(SandboxResultError):
-        decode(b'{"number":1,"text":"a"}', ProbeResult)
+        sandbox._interpret(answer, as_result)
     assert called == []
-    built = decode(b'{"number":1,"text":"a"}', ProbePage)
+    built = sandbox._interpret(answer, as_page)
     assert called == ["ProbePage"]
     assert built == ProbePage(1, "a")
 
@@ -1097,7 +1325,10 @@ def test_the_probes_are_named_in_the_test_allowlist() -> None:
     functions = {
         name
         for name, value in vars(sandbox_probes).items()
-        if callable(value) and getattr(value, "__module__", None) == PROBES and name.islower()
+        if callable(value)
+        and getattr(value, "__module__", None) == PROBES
+        and name.islower()
+        and not name.startswith("_")
     }
     assert functions == set(NAMES)
 
