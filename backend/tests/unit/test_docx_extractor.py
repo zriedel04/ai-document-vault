@@ -908,6 +908,189 @@ def test_a_field_left_open_ends_with_its_paragraph() -> None:
     assert text_of(build(fill)) == "next"
 
 
+# Field markers where the text around them is left out
+
+
+def fld(kind: str) -> str:
+    return f'<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>'
+
+
+def code(text: str) -> str:
+    return f'<w:r><w:instrText xml:space="preserve"> {text} </w:instrText></w:r>'
+
+
+# Places that are in the document as accepted but not shown: the text there is left out, and a
+# field marker there still opens, splits or closes its field.
+NOT_SHOWN: dict[str, Callable[[str], str]] = {
+    "hidden run": lambda kind: (
+        f'<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="{kind}"/>'
+        f"<w:t>{CANARY}</w:t></w:r>"
+    ),
+    "hidden run inside a hyperlink": lambda kind: (
+        f'<w:hyperlink><w:r><w:rPr><w:vanish w:val="1"/></w:rPr>'
+        f'<w:fldChar w:fldCharType="{kind}"/></w:r></w:hyperlink>'
+    ),
+    "ruby guide": lambda kind: (
+        f"<w:r><w:ruby><w:rt>{fld(kind)}{run(CANARY)}</w:rt><w:rubyBase/></w:ruby></w:r>"
+    ),
+    "equation": lambda kind: (
+        f"<m:oMathPara><m:oMath>{fld(kind)}{run(CANARY)}</m:oMath></m:oMathPara>"
+    ),
+}
+# Places whose markers are not in the document as accepted and read: content accepting the
+# changes removes, and a representation of alternate content that is not read.
+NOT_PRESENT: dict[str, Callable[[str], str]] = {
+    "tracked deletion": lambda kind: f'<w:del w:id="1" w:author="A">{fld(kind)}</w:del>',
+    "move, old place": lambda kind: f'<w:moveFrom w:id="2" w:author="A">{fld(kind)}</w:moveFrom>',
+    "conflict deletion": lambda kind: (
+        f'<w14:conflictDel w:id="3" w:author="A">{fld(kind)}</w14:conflictDel>'
+    ),
+    "fallback not read": lambda kind: (
+        f'<mc:AlternateContent><mc:Choice Requires="w"/><mc:Fallback>{fld(kind)}</mc:Fallback>'
+        "</mc:AlternateContent>"
+    ),
+    "choice not understood": lambda kind: (
+        f'<mc:AlternateContent><mc:Choice Requires="x">{fld(kind)}</mc:Choice>'
+        "<mc:Fallback/></mc:AlternateContent>"
+    ),
+}
+
+
+def field_text(*content: str) -> str:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, paragraph("".join(content)))
+
+    return text_of(build(fill))
+
+
+@pytest.mark.parametrize("place", NOT_SHOWN.values(), ids=NOT_SHOWN.keys())
+def test_a_hidden_separate_still_ends_the_code(place: Callable[[str], str]) -> None:
+    assert field_text(
+        fld("begin"), code(CANARY), place("separate"), run("result"), fld("end"), run(" after")
+    ) == ("result after")
+
+
+@pytest.mark.parametrize("place", NOT_SHOWN.values(), ids=NOT_SHOWN.keys())
+def test_a_hidden_end_still_closes_the_field(place: Callable[[str], str]) -> None:
+    # A field nested in another field's code: if its hidden end were missed, the outer field's
+    # separate would split the nested field instead, and the outer result would stay in the code.
+    assert field_text(
+        fld("begin"),
+        code("IF"),
+        fld("begin"),
+        code("DATE"),
+        fld("separate"),
+        run(CANARY),
+        place("end"),
+        fld("separate"),
+        run("result"),
+        fld("end"),
+        run(" after"),
+    ) == ("result after")
+
+
+@pytest.mark.parametrize("place", NOT_SHOWN.values(), ids=NOT_SHOWN.keys())
+def test_a_hidden_begin_still_starts_the_code(place: Callable[[str], str]) -> None:
+    # A field nested in the code of a field whose begin is hidden is still in the code.
+    assert field_text(
+        place("begin"),
+        code("IF"),
+        fld("begin"),
+        code("DATE"),
+        fld("separate"),
+        run(CANARY),
+        fld("end"),
+        fld("separate"),
+        run("result"),
+        fld("end"),
+        run(" after"),
+    ) == ("result after")
+
+
+@pytest.mark.parametrize("place", NOT_SHOWN.values(), ids=NOT_SHOWN.keys())
+def test_nested_fields_with_every_marker_hidden_keep_only_the_outer_result(
+    place: Callable[[str], str],
+) -> None:
+    assert field_text(
+        run("before "),
+        place("begin"),
+        code("IF"),
+        place("begin"),
+        code("DATE"),
+        place("separate"),
+        run(CANARY),
+        place("end"),
+        place("separate"),
+        run("outer"),
+        place("begin"),
+        code("PAGE"),
+        place("separate"),
+        run(" 7"),
+        place("end"),
+        place("end"),
+        run(" after"),
+    ) == ("before outer 7 after")
+
+
+@pytest.mark.parametrize("place", NOT_PRESENT.values(), ids=NOT_PRESENT.keys())
+def test_a_marker_that_is_not_in_the_accepted_document_does_not_count(
+    place: Callable[[str], str],
+) -> None:
+    # Accepted, the field has no separate, so everything to its end is code.
+    assert field_text(
+        fld("begin"), code("REF a"), place("separate"), run(CANARY), fld("end"), run("after")
+    ) == ("after")
+    # Accepted, the outer field has no begin, so the nested field is an ordinary field.
+    assert field_text(
+        place("begin"),
+        fld("begin"),
+        code("DATE"),
+        fld("separate"),
+        run("nested"),
+        fld("end"),
+        fld("separate"),
+        run(" result"),
+        place("end"),
+        run(" after"),
+    ) == ("nested result after")
+
+
+def test_a_marker_in_the_representation_that_is_read_counts() -> None:
+    chosen = (
+        f'<mc:AlternateContent><mc:Choice Requires="w">{fld("separate")}</mc:Choice>'
+        f"<mc:Fallback>{fld('end')}</mc:Fallback></mc:AlternateContent>"
+    )
+
+    assert field_text(fld("begin"), code(CANARY), chosen, run("result"), fld("end")) == "result"
+
+
+def test_a_text_box_anchored_in_a_hidden_run_is_left_out() -> None:
+    hidden = (
+        f"<w:r><w:rPr><w:vanish/></w:rPr><w:pict><w:txbxContent><w:p>{run(CANARY)}</w:p>"
+        "</w:txbxContent></w:pict></w:r>"
+    )
+
+    assert field_text(run("Anchor"), hidden) == "Anchor"
+
+
+def test_every_excluded_element_is_decided_for_field_markers() -> None:
+    # Each excluded element is either walked for its field markers (shown nowhere, but in the
+    # document), or holds content accepting the changes removes, or has no runs to hold a marker.
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    w14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+    m = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+    removed = {f"{w}del", f"{w}moveFrom", f"{w14}conflictDel"}
+    no_runs = {
+        f"{w}{name}"
+        for name in ("pPr", "rPr", "delText", "delInstrText", "instrText", "sdtPr", "sdtEndPr")
+    } | {f"{w}sym"}
+
+    assert {f"{w}rt", f"{m}oMath", f"{m}oMathPara"} == extractor.FIELDS_ONLY
+    assert extractor.FIELDS_ONLY | removed | no_runs == EXCLUDED
+    assert not extractor.FIELDS_ONLY & (removed | no_runs)
+    assert not removed & no_runs
+
+
 def test_japanese_text_with_ruby_reads_as_written() -> None:
     # A heading with furigana over each kanji: the heading's title is the base text alone.
     def fill(document: DocumentObject) -> None:

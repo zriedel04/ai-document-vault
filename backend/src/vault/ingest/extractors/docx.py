@@ -41,13 +41,19 @@ What the text holds:
   Text comes from ``w:t``; tabs (``w:tab``, ``w:ptab``) become a tab, breaks (``w:br``, ``w:cr``) a
   line break, a non-breaking hyphen a hyphen, and a soft hyphen nothing.
 - Field results are kept and field codes are not (``w:instrText``, and everything between a
-  complex field's ``begin`` and ``separate``, a field nested in the code included).
+  complex field's ``begin`` and ``separate``, a field nested in the code included). A field marker
+  (``w:fldChar``) counts wherever the text around it is left out because it is not shown: in a
+  hidden run, a ruby guide or an equation (``FIELDS_ONLY``). A hidden ``separate`` still ends the
+  code, so the result after it is read, and a hidden ``begin`` still starts one, so a nested
+  field's result inside the code stays out. A marker in content that accepting the changes removes
+  (``w:del``, ``w:moveFrom``, ``w14:conflictDel``), or in a representation of alternate content
+  that is not read, does not count: the document as accepted and read has no such marker.
 - Ruby's pronunciation guide (``w:rt``, the small kana over Japanese text) is left out, so the base
   text reads as written.
 - A symbol (``w:sym``) is left out: it names a glyph in a symbol font (Wingdings, Symbol), usually a
   private-use code point, not a character.
-- Hidden text (``w:vanish`` set on the run) is left out. Text hidden through a style is not
-  detected and is kept.
+- Hidden text (``w:vanish`` set on the run) is left out, and so is a text box anchored in a
+  hidden run. Text hidden through a style is not detected and is kept.
 - Left out: headers and footers (letterhead and page numbers repeated on every page), footnotes,
   endnotes and comments (separate parts, not the body), equations (``m:oMath``: their linear text
   would lose the structure that gives it meaning), content control properties, and the document's
@@ -150,6 +156,10 @@ EXCLUDED: Final = frozenset(
         f"{_M}oMathPara",  # equation paragraph
     }
 )
+# The excluded elements whose text is left out because it is not shown, though it is part of the
+# document as accepted: their field markers are still followed (as in a hidden run), so a field
+# that opens or closes inside one does not leave the field state wrong for the text after it.
+FIELDS_ONLY: Final = frozenset({qn("w:rt"), f"{_M}oMath", f"{_M}oMathPara"})
 # Run content that stands for a character.
 CHARACTERS: Final = {
     qn("w:tab"): "\t",
@@ -359,6 +369,10 @@ class _Inline:
     ``separate`` to ``end``; text is kept only outside every open field's code, so a field nested in
     another field's code is left out too. The field state is kept per paragraph. Recursion is
     bounded: libxml2 refuses a document nested deeper than 256 elements.
+
+    ``shown`` is False inside content that is in the document but not shown (a hidden run, an
+    element of ``FIELDS_ONLY``): no text or text box is taken from it, but its field markers still
+    change the state, because they delimit the code and result of the text that is shown.
     """
 
     def __init__(self) -> None:
@@ -366,19 +380,22 @@ class _Inline:
         self.boxes: list[BaseOxmlElement] = []
         self._fields: list[bool] = []  # one per open field: True while in its code
 
-    def walk(self, element: BaseOxmlElement) -> None:
+    def walk(self, element: BaseOxmlElement, *, shown: bool = True) -> None:
         for child in element.iterchildren():
             tag = child.tag
             if tag in EXCLUDED:
+                if tag in FIELDS_ONLY:
+                    self.walk(child, shown=False)
                 continue
             if tag == _T:
-                self._add(child.text or "")
+                self._add(child.text or "", shown)
             elif tag in CHARACTERS:
-                self._add(CHARACTERS[tag])
+                self._add(CHARACTERS[tag], shown)
             elif tag == _FLD_CHAR:
                 self._field(child.get(_FLD_CHAR_TYPE))
             elif tag == _TXBX_CONTENT:
-                self.boxes.append(child)
+                if shown:
+                    self.boxes.append(child)
             elif tag == _ALT_CHUNK:  # block content, but refused wherever it is met
                 raise ImportedContentError
             elif tag == _ALTERNATE:
@@ -386,12 +403,12 @@ class _Inline:
                 # readers): one representation is read, never both.
                 chosen = _selected(child)
                 if chosen is not None:
-                    self.walk(chosen)
-            elif tag != _R or not _hidden(child):
-                self.walk(child)
+                    self.walk(chosen, shown=shown)
+            else:
+                self.walk(child, shown=shown and not (tag == _R and _hidden(child)))
 
-    def _add(self, text: str) -> None:
-        if not any(self._fields):
+    def _add(self, text: str, shown: bool) -> None:
+        if shown and not any(self._fields):
             self.parts.append(text)
 
     def _field(self, kind: str | None) -> None:
