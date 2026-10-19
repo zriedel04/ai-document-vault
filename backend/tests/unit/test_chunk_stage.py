@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Connection, Engine, delete, select, update
 
+import vault.db.engine
 from tests.conftest import LOCAL
 from tests.unit.test_chunks import assert_index_in_step, course_pages
 from tests.unit.test_documents_api import Library
@@ -208,29 +209,57 @@ def chunking_with(
     return seen
 
 
-def test_pages_whose_headings_change_while_they_are_chunked_are_not_stored(
-    library: Library, engine: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Same text, other headings: every chunk still matches its page's text, so only comparing
-    # the pages themselves shows that the section paths would come from headings that are gone.
-    document_id, version_id, sha256 = imported(library)
-    changed = [
+def renamed_pages() -> list[PageText]:
+    """The course pages with the same text and other headings: every chunk still matches its
+    page's text, so only comparing the pages shows that section paths would come from headings
+    that are gone."""
+    return [
         PageText(
             page.number, page.text, (PageHeading(1, "Renamed", 0, 18),) if page.headings else ()
         )
         for page in course_pages()
     ]
-    chunking_with(
-        monkeypatch, lambda: replace_pages(engine, version_id, changed, "text-1", "utf-8")
-    )
+
+
+def test_pages_whose_headings_change_while_they_are_chunked_are_chunked_again(
+    library: Library, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id, version_id, sha256 = imported(library)
+    changes = [renamed_pages()]
+
+    def change_once() -> None:
+        if changes:
+            replace_pages(engine, version_id, changes.pop(), "text-1", "utf-8")
+
+    seen = chunking_with(monkeypatch, change_once)
+    assert chunk_document(engine, document_id, sha256) is Outcome.STORED
+    assert len(seen) == 2  # the first chunks were made from headings that were gone
+    assert any('"Renamed"' in row[5] for row in stored_chunks(engine, version_id))
+    assert state(engine, document_id) == ("searchable", None)
+
+
+def test_pages_that_keep_changing_fail_the_attempt_and_store_nothing(
+    library: Library, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id, version_id, sha256 = imported(library)
+    versions = [course_pages(), renamed_pages()]
+
+    def change_every_time() -> None:
+        versions.reverse()
+        replace_pages(engine, version_id, versions[0], "text-1", "utf-8")
+
+    seen = chunking_with(monkeypatch, change_every_time)
     with pytest.raises(PagesChangedError) as raised:
         chunk_document(engine, document_id, sha256)
     assert CANARY not in str(raised.value)
+    assert len(seen) == chunk_stage.MAX_ROUNDS
     assert stored_chunks(engine, version_id) == []
     assert state(engine, document_id) == ("processing", None)
-    monkeypatch.undo()
-    assert chunk_document(engine, document_id, sha256) is Outcome.STORED
-    assert any('"Renamed"' in row[5] for row in stored_chunks(engine, version_id))
+    # With a job the failed attempt is recorded in the transaction that found it.
+    queue, job = last_attempt(engine, document_id, sha256)
+    assert chunk_stage.handler(engine, queue)(job) is Completion.ATTEMPT_FAILED
+    assert job_row(engine, job.id).last_error == "PagesChangedError"
+    assert state(engine, document_id) == ("failed", None)
 
 
 def test_a_document_deleted_while_its_pages_are_chunked_is_left_alone(
@@ -431,9 +460,92 @@ def test_a_chunk_job_with_nothing_to_store_is_completed_by_its_handler(
     assert other_id != document_id
 
 
-def test_a_chunk_job_that_raises_is_not_completed(library: Library, engine: Engine) -> None:
+@pytest.mark.parametrize("max_attempts", [1, 2])
+def test_a_chunk_job_without_pages_records_its_failed_attempt_itself(
+    library: Library, engine: Engine, max_attempts: int
+) -> None:
     document_id, _, sha256 = imported(library, extracted=False)
+    queue = JobQueue(engine)
+    queue.enqueue(document_id, CHUNK_STAGE, sha256, max_attempts=max_attempts)
+    job = queue.claim(WORKER, [CHUNK_STAGE])
+    assert job is not None
+    completion = chunk_stage.handler(engine, queue)(job)
+    row = job_row(engine, job.id)
+    assert row.last_error == "PagesMissingError"
+    if max_attempts == 1:
+        assert completion is Completion.ATTEMPT_FAILED
+        assert row.status == "failed"
+        assert state(engine, document_id) == ("failed", None)
+    else:
+        assert completion is Completion.ATTEMPT_QUEUED
+        assert row.status == "queued"
+        assert state(engine, document_id) == ("processing", None)
+
+
+def before_the_write_lock(monkeypatch: pytest.MonkeyPatch, meanwhile: Callable[[], None]) -> None:
+    """Run ``meanwhile`` once, as another writer would, after the stage's snapshot and before it
+    takes the write lock."""
+    real = vault.db.engine.write_transaction
+    pending = [meanwhile]
+
+    def interfere_then_lock(engine: Engine) -> Any:
+        while pending:
+            pending.pop()()
+        return real(engine)
+
+    monkeypatch.setattr("vault.ingest.chunk_stage.write_transaction", interfere_then_lock)
+
+
+def move_version(engine: Engine, version_id: str, sha256: str) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            update(document_versions)
+            .where(document_versions.c.id == version_id)
+            .values(blob_sha256=sha256)
+        )
+
+
+def test_a_version_that_comes_back_to_the_jobs_bytes_after_the_snapshot_is_chunked(
+    library: Library, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The snapshot finds the document holding other bytes; before the stage decides, the version
+    # moves back to the job's bytes. An enqueue of that work would have returned this running job,
+    # so ending it as stale would leave the document never chunked.
+    document_id, version_id, sha256 = imported(library)
+    _, other_version, _ = imported(library)
+    move_version(engine, version_id, stored_sha(engine, other_version))
     queue, job = last_attempt(engine, document_id, sha256)
-    with pytest.raises(PagesMissingError):
-        chunk_stage.handler(engine, queue)(job)
-    assert job_row(engine, job.id).status == "running"  # the pool records the failure
+    assert queue.enqueue(document_id, CHUNK_STAGE, sha256) == job.id  # the same work, running
+    before_the_write_lock(monkeypatch, lambda: move_version(engine, version_id, sha256))
+    assert chunk_stage.handler(engine, queue)(job) is Completion.RECORDED
+    assert stored_chunks(engine, version_id) != []
+    assert job_row(engine, job.id).status == "done"
+    assert state(engine, document_id) == ("searchable", None)
+
+
+def test_pages_stored_after_a_snapshot_without_them_are_chunked(
+    library: Library, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id, version_id, sha256 = imported(library, extracted=False)
+    queue, job = last_attempt(engine, document_id, sha256)
+    before_the_write_lock(
+        monkeypatch,
+        lambda: replace_pages(engine, version_id, course_pages(), "text-1", "utf-8"),
+    )
+    assert chunk_stage.handler(engine, queue)(job) is Completion.RECORDED
+    assert stored_chunks(engine, version_id) != []
+    assert state(engine, document_id) == ("searchable", None)
+
+
+def test_a_job_ended_as_stale_lets_the_same_work_be_queued_again(
+    library: Library, engine: Engine
+) -> None:
+    document_id, version_id, sha256 = imported(library)
+    _, other_version, _ = imported(library)
+    move_version(engine, version_id, stored_sha(engine, other_version))
+    queue, job = last_attempt(engine, document_id, sha256)
+    assert chunk_stage.handler(engine, queue)(job) is Completion.RECORDED
+    move_version(engine, version_id, sha256)
+    assert (
+        queue.enqueue(document_id, CHUNK_STAGE, sha256) != job.id
+    )  # a new job, not the closed one

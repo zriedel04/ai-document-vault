@@ -879,3 +879,26 @@ def test_a_job_replaced_by_a_later_job_of_its_stage_fails_without_its_document(
     assert status_of(engine, old) == "failed"
     assert document_state(engine, replaced) == ("searchable", None)
     assert document_state(engine, not_replaced) == ("failed", None)
+
+
+def test_a_failed_attempt_recorded_in_the_callers_transaction_commits_and_rolls_back_with_it(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    job = queue.claim(WORKER, ["chunk"])
+    assert job is not None
+
+    def decide_then_crash() -> None:
+        with engine.begin() as connection:
+            queue.fail(job.id, job.worker_id, RuntimeError(), connection=connection)
+            raise ConnectionAbortedError
+
+    with pytest.raises(ConnectionAbortedError):
+        decide_then_crash()
+    assert status_of(engine, job_id) == "running"
+    assert document_state(engine, document_id) == ("processing", None)
+    with engine.begin() as connection:
+        assert queue.fail(job.id, job.worker_id, RuntimeError(), connection=connection) == "failed"
+    assert status_of(engine, job_id) == "failed"
+    assert document_state(engine, document_id) == ("failed", None)

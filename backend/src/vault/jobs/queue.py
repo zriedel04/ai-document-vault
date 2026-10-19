@@ -130,7 +130,7 @@ def _check_stages(stages: Iterable[str]) -> tuple[str, ...]:
 
 
 class Completion(StrEnum):
-    """What a handler returns when it marked its own job done.
+    """What a handler returns when it ended its own job's attempt.
 
     A handler that writes its result to ``vault.db`` calls ``JobQueue.complete`` with the
     connection of the transaction that writes it, and returns ``RECORDED``; the worker pool then
@@ -140,9 +140,17 @@ class Completion(StrEnum):
     the write: a worker that no longer holds the job gets ``JobLostError`` inside the transaction,
     and its result is rolled back. A handler that stores nothing returns None, and the pool
     completes the job.
+
+    The same holds for a failed attempt that a handler decides under its write lock: it calls
+    ``JobQueue.fail`` with that transaction's connection and returns ``ATTEMPT_QUEUED`` or
+    ``ATTEMPT_FAILED`` (from the status ``fail`` returned). Raising instead would end the
+    transaction first and leave a moment in which another writer's ``enqueue`` of the same work
+    returns this still running job, whose attempt has already decided without that work.
     """
 
-    RECORDED = "recorded"
+    RECORDED = "recorded"  # the job is done
+    ATTEMPT_QUEUED = "queued"  # the attempt failed; the job runs again after its back-off
+    ATTEMPT_FAILED = "failed"  # the attempt failed and was the last: the job is failed
 
 
 class RetryRefusal(StrEnum):
@@ -352,35 +360,50 @@ class JobQueue:
             msg = "the worker no longer holds this job"
             raise JobLostError(msg)
 
-    def fail(self, job_id: str, worker_id: str, error: BaseException) -> str:
+    def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        error: BaseException,
+        *,
+        connection: Connection | None = None,
+    ) -> str:
         """Record that the worker's attempt failed with ``error``. Returns the job's new status:
-        ``queued`` (it runs again after ``backoff``) or ``failed`` (no attempts left)."""
+        ``queued`` (it runs again after ``backoff``) or ``failed`` (no attempts left). With
+        ``connection`` it is written in the caller's transaction (``Completion``)."""
         _check_worker(worker_id)
+        if connection is not None:
+            return self._fail(connection, job_id, worker_id, error)
+        with self._engine.begin() as own:
+            return self._fail(own, job_id, worker_id, error)
+
+    def _fail(
+        self, connection: Connection, job_id: str, worker_id: str, error: BaseException
+    ) -> str:
         now = self._clock()
         name = error_name(error)
-        with self._engine.begin() as connection:
-            row = connection.execute(
-                select(jobs.c.document_id, jobs.c.attempts, jobs.c.max_attempts).where(
-                    self._held(job_id, worker_id)
-                )
-            ).first()
-            if row is None:
-                msg = "the worker no longer holds this job"
-                raise JobLostError(msg)
-            ended = row.attempts >= row.max_attempts
-            values: dict[str, object] = {"locked_by": None, "locked_at": None, "last_error": name}
-            if ended:
-                values |= {"status": "failed", "finished_at": now}
-            else:
-                values |= {"status": "queued", "run_after": now + backoff(row.attempts)}
-            result = connection.execute(
-                update(jobs).where(self._held(job_id, worker_id)).values(**values)
+        row = connection.execute(
+            select(jobs.c.document_id, jobs.c.attempts, jobs.c.max_attempts).where(
+                self._held(job_id, worker_id)
             )
-            if result.rowcount != 1:  # taken back between the two statements
-                msg = "the worker no longer holds this job"
-                raise JobLostError(msg)
-            if ended:
-                _mark_failed(connection, [job_id])
+        ).first()
+        if row is None:
+            msg = "the worker no longer holds this job"
+            raise JobLostError(msg)
+        ended = row.attempts >= row.max_attempts
+        values: dict[str, object] = {"locked_by": None, "locked_at": None, "last_error": name}
+        if ended:
+            values |= {"status": "failed", "finished_at": now}
+        else:
+            values |= {"status": "queued", "run_after": now + backoff(row.attempts)}
+        result = connection.execute(
+            update(jobs).where(self._held(job_id, worker_id)).values(**values)
+        )
+        if result.rowcount != 1:  # taken back between the two statements
+            msg = "the worker no longer holds this job"
+            raise JobLostError(msg)
+        if ended:
+            _mark_failed(connection, [job_id])
         return "failed" if ended else "queued"
 
     def retry(self, job_id: str) -> bool:
