@@ -4,6 +4,7 @@ import { useHealthState } from "../api/health-context";
 import { useSessionState } from "../api/session-context";
 import type { HealthState } from "../api/useHealth";
 import type { SessionState } from "../api/useSession";
+import { ProcessingCard } from "./ProcessingCard";
 
 function describe(health: HealthState): string {
   switch (health.status) {
@@ -45,6 +46,7 @@ export function Dashboard() {
         <Title order={4}>Access</Title>
         <Text>{describeSession(session)}</Text>
       </Card>
+      <ProcessingCard />
     </Stack>
   );
 }
