@@ -10,7 +10,7 @@ from pathlib import Path
 import anyio
 from fastapi import FastAPI
 
-from vault.api import documents, health, imports, session
+from vault.api import documents, health, imports, search, session
 from vault.core.config import Settings, load_settings
 from vault.core.headers import SecurityHeadersMiddleware
 from vault.core.logging import configure_logging, log_event, metric
@@ -122,6 +122,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.include_router(session.router, prefix="/api")
     app.include_router(documents.router, prefix="/api")
     app.include_router(imports.router, prefix="/api")
+    app.include_router(search.router, prefix="/api")
     dist = settings.frontend.dist or DEFAULT_FRONTEND_DIST
     serving = serve_frontend and find_file(dist, INDEX) is not None
     if serving:
