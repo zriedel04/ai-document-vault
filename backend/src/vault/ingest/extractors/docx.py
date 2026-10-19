@@ -25,7 +25,9 @@ What the text holds:
   tracked change, are left out, and so is a cell deleted as a tracked change (``w:cellDel``), so
   the cells after it move up a column as they do when the change is accepted.
 - Tracked changes are read as if accepted: inserted and moved-in text is kept, deleted and
-  moved-out text is left out. A deleted paragraph mark still ends its paragraph.
+  moved-out text is left out. That includes the co-authoring conflicts Word 2010 added: text a
+  conflict deleted (``w14:conflictDel``) is left out and text it inserted (``w14:conflictIns``)
+  is kept. A deleted paragraph mark still ends its paragraph.
 - Text boxes are kept: each box's paragraphs follow the paragraph that anchors the box. Word writes
   a box twice (a DrawingML shape and a VML copy for old readers, in ``mc:AlternateContent``), so
   one representation is read: the first ``mc:Choice`` whose ``Requires`` names only namespaces
@@ -99,6 +101,7 @@ ROW_SEPARATOR: Final = "\n"
 
 _MC: Final = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
 _M: Final = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+_W14: Final = "{http://schemas.microsoft.com/office/word/2010/wordml}"
 _DOCUMENT, _BODY = qn("w:document"), qn("w:body")
 _P, _TBL, _TR, _TC, _R = qn("w:p"), qn("w:tbl"), qn("w:tr"), qn("w:tc"), qn("w:r")
 _SDT, _SDT_CONTENT, _CUSTOM_XML = qn("w:sdt"), qn("w:sdtContent"), qn("w:customXml")
@@ -137,6 +140,7 @@ EXCLUDED: Final = frozenset(
         qn("w:moveFrom"),  # tracked move, the old place
         qn("w:delText"),  # deleted text
         qn("w:delInstrText"),  # deleted field code
+        f"{_W14}conflictDel",  # deleted in a co-authoring conflict (Word 2010)
         qn("w:instrText"),  # field code
         qn("w:rt"),  # ruby pronunciation guide
         qn("w:sdtPr"),  # content control properties

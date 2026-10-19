@@ -717,6 +717,11 @@ INCLUDED_CONTAINERS = [
     ("simple field", f'<w:fldSimple w:instr=" PAGE {CANARY} ">{run("7")}</w:fldSimple>', "7"),
     ("insertion", f'<w:ins w:id="1" w:author="A">{run("added")}</w:ins>', "added"),
     ("move, new place", f'<w:moveTo w:id="2" w:author="A">{run("moved")}</w:moveTo>', "moved"),
+    (
+        "conflict insertion",
+        f'<w14:conflictIns w:id="6" w:author="A">{run("agreed")}</w14:conflictIns>',
+        "agreed",
+    ),
     ("text direction", f'<w:dir w:val="rtl">{run("rtl")}</w:dir>', "rtl"),
     ("bidirectional override", f'<w:bdo w:val="ltr">{run("ltr")}</w:bdo>', "ltr"),
     (
@@ -755,6 +760,12 @@ EXCLUDED_CONTAINERS = [
         f'<w:moveFrom w:id="4" w:author="A">{run(CANARY)}</w:moveFrom>',
         "w:moveFrom",
     ),
+    (
+        "conflict deletion",
+        f'<w14:conflictDel w:id="7" w:author="A">{run(CANARY)}'
+        f"<w:r><w:delText>{CANARY}</w:delText></w:r></w14:conflictDel>",
+        "w14:conflictDel",
+    ),
     ("field code", f"<w:r><w:instrText>{CANARY}</w:instrText></w:r>", "w:instrText"),
     (
         "deleted field code",
@@ -779,7 +790,7 @@ EXCLUDED_CONTAINERS = [
 
 
 def paragraph(content: str) -> str:
-    return f"<w:p {W} {MC} {MATH} {FUTURE}>{content}</w:p>"
+    return f"<w:p {W} {MC} {MATH} {W14} {FUTURE}>{content}</w:p>"
 
 
 @pytest.mark.parametrize(
@@ -808,6 +819,7 @@ def test_every_excluded_element_has_a_test() -> None:
     prefixes = {
         "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
         "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+        "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
     }
     tested = {
         "{%s}%s" % (prefixes[name.split(":")[0]], name.split(":")[1])  # noqa: UP031
@@ -817,6 +829,27 @@ def test_every_excluded_element_has_a_test() -> None:
     assert tested == set(EXCLUDED)
     # The "characters" case above writes each of these.
     assert {tag.split("}")[1] for tag in CHARACTERS} == {"tab", "ptab", "br", "cr", "noBreakHyphen"}
+
+
+# Every element ECMA-376 Part 1 (17.13.5) and Word 2010's extensions (w14) use for inline content
+# that accepting the changes removes, and the elements for content it keeps. Range markers
+# (``w:moveFromRangeStart`` and the like) hold no text, and properties are left out whole.
+DELETIONS = {"w:del", "w:moveFrom", "w:delText", "w:delInstrText", "w14:conflictDel"}
+INSERTIONS = {"w:ins", "w:moveTo", "w14:conflictIns"}
+
+
+def test_every_kind_of_deleted_content_is_excluded_and_inserted_content_is_not() -> None:
+    namespaces = {
+        "w": "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}",
+        "w14": "{http://schemas.microsoft.com/office/word/2010/wordml}",
+    }
+
+    def clark(name: str) -> str:
+        prefix, local = name.split(":")
+        return namespaces[prefix] + local
+
+    assert {clark(name) for name in DELETIONS} <= EXCLUDED
+    assert not {clark(name) for name in INSERTIONS} & EXCLUDED
 
 
 def test_included_containers_nested_in_each_other_still_give_their_text() -> None:
