@@ -1,6 +1,6 @@
 """The document list (one page at a time, sorted on the server), one document's details, its
-original file, its extracted text, moving it to the trash and back, and deleting it for good from
-the trash."""
+original file, its extracted text, retrying its failed processing, moving it to the trash and
+back, and deleting it for good from the trash."""
 
 from __future__ import annotations
 
@@ -36,7 +36,8 @@ from vault.db.pages import (
     PageDataError,
     read_current_pages,
 )
-from vault.jobs.queue import utc_now
+from vault.jobs.queue import JobQueue, RetryRefusal, utc_now
+from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobIntegrityError, BlobStore
 from vault.storage.purge import purge_document
 
@@ -195,6 +196,38 @@ async def restore_document(
     engine = _engine(request)
     if not await run_in_threadpool(restore, engine, document_id):
         raise HTTPException(status_code=404, detail="no such document")
+    return await _detail(engine, document_id)
+
+
+@router.post(
+    "/documents/{document_id}/retry",
+    responses={
+        404: {"description": "No such document"},
+        409: {"description": "The document is in the trash"},
+    },
+)
+async def retry_document(
+    request: Request,
+    document_id: str,
+    _user: Annotated[LocalUser, Depends(current_user)],
+) -> DocumentDetail:
+    """Queue the document's failed processing again, with all its attempts, and return it as it
+    now is: each stage whose latest job failed runs again, and a document in the ``failed`` state
+    goes back to ``processing``. A document with nothing failed is returned unchanged, so pressing
+    Retry twice queues the work once. A document in the trash is refused (409): restore it first.
+    """
+    engine = _engine(request)
+    result = await run_in_threadpool(JobQueue(engine).retry_document, document_id)
+    if result is RetryRefusal.IN_TRASH:
+        raise HTTPException(status_code=409, detail="the document is in the trash")
+    if isinstance(result, RetryRefusal):
+        raise HTTPException(status_code=404, detail="no such document")
+    if result:
+        workers: WorkerPool | None = request.app.state.workers
+        if workers is not None:
+            workers.wake()
+    # A count only: the id came in the request.
+    log_event(logger, "documents.retried", jobs=metric(result))
     return await _detail(engine, document_id)
 
 

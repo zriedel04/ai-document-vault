@@ -24,6 +24,7 @@ from vault.jobs.queue import (
     UNNAMED_ERROR,
     JobLostError,
     JobQueue,
+    RetryRefusal,
     backoff,
     error_name,
 )
@@ -459,6 +460,200 @@ def test_retry_gives_way_to_the_same_work_queued_since(engine: Engine, queue: Jo
     assert not queue.retry(job_id)
     assert status_of(engine, job_id) == "failed"
     assert status_of(engine, newer) == "queued"
+
+
+# --- retry a document ----------------------------------------------------------------------
+
+
+def fail_later(
+    queue: JobQueue, clock: Clock, document_id: str, stage: str = "extract", input_hash: str = HASH
+) -> str:
+    """A job of ``stage`` that failed for good, queued a minute after the one before."""
+    clock.advance(timedelta(minutes=1))
+    job_id = queue.enqueue(document_id, stage, input_hash, max_attempts=1)
+    assert queue.claim(WORKER, [stage]) is not None
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "failed"
+    return job_id
+
+
+def state_of(engine: Engine, document_id: str) -> str:
+    with engine.connect() as connection:
+        value: str = connection.execute(
+            select(documents.c.state).where(documents.c.id == document_id)
+        ).scalar_one()
+    return value
+
+
+def set_document_state(engine: Engine, document_id: str, state: str) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            update(documents).where(documents.c.id == document_id).values(state=state)
+        )
+
+
+def test_retry_document_queues_every_stage_whose_latest_job_failed(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    extract = fail_later(queue, clock, document_id)
+    ocr = fail_later(queue, clock, document_id, "ocr")
+    clock.advance(timedelta(minutes=1))
+    assert queue.retry_document(document_id) == 2
+    for job_id in (extract, ocr):
+        row = row_of(engine, job_id)
+        assert (row.status, row.attempts, row.finished_at) == ("queued", 0, None)
+        assert row.run_after == clock.now
+        assert row.last_error == "RuntimeError"  # kept: what went wrong last time
+    assert queue.claim(WORKER, ["extract", "ocr"]) is not None
+
+
+def test_retry_document_leaves_a_failed_job_a_later_job_replaced(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    old = fail_later(queue, clock, document_id, input_hash=OTHER_HASH)  # an earlier version
+    clock.advance(timedelta(minutes=1))
+    done = queue.enqueue(document_id, "extract", HASH)
+    queue.claim(WORKER, ["extract"])
+    queue.complete(done, WORKER)
+    assert queue.retry_document(document_id) == 0
+    assert status_of(engine, old) == "failed"
+    # Of two failed jobs of one stage only the later one runs again.
+    newest = fail_later(queue, clock, document_id, input_hash=OTHER_HASH)
+    assert queue.retry_document(document_id) == 1
+    assert (status_of(engine, old), status_of(engine, newest)) == ("failed", "queued")
+
+
+def test_retry_document_breaks_a_tie_in_time_by_id(engine: Engine, queue: JobQueue) -> None:
+    document_id = add_document(engine)
+    first = fail_for_good(queue, document_id)
+    second = fail_for_good(queue, document_id)  # the clock did not move
+    assert queue.retry_document(document_id) == 1
+    later = max(first, second)
+    assert status_of(engine, later) == "queued"
+    assert status_of(engine, min(first, second)) == "failed"
+
+
+def test_retry_document_never_opens_the_same_work_twice(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    clock.advance(timedelta(minutes=1))
+    waiting = queue.enqueue(document_id, "extract", HASH)
+    # A failed job of the same work that is newer than the open one (not something the queue
+    # makes, so it is written by hand): queuing it would be a second open job for that work.
+    with engine.begin() as connection:
+        connection.execute(
+            insert(jobs).values(
+                id=ids.new_ulid(),
+                document_id=document_id,
+                stage="extract",
+                status="failed",
+                priority=0,
+                attempts=1,
+                max_attempts=1,
+                last_error="RuntimeError",
+                run_after=clock.now,
+                input_hash=HASH,
+                created_at=clock.now + timedelta(minutes=1),
+                finished_at=clock.now,
+            )
+        )
+    assert queue.retry_document(document_id) == 0
+    assert status_of(engine, waiting) == "queued"
+
+
+def test_retry_document_twice_queues_the_work_once(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    fail_later(queue, clock, document_id)
+    assert queue.retry_document(document_id) == 1
+    assert queue.retry_document(document_id) == 0
+
+
+def test_retry_document_at_the_same_moment_queues_the_work_once(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    fail_later(queue, clock, document_id)
+    start = threading.Barrier(4)
+    results: list[int | RetryRefusal] = []
+
+    def press() -> None:
+        start.wait()
+        results.append(queue.retry_document(document_id))
+
+    threads = [threading.Thread(target=press) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(results, key=str) == [0, 0, 0, 1]
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("failed", "processing"),
+        ("processing", "processing"),
+        ("searchable", "searchable"),  # a later stage failed; it stays searchable meanwhile
+        ("ready", "ready"),
+    ],
+)
+def test_retry_document_brings_a_failed_document_back_to_processing(
+    engine: Engine, queue: JobQueue, clock: Clock, before: str, after: str
+) -> None:
+    document_id = add_document(engine)
+    fail_later(queue, clock, document_id)
+    set_document_state(engine, document_id, before)
+    assert queue.retry_document(document_id) == 1
+    assert state_of(engine, document_id) == after
+
+
+def test_retry_document_with_nothing_failed_leaves_the_state(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    queue.enqueue(document_id, "extract", HASH)
+    set_document_state(engine, document_id, "failed")
+    assert queue.retry_document(document_id) == 0
+    assert state_of(engine, document_id) == "failed"
+
+
+def test_retry_document_refuses_a_document_in_the_trash(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    job_id = fail_later(queue, clock, document_id)
+    with engine.begin() as connection:
+        connection.execute(
+            update(documents)
+            .where(documents.c.id == document_id)
+            .values(state="trashed", state_before_trash="failed", trashed_at=START)
+        )
+    assert queue.retry_document(document_id) is RetryRefusal.IN_TRASH
+    assert status_of(engine, job_id) == "failed"
+    assert state_of(engine, document_id) == "trashed"
+
+
+@pytest.mark.parametrize("document_id", [ids.new_ulid(), "not-an-id", ""])
+def test_retry_document_refuses_an_unknown_document(
+    engine: Engine, queue: JobQueue, clock: Clock, document_id: str
+) -> None:
+    fail_later(queue, clock, add_document(engine))
+    assert queue.retry_document(document_id) is RetryRefusal.NOT_FOUND
+
+
+def test_retry_document_touches_only_its_own_document(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    mine = add_document(engine)
+    other = add_document(engine)
+    fail_later(queue, clock, mine)
+    theirs = fail_later(queue, clock, other)
+    assert queue.retry_document(mine) == 1
+    assert status_of(engine, theirs) == "failed"
 
 
 def test_recover_takes_back_jobs_a_killed_process_left_running(

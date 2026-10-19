@@ -14,7 +14,8 @@ A job is one processing stage (``extract``, ``ocr``, ...) for one document. Its 
   the worker that holds the job, and say so (``JobLostError``) if it no longer does.
 - ``release`` gives a claimed job back unstarted, with the attempt it counted returned (the
   worker pool calls it when it was paused or stopped while the claim was on its way).
-- ``retry`` queues a failed job again with fresh attempts (the owner's Retry button).
+- ``retry`` queues a failed job again with fresh attempts. ``retry_document`` does it for every
+  stage of one document whose latest job failed (the owner's Retry button on a document's page).
 - ``recover`` runs at start-up, before any worker: a job left ``running`` by a process that was
   killed is queued again, or failed if that attempt was its last (its document too, as ``fail``
   does). Nothing is lost by a crash.
@@ -29,13 +30,26 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import ColumnElement, Connection, Engine, and_, case, func, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Connection,
+    Engine,
+    and_,
+    case,
+    exists,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from vault.db import ids
+from vault.db.engine import write_transaction
 from vault.db.schema import JOB_STAGES, TRASHED, documents, jobs
 
 DEFAULT_MAX_ATTEMPTS: Final = 3
@@ -106,6 +120,13 @@ def _check_stages(stages: Iterable[str]) -> tuple[str, ...]:
         msg = "stages must be one or more of the known job stages"
         raise ValueError(msg)
     return chosen
+
+
+class RetryRefusal(StrEnum):
+    """Why ``retry_document`` queued nothing although there may be failed jobs."""
+
+    NOT_FOUND = "not_found"  # no such document (or not an id at all)
+    IN_TRASH = "in_trash"  # a document in the trash is not processed; restore it first
 
 
 @dataclass(frozen=True)
@@ -327,6 +348,62 @@ class JobQueue:
         except IntegrityError:
             return False
         return result.rowcount == 1
+
+    def retry_document(self, document_id: str) -> int | RetryRefusal:
+        """Queue again, with all their attempts, the document's failed jobs that are the latest
+        job of their stage, and return how many. A failed job that a later job of the same stage
+        replaced (a new version's input, or the same work queued again) is history and stays as it
+        is. A document whose state is ``failed`` goes back to ``processing`` when anything was
+        queued. Refused for an unknown id and for a document in the trash.
+
+        One transaction that holds the write lock from its first statement decides and writes, so
+        a move to the trash, a job that fails or a second press at the same moment comes wholly
+        before or after it: pressing twice queues the work once.
+        """
+        if not ids.is_ulid(document_id):
+            return RetryRefusal.NOT_FOUND
+        now = self._clock()
+        later = jobs.alias("later")
+        with write_transaction(self._engine) as connection:
+            state = connection.execute(
+                select(documents.c.state).where(documents.c.id == document_id)
+            ).scalar_one_or_none()
+            if state is None:
+                return RetryRefusal.NOT_FOUND
+            if state == TRASHED:
+                return RetryRefusal.IN_TRASH
+            # Later by the time it was queued; the id (a ULID) breaks a tie in the same instant.
+            replaced = or_(
+                later.c.created_at > jobs.c.created_at,
+                and_(later.c.created_at == jobs.c.created_at, later.c.id > jobs.c.id),
+            )
+            queued = connection.execute(
+                update(jobs)
+                .where(
+                    jobs.c.document_id == document_id,
+                    jobs.c.status == "failed",
+                    ~exists().where(
+                        later.c.document_id == jobs.c.document_id,
+                        later.c.stage == jobs.c.stage,
+                        replaced,
+                    ),
+                    # Never two open jobs for the same work (the database refuses it too).
+                    ~exists().where(
+                        later.c.document_id == jobs.c.document_id,
+                        later.c.stage == jobs.c.stage,
+                        later.c.input_hash == jobs.c.input_hash,
+                        later.c.status.in_(_OPEN),
+                    ),
+                )
+                .values(status="queued", attempts=0, run_after=now, finished_at=None)
+            ).rowcount
+            if queued and state == "failed":
+                connection.execute(
+                    update(documents)
+                    .where(documents.c.id == document_id)
+                    .values(state="processing")
+                )
+        return queued
 
     def recover(self) -> Recovery:
         """Take back every job left running by a process that ended. Call it at start-up, before

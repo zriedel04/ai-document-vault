@@ -126,6 +126,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Document
+         * @description Queue the document's failed processing again, with all its attempts, and return it as it
+         *     now is: each stage whose latest job failed runs again, and a document in the ``failed`` state
+         *     goes back to ``processing``. A document with nothing failed is returned unchanged, so pressing
+         *     Retry twice queues the work once. A document in the trash is refused (409): restore it first.
+         */
+        post: operations["retry_document_api_documents__document_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}/trash": {
         parameters: {
             query?: never;
@@ -776,6 +799,51 @@ export interface operations {
             };
             /** @description No such document */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_document_api_documents__document_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description No such document */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The document is in the trash */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
