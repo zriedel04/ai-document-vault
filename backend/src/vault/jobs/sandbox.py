@@ -36,7 +36,9 @@ make the server build more than it should: before unpickling, the parent reads t
 opcodes without building anything and refuses an answer whose objects would cost more than
 ``max_result_memory_bytes`` (1 GiB by default) or that has more than ``max_result_opcodes``
 opcodes (4 million), because a pickle of 256 MiB made of one-byte "empty list" opcodes would
-otherwise build about 20 GiB in the server. The child
+otherwise build about 20 GiB in the server. It accepts only the opcodes protocol 5 writes for a
+result, so a memo index named in the stream (nine bytes of ``LONG_BINPUT`` would grow the memo
+table to gigabytes) is refused rather than charged. The child
 gets a reduced environment (:data:`CHILD_ENV`), without API keys or other secrets.
 
 **Memory cap.** On Windows the child is put in a Job Object with a process and a job memory limit
@@ -113,8 +115,37 @@ DEFAULT_MAX_RESULT_OPCODES: Final = 4_000_000
 _SET_OPCODE_BYTES: Final = 256
 _OPCODE_BYTES: Final = 128
 _SET_OPCODES: Final = frozenset({"EMPTY_SET", "FROZENSET"})
+# A mark is one slot in the unpickler's array of marks, which doubles as it grows
+# (``load_mark`` in CPython's ``_pickle.c``): at most 16 bytes a mark once the array is grown.
+_MARK_BYTES: Final = 16
+# What one load costs before any opcode: the unpickler's own tables, measured at under 2 KiB.
+_LOAD_BYTES: Final = 16 * 1024
 # Opcodes that make nothing.
-_FREE_OPCODES: Final = frozenset({"MARK", "STOP", "PROTO", "FRAME", "POP", "POP_MARK"})
+_FREE_OPCODES: Final = frozenset({"STOP", "PROTO", "FRAME", "POP", "POP_MARK"})
+# The opcodes the child's pickler writes at ``child.PICKLE_PROTOCOL`` (5) for the values a result
+# holds, and no others: an answer with any other opcode is refused before it is unpickled. This
+# is what bounds the memo. Protocol 5 memoizes with ``MEMOIZE``, whose index is the memo's own
+# length, so the table grows with the number of entries already charged; ``PUT``, ``BINPUT`` and
+# ``LONG_BINPUT`` name an index of their own, and the unpickler grows its table to that index
+# (``_Unpickler_MemoPut``: ``memo_size`` doubles past ``idx``), so nine bytes would allocate
+# gigabytes. Also left out: the text opcodes of protocol 0 (each line is read once more as
+# text), ``DUP``, the extension registry (``EXT1``, ``EXT2``, ``EXT4``), persistent ids and the
+# out-of-band buffer opcodes, none of which the pickler writes for a result. A test pickles
+# every kind of value a result holds and checks that its opcodes are in this set.
+_RESULT_OPCODES: Final = frozenset(
+    {
+        "PROTO", "FRAME", "STOP", "MARK", "POP", "POP_MARK",
+        "MEMOIZE", "BINGET", "LONG_BINGET",
+        "NONE", "NEWTRUE", "NEWFALSE", "BININT", "BININT1", "BININT2", "LONG1", "LONG4",
+        "BINFLOAT",
+        "SHORT_BINBYTES", "BINBYTES", "BINBYTES8", "BYTEARRAY8",
+        "SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8",
+        "EMPTY_TUPLE", "TUPLE1", "TUPLE2", "TUPLE3", "TUPLE",
+        "EMPTY_LIST", "APPEND", "APPENDS", "EMPTY_DICT", "SETITEM", "SETITEMS",
+        "EMPTY_SET", "ADDITEMS", "FROZENSET",
+        "STACK_GLOBAL", "REDUCE", "NEWOBJ", "NEWOBJ_EX", "BUILD",
+    }
+)  # fmt: skip
 # Every kind of argument a pickle opcode has (``pickletools.ArgumentDescriptor.name``), and the
 # types ``pickletools.genops`` decodes them to: numbers, strings, bytes and bytearrays, each
 # charged its size as Python holds it. An opcode with an argument of any other kind, or one decoded
@@ -326,25 +357,46 @@ def _check_expansion(payload: memoryview, max_memory: int, max_opcodes: int) -> 
     The answer's size is capped, but a pickle is a program that builds objects, and one byte can
     build an empty list of 80 bytes: 256 MiB of such opcodes would build gigabytes in the server,
     which the sandbox exists to protect. So the opcodes are read first, without building anything
-    (``pickletools.genops``, over the same view, so the answer is not copied), and each is charged
-    what the unpickler can allocate for it (``_OPCODE_BYTES``, ``_SET_OPCODE_BYTES``) plus the size
-    of its decoded argument (a number, a string, bytes or a bytearray, as Python holds it; an
-    argument of a kind ``_ARGUMENT_KINDS`` does not list is refused). The read stops at the
-    first opcode past ``max_opcodes`` or the first byte past ``max_memory``, so judging a hostile
-    answer costs a bounded time too. Objects the unpickler would share (memo lookups, ``DUP``) are
-    charged as if new, which only errs on the safe side. No global is resolved here; the unpickler
-    still checks every class it is asked for. Returns the bytes charged."""
-    charged = 0
+    (``pickletools.genops``, over the same view, so the answer is not copied), and every
+    allocation the unpickler makes from a value in the stream is bounded here:
+
+    - only the opcodes in ``_RESULT_OPCODES`` are accepted, and the first must be ``PROTO`` 5,
+      the protocol the child writes; so the memo grows only by ``MEMOIZE``, one entry per opcode
+      charged, and never to an index the stream names;
+    - each object an opcode makes is charged ``_OPCODE_BYTES`` (``_SET_OPCODE_BYTES`` for a set),
+      which covers the growth of the list, dict or memo it goes into, plus its decoded argument
+      as Python holds it (an argument of a kind ``_ARGUMENT_KINDS`` does not list is refused);
+    - each ``MARK`` is charged its slot in the array of marks (``_MARK_BYTES``);
+    - the load is charged ``_LOAD_BYTES`` and the answer's length once more, for the bytes the
+      unpickler reads out of the view before decoding a string or a frame.
+
+    A length a ``BINBYTES``, ``BINUNICODE`` or ``FRAME`` opcode declares is never allocated
+    unread: genops reads the data whole, so a length longer than the answer is refused here, and
+    the unpickler's reader copies only bytes that exist. The read stops at the first opcode past
+    ``max_opcodes`` or the first byte past ``max_memory``, so judging a hostile answer costs a
+    bounded time too. Objects the unpickler would share (memo lookups) are charged as if new,
+    which only errs on the safe side. No global is resolved here; the unpickler still checks
+    every class it is asked for. Returns the bytes charged."""
+    charged = _LOAD_BYTES + len(payload)
+    if charged > max_memory:
+        raise SandboxResultError
     for count, (opcode, argument, _position) in enumerate(
         # genops calls only read and readline (and tell, which the reader has not got).
         pickletools.genops(cast("IO[bytes]", _ViewReader(payload))),
         start=1,
     ):
-        if count > max_opcodes:
+        if count > max_opcodes or opcode.name not in _RESULT_OPCODES:
+            raise SandboxResultError
+        if count == 1 and (opcode.name != "PROTO" or argument != child.PICKLE_PROTOCOL):
             raise SandboxResultError
         if opcode.name in _FREE_OPCODES:
             continue
-        charged += _SET_OPCODE_BYTES if opcode.name in _SET_OPCODES else _OPCODE_BYTES
+        if opcode.name == "MARK":
+            charged += _MARK_BYTES
+        elif opcode.name in _SET_OPCODES:
+            charged += _SET_OPCODE_BYTES
+        else:
+            charged += _OPCODE_BYTES
         if opcode.arg is not None:
             if opcode.arg.name not in _ARGUMENT_KINDS or not isinstance(argument, _ARGUMENT_TYPES):
                 raise SandboxResultError

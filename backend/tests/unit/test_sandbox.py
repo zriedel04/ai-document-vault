@@ -7,16 +7,19 @@ memory limit, ``TerminateJobObject`` and kill-on-close. The limits are small so 
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import io
 import logging
 import os
+import pickle
 import subprocess
 import sys
 import textwrap
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -379,16 +382,25 @@ def test_write_answer_writes_the_status_then_the_payload() -> None:
             os.close(writer)
 
 
-@pytest.mark.parametrize("protocol", [0, 2, 5])
-def test_results_of_every_pickle_protocol_are_read_from_a_view(protocol: int) -> None:
-    import pickle
-
-    # No bytes: protocols below 3 pickle them through a global (``_codecs.encode``), which the
-    # unpickler rightly refuses; the child always uses protocol 5.
-    value = [1, "a" * 5000 + "\nline", 2.5, {"k": (None, True)}]
-    payload = pickle.dumps(value, protocol=protocol)
+def test_a_result_is_read_from_a_view() -> None:
+    value = [1, "a" * 5000 + "\nline", b"raw", 2.5, {"k": (None, True)}]
+    payload = pickle_of(value)
     assert sandbox._interpret(sandbox_child.OK + payload, frozenset()) == value
     assert sandbox._interpret(bytearray(sandbox_child.OK + payload), frozenset()) == value
+
+
+@pytest.mark.parametrize("protocol", range(5))
+def test_a_result_in_another_pickle_protocol_is_refused(
+    protocol: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child always writes protocol 5; older protocols memoize by an index the stream names
+    (``PUT``, ``BINPUT``, ``LONG_BINPUT``), which the scan does not accept."""
+    import pickle
+
+    value = [1, "a" * 5000 + "\nline", 2.5, {"k": (None, True)}]
+    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(sandbox_child.OK + pickle.dumps(value, protocol=protocol), frozenset())
 
 
 def test_a_memory_error_raised_by_the_target_is_a_memory_error() -> None:
@@ -445,8 +457,16 @@ EXPANDING = {
 
 
 def expanding_pickle(opcode: bytes, count: int) -> bytes:
-    """A protocol 4 pickle of a list of ``count`` objects, each built by ``opcode``."""
-    return b"\x80\x04](" + opcode * count + b"e."
+    """A protocol 5 pickle of a list of ``count`` objects, each built by ``opcode``."""
+    return b"\x80\x05](" + opcode * count + b"e."
+
+
+class UnpicklerRanError(BaseException):
+    """Not an ``Exception``, so ``_load_result`` cannot turn it into a refusal."""
+
+
+def never(self: object) -> object:
+    raise UnpicklerRanError
 
 
 @pytest.mark.parametrize("opcode", EXPANDING.values(), ids=EXPANDING.keys())
@@ -484,10 +504,6 @@ def test_an_answer_that_would_build_too_much_is_refused_before_it_is_built(
 ) -> None:
     """Small on the wire, large in the server: refused by the opcode count and by the memory
     budget, without the unpickler ever running."""
-
-    def never(self: object) -> object:
-        raise AssertionError
-
     payload = sandbox_child.OK + expanding_pickle(b"]", 2_000)
     monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
     with pytest.raises(SandboxResultError):
@@ -530,19 +546,17 @@ def pickle_of(value: object) -> bytes:
     return pickle.dumps(value, protocol=5)
 
 
-# Values of each kind of argument a pickle opcode carries, in the protocols that write it; all
+# Values of each kind of argument a protocol 5 pickle carries; all
 # different, so the pickler cannot share one object between them.
 SIZED = {
     "bytearray": ([bytearray(b"x" * 300_000)], 5),
     "bytes": ([b"x" * 300_000], 5),
     "short bytes": ([b"%05d" % n + b"x" * 200 for n in range(2_000)], 5),
     "str": (["x" * 300_000], 5),
-    "str, protocol 0": (["x" * 300_000], 0),
     "short str": ([f"{n:05}" + "x" * 200 for n in range(2_000)], 5),
     "int": ([1 << 2_400_000], 5),
-    "ints, protocol 0": ([(1 << 13_000) + n for n in range(200)], 0),
+    "ints": ([(1 << 13_000) + n for n in range(200)], 5),
     "floats": ([1.5 + n for n in range(2_000)], 5),
-    "floats, protocol 0": ([1.5 + n for n in range(2_000)], 0),
 }
 
 
@@ -562,6 +576,139 @@ def test_a_large_bytearray_answer_is_refused_by_the_memory_budget() -> None:
     answer = sandbox_child.OK + pickle_of(bytearray(5 * MIB))
     with pytest.raises(SandboxResultError):
         sandbox._interpret(answer, frozenset(), max_memory=1_000)
+
+
+@pytest.mark.parametrize(
+    "put",
+    [
+        b"p100000000\n",  # PUT
+        b"q\xff",  # BINPUT
+        b"r" + (100_000_000).to_bytes(4, "little"),  # LONG_BINPUT
+    ],
+    ids=["PUT", "BINPUT", "LONG_BINPUT"],
+)
+def test_a_memo_index_named_in_the_answer_is_refused_before_it_is_built(
+    put: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nine bytes (``NONE``, ``LONG_BINPUT 100000000``, ``STOP``) make the C unpickler grow its
+    memo table to that index, 1.6 GB of pointers; only ``MEMOIZE``, whose index is the memo's
+    own length, is accepted."""
+    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
+    answer = sandbox_child.OK + b"\x80\x05N" + put + b"."
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(answer, frozenset())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"N.", b"N\x80\x05.", b"\x80\x04N.", b"\x80\x06N.", b"."],
+    ids=["no PROTO", "PROTO later", "PROTO 4", "PROTO 6", "STOP only"],
+)
+def test_an_answer_that_does_not_start_with_protocol_5_is_refused(
+    payload: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox._ResultUnpickler, "load", never)
+    with pytest.raises(SandboxResultError):
+        sandbox._interpret(sandbox_child.OK + payload, frozenset())
+
+
+def test_the_answer_itself_and_the_load_are_charged_before_any_opcode() -> None:
+    """The unpickler copies each string and frame out of the view before decoding it, so the
+    answer's length is charged once more, with what one load costs."""
+    payload = memoryview(pickle_of(None))
+    charged = sandbox._check_expansion(payload, 1 << 40, 1 << 40)
+    assert charged >= sandbox._LOAD_BYTES + len(payload)
+    with pytest.raises(SandboxResultError):
+        sandbox._check_expansion(payload, sandbox._LOAD_BYTES, 1 << 40)
+
+
+@pytest.mark.parametrize("opcode", ["DUP", "EXT1", "PERSID", "NEXT_BUFFER", "STRING", "INT"])
+def test_an_opcode_the_child_does_not_write_is_refused(opcode: str) -> None:
+    """Built by hand: a protocol 5 header, then one opcode the result pickler never writes."""
+    import pickletools
+
+    code = next(op.code for op in pickletools.opcodes if op.name == opcode).encode("latin-1")
+    argument = {"EXT1": b"\x01", "PERSID": b"x\n", "STRING": b"'x'\n", "INT": b"1\n"}
+    payload = b"\x80\x05N" + code + argument.get(opcode, b"") + b"."
+    with pytest.raises(SandboxResultError):
+        sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40)
+
+
+@dataclass(frozen=True, slots=True)
+class SlottedResult:
+    name: str
+    pages: tuple[int, ...]
+
+
+# Every kind of value an extraction result holds, so that every opcode protocol 5 writes for one
+# appears: numbers of every width, strings and bytes short and long, every container, memo hits
+# for shared and recursive objects, and dataclasses with and without slots.
+SHARED = ["shared"]
+RECURSIVE: list[object] = []
+RECURSIVE.append(RECURSIVE)
+RESULT_VALUES = [
+    None, True, False, 0, 1, 255, 256, 65_535, 65_536, -1, 1 << 40, 1 << 3_000, -(1 << 3_000),
+    1.5, float("inf"),
+    "", "short", "\N{GRINNING FACE}", "x" * 300, "y" * 70_000,
+    b"", b"short", b"x" * 300, b"y" * 70_000, bytearray(b"z" * 10),
+    (), (1,), (1, 2), (1, 2, 3), (1, 2, 3, 4), [], [1], list(range(3_000)),
+    {}, {"a": 1}, {str(n): n for n in range(3_000)}, set(), {1, 2}, frozenset(), frozenset({3}),
+    [SHARED, SHARED, (SHARED,)], RECURSIVE,
+    ProbeResult(size=3, head=b"abc"), SlottedResult(name="n", pages=(1, 2)),
+]  # fmt: skip
+
+
+def test_every_opcode_a_result_needs_is_accepted() -> None:
+    import pickletools
+
+    payload = pickle_of(RESULT_VALUES)
+    written = {opcode.name for opcode, _argument, _position in pickletools.genops(payload)}
+    assert written <= sandbox._RESULT_OPCODES
+    assert sandbox._check_expansion(memoryview(payload), 1 << 40, 1 << 40) > 0
+
+
+def test_the_accepted_opcodes_are_real_and_name_no_memo_index() -> None:
+    import pickletools
+
+    names = {opcode.name for opcode in pickletools.opcodes}
+    assert names >= sandbox._RESULT_OPCODES
+    assert not sandbox._RESULT_OPCODES & {"PUT", "BINPUT", "LONG_BINPUT"}
+    assert sandbox._FREE_OPCODES <= sandbox._RESULT_OPCODES
+
+
+# Answers the real result unpickler builds, each stressing one allocation: the memo, the array of
+# marks, the reader's copy of a string, nested containers.
+MEASURED = {
+    "many memo entries": pickle_of([str(n) for n in range(100_000)]),
+    "marks": b"\x80\x05" + b"(" * 100_000 + b"N.",
+    "one large string": pickle_of("y" * 5_000_000),
+    "large bytes": pickle_of(b"y" * 5_000_000),
+    "nested lists": pickle_of([[[[n]]] for n in range(20_000)]),
+    "dicts": pickle_of([{"a": n, "b": float(n)} for n in range(20_000)]),
+    "sets": pickle_of([{n} for n in range(10_000)]),
+    "tuples": pickle_of([(n, n, n, n, n) for n in range(20_000)]),
+    "results": pickle_of(RESULT_VALUES * 20),
+}
+
+
+@pytest.mark.parametrize("payload", MEASURED.values(), ids=MEASURED.keys())
+def test_the_charge_covers_what_the_result_unpickler_allocates(payload: bytes) -> None:
+    """Compared with tracemalloc's peak while the server's own unpickler reads the answer from a
+    view, as ``_load_result`` does."""
+    import tracemalloc
+
+    view = memoryview(payload)
+    charged = sandbox._check_expansion(view, 1 << 40, 1 << 40)
+    allowed = frozenset({"vault.jobs.sandbox_probes:ProbeResult", f"{__name__}:SlottedResult"})
+    reader = sandbox._ViewReader(view)
+    tracemalloc.start()
+    try:
+        with contextlib.suppress(pickle.UnpicklingError):
+            sandbox._ResultUnpickler(reader, allowed).load()
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert charged >= peak
 
 
 def test_the_argument_kinds_are_every_kind_pickletools_knows() -> None:
@@ -621,7 +768,8 @@ def test_the_other_answers(answer: bytes, error: type[SandboxError]) -> None:
 def test_the_unpickler_resolves_no_global_name_unlisted() -> None:
     import pickle
 
-    payload = pickle.dumps(os.system)  # what a hijacked child would send to run a command
+    # What a hijacked child would send to run a command, in the protocol the scan accepts.
+    payload = pickle.dumps(os.system, protocol=5)
     with pytest.raises(SandboxResultError):
         sandbox._interpret(sandbox_child.OK + payload, frozenset())
 
