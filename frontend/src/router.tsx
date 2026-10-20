@@ -8,7 +8,7 @@ import {
 import { NAV_ITEMS } from "./nav";
 import { Dashboard } from "./pages/Dashboard";
 import { DocumentDetailRoute, DocumentsRoute } from "./pages/document-routes";
-import { parseDocumentsSearch } from "./pages/documents-search";
+import { parseDocumentSearch, parseDocumentsSearch } from "./pages/documents-search";
 import { Import } from "./pages/Import";
 import { NotFound } from "./pages/NotFound";
 import { Placeholder } from "./pages/Placeholder";
@@ -31,6 +31,7 @@ export function createAppRouter(history?: RouterHistory) {
   const documentDetail = createRoute({
     getParentRoute: () => root,
     path: "/documents/$documentId",
+    validateSearch: parseDocumentSearch,
     component: DocumentDetailRoute,
   });
   const upload = createRoute({

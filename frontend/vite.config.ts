@@ -36,6 +36,9 @@ export default defineConfig({
     proxy: { "/api": "http://127.0.0.1:8765" },
   },
   build: { outDir: "dist", sourcemap: false },
+  // The PDF.js worker (src/pages/PdfViewer.tsx) is built as a module, which PDF.js starts with
+  // `new Worker(url, { type: "module" })`, and emitted as a .js file of this app.
+  worker: { format: "es" },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],

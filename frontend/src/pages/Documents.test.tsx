@@ -91,10 +91,18 @@ function backend(handler: Handler) {
       if (/^\/api\/documents\/[^/]+\/pages$/.test(url.pathname)) {
         return Promise.resolve(jsonResponse(NOT_EXTRACTED));
       }
+      // A PDF's page also shows the original in the viewer (PdfViewer.test.tsx covers it).
+      if (/^\/api\/documents\/[^/]+\/file$/.test(url.pathname)) {
+        return Promise.resolve(
+          new Response(PDF_BYTES, { headers: { "content-type": "application/pdf" } }),
+        );
+      }
     }
     return healthyBackend(input);
   });
 }
+
+const PDF_BYTES = new TextEncoder().encode("%PDF-1.7\n");
 
 const NOT_EXTRACTED = {
   version_id: "01J9Z8Y7X6W5V4T3S2R1Q0P9N9",
@@ -496,8 +504,12 @@ describe("download original", () => {
     });
     await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
     await userEvent.click(await screen.findByRole("button", { name: "Download original" }));
+    // The viewer, which fetches the same file, says the same in its own alert.
+    const alert = (await screen.findByText("Download failed")).closest<HTMLElement>(
+      '[role="alert"]',
+    );
     expect(
-      await screen.findByText(/stored copy of this file is missing or damaged/),
+      within(alert ?? document.body).getByText(/stored copy of this file is missing or damaged/),
     ).toBeInTheDocument();
     expect(saved).toEqual([]);
   });
