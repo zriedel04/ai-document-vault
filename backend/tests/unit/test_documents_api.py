@@ -335,6 +335,7 @@ def test_one_document_with_its_version_imports_and_jobs(
             "max_attempts": body["jobs"][0]["max_attempts"],
             "last_error": None,
             "finished_at": None,
+            "retryable": False,
         }
     ]
 

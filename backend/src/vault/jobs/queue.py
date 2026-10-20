@@ -13,7 +13,7 @@ A job is one processing stage (``extract``, ``ocr``, ...) for one document. Its 
   its message, which can quote document content) and queues it again after a back-off, or marks
   it ``failed`` once its attempts are used up, and the document ``failed`` with it in the same
   transaction (a document in the trash keeps ``failed`` as the state a restore brings back),
-  unless a later job of the same stage has replaced it: that job decides the document's state.
+  unless the job is no longer its document's current work for its stage (``current_work``).
   Both act only for the worker that holds the job, and say so (``JobLostError``) if it no longer
   does.
 - ``release`` gives a claimed job back unstarted, with the attempt it counted returned (the
@@ -43,6 +43,7 @@ from sqlalchemy import (
     Connection,
     Engine,
     FromClause,
+    ScalarSelect,
     and_,
     case,
     exists,
@@ -56,7 +57,7 @@ from sqlalchemy.exc import IntegrityError
 
 from vault.db import ids
 from vault.db.engine import write_transaction
-from vault.db.schema import JOB_STAGES, TRASHED, documents, jobs
+from vault.db.schema import JOB_STAGES, TRASHED, document_versions, documents, jobs
 
 DEFAULT_MAX_ATTEMPTS: Final = 3
 BACKOFF_BASE: Final = timedelta(seconds=30)
@@ -168,29 +169,82 @@ class Recovery:
     failed: int
 
 
-def _replaced(job: FromClause, later: FromClause) -> ColumnElement[bool]:
-    """A later job of the same document and stage exists: by the time it was queued, and the id
-    (a ULID) breaks a tie in the same instant. The one rule for "the latest job of its stage", used
-    by ``retry_document`` and by the document state a failed job sets."""
-    return exists().where(
-        later.c.document_id == job.c.document_id,
-        later.c.stage == job.c.stage,
-        or_(
-            later.c.created_at > job.c.created_at,
-            and_(later.c.created_at == job.c.created_at, later.c.id > job.c.id),
+def current_input(job: FromClause) -> ScalarSelect[str]:
+    """The input the job's document needs now for the job's stage: the SHA-256 of its current
+    version's bytes. Every stage queues that hash as its input today (the importer's ``extract``,
+    the ``chunk`` stage); a stage whose input comes to hold more (tool or model versions) has to
+    say so here, since ``current_work`` judges every job by it. NULL for a document that is gone.
+    """
+    document = documents.alias("input_document")
+    version = document_versions.alias("input_version")
+    return (
+        select(version.c.blob_sha256)
+        .select_from(
+            document.join(
+                version,
+                and_(
+                    version.c.id == document.c.current_version_id,
+                    version.c.document_id == document.c.id,
+                ),
+            )
+        )
+        .where(document.c.id == job.c.document_id)
+        .scalar_subquery()
+    )
+
+
+def current_work(job: FromClause) -> ColumnElement[bool]:
+    """The job is its document's current work for its stage: its input is the one the document
+    needs now (``current_input``), and no later job of the same stage has that input (later by
+    the time it was queued, the id, a ULID, breaking a tie in the same instant).
+
+    The one rule for which job decides a stage. It is judged from the document as it is now, not
+    from the order jobs were queued in: a document that moved to other bytes and back makes its
+    first job current again although the job for the other bytes is newer, and that newer job is
+    history. Used by ``fail`` and ``recover`` (whose documents a failed job marks ``failed``), by
+    ``retry_document`` and by ``retryable`` (what the document page offers to retry). Never
+    negate it: for a document that is gone it is NULL, and NOT NULL is NULL too."""
+    later = jobs.alias("later_work")
+    return and_(
+        job.c.input_hash == current_input(job),
+        ~exists().where(
+            later.c.document_id == job.c.document_id,
+            later.c.stage == job.c.stage,
+            later.c.input_hash == job.c.input_hash,
+            or_(
+                later.c.created_at > job.c.created_at,
+                and_(later.c.created_at == job.c.created_at, later.c.id > job.c.id),
+            ),
+        ),
+    )
+
+
+def retryable(job: FromClause) -> ColumnElement[bool]:
+    """``retry_document`` queues the job again: it failed, it is its document's current work for
+    its stage (``current_work``), and the same work is not open in another job (the database
+    allows only one; that can only be an earlier job, since a later one would replace it)."""
+    other = jobs.alias("open_work")
+    return and_(
+        job.c.status == "failed",
+        current_work(job),
+        ~exists().where(
+            other.c.document_id == job.c.document_id,
+            other.c.stage == job.c.stage,
+            other.c.input_hash == job.c.input_hash,
+            other.c.status.in_(_OPEN),
         ),
     )
 
 
 def _mark_failed(connection: Connection, job_ids: Sequence[str]) -> None:
     """Mark ``failed``, in the caller's transaction, the documents of these jobs, which have used
-    up their attempts. A job that a later job of the same stage replaced (a new version's input) is
-    history: the later job decides, so its document keeps its state. A document in the trash stays
-    there and comes back failed."""
+    up their attempts, when the job is its document's current work for its stage
+    (``current_work``). A job for an input the document no longer needs, or one that a later job
+    of the same work replaced, is history and leaves its document's state alone. A document in
+    the trash stays there and comes back failed."""
     if not job_ids:
         return
-    later = jobs.alias("later")
-    needed = select(jobs.c.document_id).where(jobs.c.id.in_(set(job_ids)), ~_replaced(jobs, later))
+    needed = select(jobs.c.document_id).where(jobs.c.id.in_(set(job_ids)), current_work(jobs))
     in_trash = documents.c.state == TRASHED
     connection.execute(
         update(documents)
@@ -422,11 +476,12 @@ class JobQueue:
         return result.rowcount == 1
 
     def retry_document(self, document_id: str) -> int | RetryRefusal:
-        """Queue again, with all their attempts, the document's failed jobs that are the latest
-        job of their stage, and return how many. A failed job that a later job of the same stage
-        replaced (a new version's input, or the same work queued again) is history and stays as it
-        is. A document whose state is ``failed`` goes back to ``processing`` when anything was
-        queued. Refused for an unknown id and for a document in the trash.
+        """Queue again, with all their attempts, the document's ``retryable`` jobs: failed jobs
+        that are their document's current work for their stage (``current_work``), and return how
+        many. A failed job for an input the document no longer needs, or one that a later job of
+        the same work replaced, is history and stays as it is. A document whose state is
+        ``failed`` goes back to ``processing`` when anything was queued. Refused for an unknown id
+        and for a document in the trash.
 
         One transaction that holds the write lock from its first statement decides and writes, so
         a move to the trash, a job that fails or a second press at the same moment comes wholly
@@ -435,7 +490,6 @@ class JobQueue:
         if not ids.is_ulid(document_id):
             return RetryRefusal.NOT_FOUND
         now = self._clock()
-        later = jobs.alias("later")
         with write_transaction(self._engine) as connection:
             state = connection.execute(
                 select(documents.c.state).where(documents.c.id == document_id)
@@ -446,18 +500,7 @@ class JobQueue:
                 return RetryRefusal.IN_TRASH
             queued = connection.execute(
                 update(jobs)
-                .where(
-                    jobs.c.document_id == document_id,
-                    jobs.c.status == "failed",
-                    ~_replaced(jobs, later),
-                    # Never two open jobs for the same work (the database refuses it too).
-                    ~exists().where(
-                        later.c.document_id == jobs.c.document_id,
-                        later.c.stage == jobs.c.stage,
-                        later.c.input_hash == jobs.c.input_hash,
-                        later.c.status.in_(_OPEN),
-                    ),
-                )
+                .where(jobs.c.document_id == document_id, retryable(jobs))
                 .values(status="queued", attempts=0, run_after=now, finished_at=None)
             ).rowcount
             if queued and state == "failed":
