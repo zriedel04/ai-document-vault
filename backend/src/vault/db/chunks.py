@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
-from sqlalchemy import Engine, delete, insert, select
+from sqlalchemy import Connection, Engine, delete, insert, select
 
 from vault.db import ids
 from vault.db.pages import VersionNotFoundError, is_int, is_storable
@@ -94,43 +94,51 @@ def replace_chunks(
     with engine.begin() as connection:
         # The first statement writes, so the transaction holds SQLite's write lock from here on:
         # neither the version nor its pages can change before the insert.
-        connection.execute(delete(chunks).where(chunks.c.version_id == version_id))
-        document_id = connection.execute(
-            select(document_versions.c.document_id).where(document_versions.c.id == version_id)
-        ).scalar_one_or_none()
-        if document_id is None:
-            raise VersionNotFoundError
-        page_texts: dict[int, str] = {
-            row.page_no: row.text
-            for row in connection.execute(
-                select(pages.c.page_no, pages.c.text).where(pages.c.version_id == version_id)
-            )
-        }
-        for chunk in checked:
-            page_text = page_texts.get(chunk.page_start)
-            if page_text is None:
-                msg = f"Chunk {chunk.index} names page {chunk.page_start}, which is not stored."
-                raise ValueError(msg)
-            if page_text[chunk.char_start : chunk.char_end] != chunk.text:
-                msg = f"Chunk {chunk.index} is not the text of page {chunk.page_start} at its span."
-                raise ValueError(msg)
-        if checked:
-            connection.execute(
-                insert(chunks),
-                [
-                    {
-                        "version_id": version_id,
-                        "document_id": document_id,
-                        "chunk_index": chunk.index,
-                        "page_start": chunk.page_start,
-                        "page_end": chunk.page_end,
-                        "section_path": json.dumps(list(chunk.section_path), ensure_ascii=False),
-                        "char_start": chunk.char_start,
-                        "char_end": chunk.char_end,
-                        "text": chunk.text,
-                        "token_count": chunk.token_count,
-                        "chunker_version": chunker_version,
-                    }
-                    for chunk in checked
-                ],
-            )
+        write_chunks(connection, version_id, checked, chunker_version)
+
+
+def write_chunks(
+    connection: Connection, version_id: str, checked: Sequence[Chunk], chunker_version: str
+) -> None:
+    """``replace_chunks`` in the caller's transaction, for chunks ``check_chunks`` has passed. The
+    caller holds the write lock, or makes this its first statement, which takes it."""
+    connection.execute(delete(chunks).where(chunks.c.version_id == version_id))
+    document_id = connection.execute(
+        select(document_versions.c.document_id).where(document_versions.c.id == version_id)
+    ).scalar_one_or_none()
+    if document_id is None:
+        raise VersionNotFoundError
+    page_texts: dict[int, str] = {
+        row.page_no: row.text
+        for row in connection.execute(
+            select(pages.c.page_no, pages.c.text).where(pages.c.version_id == version_id)
+        )
+    }
+    for chunk in checked:
+        page_text = page_texts.get(chunk.page_start)
+        if page_text is None:
+            msg = f"Chunk {chunk.index} names page {chunk.page_start}, which is not stored."
+            raise ValueError(msg)
+        if page_text[chunk.char_start : chunk.char_end] != chunk.text:
+            msg = f"Chunk {chunk.index} is not the text of page {chunk.page_start} at its span."
+            raise ValueError(msg)
+    if checked:
+        connection.execute(
+            insert(chunks),
+            [
+                {
+                    "version_id": version_id,
+                    "document_id": document_id,
+                    "chunk_index": chunk.index,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "section_path": json.dumps(list(chunk.section_path), ensure_ascii=False),
+                    "char_start": chunk.char_start,
+                    "char_end": chunk.char_end,
+                    "text": chunk.text,
+                    "token_count": chunk.token_count,
+                    "chunker_version": chunker_version,
+                }
+                for chunk in checked
+            ],
+        )
