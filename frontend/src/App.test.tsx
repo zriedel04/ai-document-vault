@@ -21,17 +21,16 @@ describe("navigation", () => {
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("aria-current", "page");
   });
 
-  // The dashboard, documents and import pages are built; the other sections are placeholders.
-  it.each(NAV_ITEMS.filter((item) => !["/", "/documents", "/import"].includes(item.path)))(
-    "opens the $label placeholder",
-    async ({ label, path, description }) => {
-      await renderApp();
-      await userEvent.click(screen.getByRole("link", { name: label }));
-      expect(screen.getByRole("heading", { level: 2, name: label })).toBeInTheDocument();
-      expect(screen.getByText(description)).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: label })).toHaveAttribute("href", path);
-    },
-  );
+  // The dashboard, documents, import and search pages are built; the others are placeholders.
+  it.each(
+    NAV_ITEMS.filter((item) => !["/", "/documents", "/import", "/search"].includes(item.path)),
+  )("opens the $label placeholder", async ({ label, path, description }) => {
+    await renderApp();
+    await userEvent.click(screen.getByRole("link", { name: label }));
+    expect(screen.getByRole("heading", { level: 2, name: label })).toBeInTheDocument();
+    expect(screen.getByText(description)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: label })).toHaveAttribute("href", path);
+  });
 
   it("marks only the current section, not the dashboard, on another page", async () => {
     await renderApp({ route: "/search" });
