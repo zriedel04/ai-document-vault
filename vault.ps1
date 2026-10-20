@@ -6,7 +6,9 @@
     .\vault.ps1 install   Sync the Python packages from the lock file, install the frontend
                           packages and build the frontend.
     .\vault.ps1 run       Start the server in the background and open the app in the browser.
-    .\vault.ps1 stop      Stop the server that "run" started.
+    .\vault.ps1 stop      Stop the server that "run" started: ask it to shut down cleanly (running
+                          jobs get their bounded wait), and end it only if it has not exited
+                          within 30 seconds, or cannot be asked; it then says so.
     .\vault.ps1 dev       Start the server in the background and the Vite dev server in this
                           window; the server stops when the dev server does.
     .\vault.ps1 check     Check the vault without changing it: SQLite's integrity and foreign
@@ -59,6 +61,11 @@ $script:DevPort = 5173
 # database migration. A server that exits is noticed at once; this only bounds one that hangs.
 # A backend test keeps this above the backend's own bound.
 $script:StartupMinutes = 20
+# How long "stop" waits for the server to exit after asking it to shut down, before it ends the
+# process instead. The server lets open requests finish for 5 seconds (SHUTDOWN_GRACE_SECONDS in
+# backend/src/vault/__main__.py) and then gives running jobs 10 (WORKER_STOP_SECONDS in
+# backend/src/vault/main.py). A backend test keeps this above the two together.
+$script:StopSeconds = 30
 
 # \A and \z, not ^ and $: in .NET (as in Python) $ also matches before a trailing newline.
 $script:TokenShape = '\A[A-Za-z0-9_-]{32,128}\z'
@@ -192,14 +199,17 @@ function Read-TextFile {
 function Write-Record {
     <# Remember the server: its process id and start time, and the settings it was started with, so
        a later "run" talks to the server that is up and not to whatever the settings say now. #>
-    param([System.Diagnostics.Process]$Process, [object]$Facts)
+    param([System.Diagnostics.Process]$Process, [object]$Facts, [string]$Launch)
     New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
+    # The launch id lets "stop" prove that the server on the address is this process before it
+    # sends the token there. It is not a secret: /api/health gives it to anyone who asks.
     $record = [ordered]@{
         pid     = $Process.Id
         started = (Get-StartStamp $Process)
         host    = [string]$Facts.host
         port    = [int]$Facts.port
         vault   = [string]$Facts.vault
+        launch  = $Launch
     }
     Write-TextFile $script:RecordFile ($record | ConvertTo-Json)
 }
@@ -225,8 +235,9 @@ function Remove-Record {
 }
 
 function Get-RunningServer {
-    <# The server the last "run" started, or $null: its Process and the settings it was started with
-       (Host, Port and Vault, each $null if the record lacks it). The record holds the process id
+    <# The server the last "run" started, or $null: its Process, the settings it was started with
+       (Host, Port and Vault) and its launch id (Launch), each $null if the record lacks it or holds
+       something unusable. The record holds the process id
        and its start time, so a process that only reuses the number is never taken for the server.
        A record that cannot be read, or that names a process that has ended, is removed. #>
     if (-not (Test-Path -LiteralPath $script:RecordFile -PathType Leaf)) { return $null }
@@ -238,6 +249,7 @@ function Get-RunningServer {
             $recordedHost = $null
             $recordedPort = $null
             $recordedVault = $null
+            $recordedLaunch = $null
             if (($names -contains 'host') -and ($record.host -is [string]) -and $record.host) {
                 $recordedHost = $record.host
             }
@@ -247,11 +259,15 @@ function Get-RunningServer {
             if (($names -contains 'vault') -and ($record.vault -is [string]) -and $record.vault) {
                 $recordedVault = $record.vault
             }
+            if (($names -contains 'launch') -and (Test-TokenShape $record.launch)) {
+                $recordedLaunch = $record.launch
+            }
             return [pscustomobject]@{
                 Process = $process
                 Host    = $recordedHost
                 Port    = $recordedPort
                 Vault   = $recordedVault
+                Launch  = $recordedLaunch
             }
         }
     }
@@ -441,7 +457,7 @@ function Start-Backend {
     # exits or never answers, Ctrl+C) must not leave a server running that "stop" cannot find.
     $ready = $false
     try {
-        Write-Record $process $Facts
+        Write-Record $process $Facts $launch
         $url = "http://${HostName}:${Port}/api/health"
         if ($HostName.Contains(':')) { $url = "http://[${HostName}]:${Port}/api/health" }
         Wait-Launch -Url $url -Launch $launch -Process $process -Name 'server' `
@@ -487,6 +503,123 @@ function Stop-Backend {
         }
     }
     Remove-Record -Process $Process -Started $Started
+}
+
+function Get-ServerBase {
+    <# http://host:port, as the browser and the server's Origin check spell it. #>
+    param([Parameter(Mandatory)][string]$HostName, [Parameter(Mandatory)][int]$Port)
+    if ($HostName.Contains(':')) { return "http://[${HostName}]:${Port}" }
+    return "http://${HostName}:${Port}"
+}
+
+function Invoke-LocalRequest {
+    <# One HTTP request to the server: no proxy (the system's proxy must never receive the token),
+       no redirect, no kept connection, a timeout, and the answer decoded as UTF-8 whatever the
+       console's code page. Returns the status code and the body; an error status is an answer,
+       not an exception. Throws only when nothing answered. #>
+    param(
+        [Parameter(Mandatory)][string]$Method,
+        [Parameter(Mandatory)][string]$Url,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSeconds = 5
+    )
+    $request = [System.Net.WebRequest]::Create($Url)
+    $request.Method = $Method
+    $request.Proxy = $null
+    $request.AllowAutoRedirect = $false
+    $request.KeepAlive = $false
+    $request.Timeout = $TimeoutSeconds * 1000
+    $request.ReadWriteTimeout = $TimeoutSeconds * 1000
+    foreach ($name in $Headers.Keys) { $request.Headers[$name] = [string]$Headers[$name] }
+    if ($Method -ne 'GET') { $request.ContentLength = 0 }
+    $response = $null
+    try {
+        $response = $request.GetResponse()
+    }
+    catch {
+        # A 4xx or 5xx arrives as a WebException that carries the response; PowerShell may wrap it.
+        $inner = $_.Exception
+        while (($null -ne $inner) -and -not ($inner -is [System.Net.WebException])) { $inner = $inner.InnerException }
+        if (($null -eq $inner) -or ($null -eq $inner.Response)) { throw 'nothing answered' }
+        $response = $inner.Response
+    }
+    try {
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), (New-Object System.Text.UTF8Encoding($false)))
+        try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        return [pscustomobject]@{ Status = [int]$response.StatusCode; Body = $body }
+    }
+    finally {
+        $response.Close()
+    }
+}
+
+function Request-Shutdown {
+    <# Ask the server on the recorded address to shut down. Returns $null when it took the request,
+       or why it was not asked, in fixed text that never holds the token or the vault folder.
+       The token goes only to the process that was started: /api/health must first answer with
+       the launch id in the record, which no other program can know (see Wait-Launch). Between
+       that answer and the request the server holds the port, so no other program can take it. #>
+    param([Parameter(Mandatory)][object]$Running)
+    if (-not ($Running.Launch -and $Running.Host -and $Running.Port -and $Running.Vault)) {
+        return 'its record does not say how to reach it (an older launcher started it)'
+    }
+    $base = Get-ServerBase $Running.Host $Running.Port
+    try {
+        $answer = Invoke-LocalRequest -Method 'GET' -Url "$base/api/health"
+    }
+    catch {
+        return 'it does not answer on its address'
+    }
+    $id = $null
+    if ($answer.Status -eq 200) {
+        try { $id = ([string]$answer.Body | ConvertFrom-Json).launch } catch { $id = $null }
+    }
+    if (-not (($id -is [string]) -and ($id -ceq $Running.Launch))) {
+        return 'another program answers on its address'
+    }
+    try {
+        $token = Read-Token $Running.Vault
+    }
+    catch {
+        return 'the token could not be read from the vault folder'
+    }
+    try {
+        $answer = Invoke-LocalRequest -Method 'POST' -Url "$base/api/shutdown" -Headers @{
+            Authorization = "Bearer $token"
+            Origin        = $base
+        }
+    }
+    catch {
+        return 'the shutdown request got no answer'
+    }
+    if ($answer.Status -ne 202) {
+        return "the shutdown request was refused (HTTP $($answer.Status))"
+    }
+    return $null
+}
+
+function Stop-Server {
+    <# Stop a recorded server cleanly: ask it to shut down (its running jobs get their bounded
+       wait) and wait up to -Seconds for the process to exit. If it cannot be asked, or does not
+       exit in time, say so and end it (Stop-Backend). Returns $true for a clean stop and $false
+       for a forced one. The record is removed only once the process has exited, and only if it
+       still names it; Stop-Backend throws and keeps it if the process cannot be ended. The caller
+       holds the lock. #>
+    param([Parameter(Mandatory)][object]$Running, [double]$Seconds = $script:StopSeconds)
+    $process = $Running.Process
+    # Read before the process is asked to end; an ended one may no longer say when it started.
+    try { $started = Get-StartStamp $process } catch { $started = $null }
+    $why = Request-Shutdown $Running
+    if ($null -eq $why) {
+        if ($process.WaitForExit([int]($Seconds * 1000)) -and $process.HasExited) {
+            Remove-Record -Process $process -Started $started
+            return $true
+        }
+        $why = "it did not exit within $Seconds seconds of being asked"
+    }
+    Write-Host "The server did not stop cleanly: $why. Ending it now; jobs it was running are queued again at the next start."
+    Stop-Backend $process $started
+    return $false
 }
 
 function Open-App {
@@ -549,8 +682,12 @@ function Invoke-Stop {
             Write-Host 'The server is not running.'
             return
         }
-        Stop-Backend $running.Process
-        Write-Host 'The server is stopped.'
+        if (Stop-Server $running) {
+            Write-Host 'The server stopped cleanly.'
+        }
+        else {
+            Write-Host 'The server is stopped (it was ended, not shut down cleanly).'
+        }
     }
 }
 
@@ -607,8 +744,19 @@ function Invoke-Dev {
             Stop-Process -Id $dev.Id -Force -ErrorAction SilentlyContinue
             $null = $dev.WaitForExit(10000)
         }
-        # Under the lock, like every other change to the record.
-        Invoke-Locked { Stop-Backend $server $serverStarted }
+        # Under the lock, like every other change to the record. Its own server, still the one in
+        # the record, is stopped cleanly like "stop" does; one that "stop" already ended (or that
+        # the record no longer names) is only made sure of, and a newer record is left alone.
+        Invoke-Locked {
+            $running = Get-RunningServer
+            if (($null -ne $running) -and ($running.Process.Id -eq $server.Id) -and
+                ((Get-StartStamp $running.Process) -eq $serverStarted)) {
+                $null = Stop-Server $running
+            }
+            else {
+                Stop-Backend $server $serverStarted
+            }
+        }
     }
 }
 
