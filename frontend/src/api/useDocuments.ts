@@ -12,6 +12,7 @@ import {
   type SortKey,
   TEXT_WINDOW,
   errorFor,
+  fetchOriginal,
 } from "./documents";
 import { useSessionState } from "./session-context";
 
@@ -126,4 +127,23 @@ export function useDocumentPages(id: string, offset: number): Request<DocumentPa
 export function useDocument(id: string): Request<DocumentDetail> {
   const api = useApi();
   return useRequest(id, () => loadDocument(api, id));
+}
+
+/** A PDF's bytes, as PDF.js takes them. */
+export interface PdfFile {
+  data: Uint8Array;
+}
+
+/**
+ * The bytes of a document's original file, for the PDF viewer (`fetchOriginal`: the token goes in
+ * the header, never in the address). `sha256` names the bytes, so a new current version is
+ * fetched again; the same bytes are not fetched again when the page shown changes.
+ */
+export function useOriginalPdf(id: string, sha256: string): Request<PdfFile> {
+  const api = useApi();
+  return useRequest(JSON.stringify([id, sha256]), async () => {
+    const original = await fetchOriginal(api, id);
+    if (original.status === "error") return original;
+    return { status: "ok", data: { data: new Uint8Array(await original.blob.arrayBuffer()) } };
+  });
 }
