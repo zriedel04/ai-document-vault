@@ -50,7 +50,8 @@ What the text holds:
   Text comes from ``w:t``; tabs (``w:tab``, ``w:ptab``) become a tab, breaks (``w:br``, ``w:cr``) a
   line break, a non-breaking hyphen a hyphen, and a soft hyphen nothing.
 - Field results are kept and field codes are not (``w:instrText``, and everything between a
-  complex field's ``begin`` and ``separate``, a field nested in the code included). A field marker
+  complex field's ``begin`` and ``separate``, a field nested in the code and a text box anchored
+  there included: every element that gives content, ``EMITTED``, passes one gate). A field marker
   (``w:fldChar``) counts wherever the text around it is left out because it is not shown: in a
   hidden run, a ruby guide or an equation (``FIELDS_ONLY``). A hidden ``separate`` still ends the
   code, so the result after it is read, and a hidden ``begin`` still starts one, so a nested
@@ -205,6 +206,9 @@ CHARACTERS: Final = {
     qn("w:cr"): "\n",
     qn("w:noBreakHyphen"): "-",
 }
+# Every element whose content the paragraph walker gives: text, a character, and a text box (whose
+# paragraphs, tables and nested boxes follow the anchor). Everything else is read through.
+EMITTED: Final = frozenset({_T, _TXBX_CONTENT, *CHARACTERS})
 _OFF: Final = frozenset({"0", "false", "off"})
 _HEADING_LEVELS: Final = {"title": 1, **{f"heading {n}": n for n in range(1, 10)}}
 _LINE_BREAK: Final = re.compile(r"\r\n?")
@@ -521,6 +525,9 @@ class _Inline:
     ``shown`` is False inside content that is in the document but not shown (a hidden run, an
     element of ``FIELDS_ONLY``): no text or text box is taken from it, but its field markers still
     change the state, because they delimit the code and result of the text that is shown.
+
+    Only the elements of ``EMITTED`` give content, and all of them pass the same gate (shown, and
+    outside every field's code), so a text box in a field's code is left out like its text.
     """
 
     def __init__(self) -> None:
@@ -535,23 +542,20 @@ class _Inline:
                 if tag in FIELDS_ONLY:
                     self.walk(child, shown=False)
                 continue
-            if tag == _T:
-                self._add(child.text or "", shown)
-            elif tag in CHARACTERS:
-                self._add(CHARACTERS[tag], shown)
-            elif tag == _FLD_CHAR:
+            if tag == _FLD_CHAR:
                 self._field(child.get(_FLD_CHAR_TYPE))
-            elif tag == _TXBX_CONTENT:
-                if shown:
-                    self.boxes.append(child)
             elif tag == _ALT_CHUNK:  # block content, but refused wherever it is met
                 raise ImportedContentError
+            elif tag in EMITTED:
+                # The one place content leaves the walker: text, a character, or a text box, and
+                # only when it is shown and outside every open field's code.
+                if shown and not any(self._fields):
+                    if tag == _TXBX_CONTENT:
+                        self.boxes.append(child)
+                    else:
+                        self.parts.append(child.text or "" if tag == _T else CHARACTERS[tag])
             else:
                 self.walk(child, shown=shown and not (tag == _R and _hidden(child)))
-
-    def _add(self, text: str, shown: bool) -> None:
-        if shown and not any(self._fields):
-            self.parts.append(text)
 
     def _field(self, kind: str | None) -> None:
         if kind == "begin":

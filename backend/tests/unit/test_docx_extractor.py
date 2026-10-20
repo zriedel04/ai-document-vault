@@ -15,7 +15,7 @@ from docx.opc.constants import CONTENT_TYPE, RELATIONSHIP_TYPE
 from docx.opc.packuri import PackURI
 from docx.opc.part import Part
 from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls
+from docx.oxml.ns import nsdecls, qn
 
 from vault.ingest.extractors import Extraction, ExtractionError
 from vault.ingest.extractors import docx as extractor
@@ -1097,6 +1097,61 @@ def test_a_text_box_anchored_in_a_hidden_run_is_left_out() -> None:
     assert field_text(run("Anchor"), hidden) == "Anchor"
 
 
+def text_box_run(text: str) -> str:
+    """A run anchoring a text box whose paragraph holds ``text``, a table and a nested box."""
+    nested = (
+        f"<w:p><w:r><w:pict><w:txbxContent><w:p>{run(text + ' nested')}</w:p></w:txbxContent>"
+        "</w:pict></w:r></w:p>"
+    )
+    return (
+        f"<w:r><w:pict><w:txbxContent><w:p>{run(text)}</w:p><w:tbl><w:tr>{cell(text + ' cell')}"
+        f"</w:tr></w:tbl>{nested}</w:txbxContent></w:pict></w:r>"
+    )
+
+
+# Everything the walker gives content for, in a field's code: the INCLUDED_CONTAINERS cases (text
+# and every character, through every container) and a text box.
+EMITTING_CASES = [
+    *((name, content, expected) for name, content, expected in INCLUDED_CONTAINERS),
+    ("text box", text_box_run("boxed"), ""),
+]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [pytest.param(content, expected, id=name) for name, content, expected in EMITTING_CASES],
+)
+def test_nothing_in_a_fields_code_is_given(content: str, expected: str) -> None:
+    def in_code(inner: str) -> str:
+        return f"{fld('begin')}{code('X')}{inner}{fld('separate')}{run('result')}{fld('end')}"
+
+    assert field_text(in_code(content)) == "result"
+    # In a field nested in the code, and in the code of a field nested in a result, too.
+    nested = f"{fld('begin')}{code('IF')}{in_code(content)}{fld('separate')}{run('r')}{fld('end')}"
+    assert field_text(nested) == "r"
+    in_result = f"{fld('begin')}{code('A')}{fld('separate')}{in_code(content)}{fld('end')}"
+    assert field_text(in_result) == "result"
+
+
+def test_a_text_box_in_a_fields_result_is_read() -> None:
+    content = f"{fld('begin')}{code('X')}{fld('separate')}{text_box_run('boxed')}{fld('end')}"
+
+    assert field_text(run("Anchor"), content).split(PARAGRAPH_BREAK) == [
+        "Anchor",
+        "boxed",
+        "boxed cell",
+        "boxed nested",
+    ]
+
+
+def test_every_emitted_element_is_swept_in_a_fields_code() -> None:
+    # The "characters" case writes w:t and every character; the "text box" case w:txbxContent.
+    swept = {qn("w:t"), qn("w:txbxContent"), *CHARACTERS}
+
+    assert swept == extractor.EMITTED
+    assert {"characters", "text box"} <= {name for name, _, _ in EMITTING_CASES}
+
+
 def test_every_excluded_element_is_decided_for_field_markers() -> None:
     # Each excluded element is either walked for its field markers (shown nowhere, but in the
     # document), or holds content accepting the changes removes, or has no runs to hold a marker.
@@ -1415,6 +1470,22 @@ def test_process_content_keeps_the_content_of_an_ignored_element(
         )
 
     assert text_of(build(fill)) == expected
+
+
+def test_redeclaring_a_namespace_ignorable_keeps_the_inherited_process_content() -> None:
+    # As in XmlCompatibilityReader: mc:Ignorable adds to the scope's ignorable namespaces and does
+    # not touch ProcessContent, which is looked up from the nearest scope that has an entry for the
+    # namespace. So an inner mc:Ignorable="x" alone keeps the table's x:* processing.
+    def fill(document: DocumentObject) -> None:
+        add_xml(
+            document,
+            nested_in_a_text_box_in_a_cell(
+                {"table": 'mc:Ignorable="x" mc:ProcessContent="x:*"', "inner": IGNORE_X},
+                f"<x:a>{run('a ')}</x:a>",
+            ),
+        )
+
+    assert text_of(build(fill)) == "Anchor a boxed"
 
 
 def test_process_content_is_inherited_and_the_nearest_declaration_for_a_namespace_wins() -> None:
