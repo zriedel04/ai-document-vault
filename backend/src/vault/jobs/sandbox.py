@@ -44,8 +44,11 @@ bytes alone: every JSON value but the outermost follows a ``[``, ``{``, ``,`` or
 count bounds the values ``json`` builds; an answer that could cost more than
 ``max_result_memory_bytes`` (1 GiB by default) or hold more than ``max_result_values`` (4 million)
 values is refused unparsed, because 256 MiB of ``[],`` would otherwise build about 6 GiB in the
-server. Nesting is bounded by :data:`~vault.jobs.sandbox_child.MAX_DEPTH`, integers by their number
-of digits, and ``NaN``, ``Infinity`` and repeated keys are refused.
+server. Nesting is bounded by :data:`~vault.jobs.sandbox_child.MAX_DEPTH`, ``NaN``, ``Infinity``
+and repeated keys are refused, and a number is read only if its literal is exactly the text the
+child writes for the value it reads back (:func:`~vault.jobs.sandbox_child.read_number`, the one
+rule for numbers on both sides), so ``1e999`` (infinity), ``1e-400`` (zero) and other spellings
+are refused.
 
 **Memory cap.** On Windows the child is put in a Job Object with a process and a job memory limit
 (committed memory) and kill-on-close: when the server process ends for any reason, Windows closes
@@ -142,9 +145,6 @@ _LOAD_BYTES: Final = 16 * 1024
 # valid JSON, as far as json reads it; so their count plus one bounds the values json builds. The
 # same bytes inside strings are counted too, which only errs on the safe side.
 _VALUE_MARKS: Final = (b"[", b"{", b",", b":")
-# The longest integer literal accepted, sign included: every 64-bit integer fits. A longer one is
-# refused before ``int()`` reads it.
-_MAX_INT_CHARACTERS: Final = 20
 SUPPORTED_PLATFORMS: Final = frozenset({"win32", "linux"})
 # The variables a Python child needs to start and find its temporary folder; nothing else of the
 # server's environment (API keys among it) is passed on.
@@ -500,10 +500,20 @@ def _answer_cost(answer: bytes | bytearray) -> tuple[int, int]:
     return _LOAD_BYTES + _ANSWER_BYTE_COST * length + _VALUE_COST * values, values
 
 
-def _parse_int(text: str) -> int:
-    if len(text) > _MAX_INT_CHARACTERS:
-        raise _MismatchError
-    return int(text)
+def _parse_int(text: str) -> object:
+    """An integer literal, read by the child's own rule for numbers (``read_number``)."""
+    try:
+        return child.read_number(text, int)
+    except ValueError:
+        raise _MismatchError from None
+
+
+def _parse_float(text: str) -> object:
+    """A literal with a fraction or an exponent, read by the same rule: ``1e999`` is refused."""
+    try:
+        return child.read_number(text, float)
+    except ValueError:
+        raise _MismatchError from None
 
 
 def _refuse_constant(text: str) -> object:
@@ -529,7 +539,9 @@ def _load_result(
     Refused unparsed when :func:`_answer_cost` says it could cost more than ``max_memory`` bytes
     or hold more than ``max_values`` values. Then the payload is read as ASCII (the child escapes
     everything else) from a view of the buffer, parsed by the standard library's ``json`` with
-    ``NaN``, ``Infinity``, repeated keys and integers longer than ``_MAX_INT_CHARACTERS`` refused,
+    ``NaN``, ``Infinity``, repeated keys and every number literal that is not exactly the text the
+    child writes for its value (``sandbox_child.read_number``: no overflow, underflow, precision
+    loss, other spelling or literal longer than the child writes) refused,
     and built by the entry point's converter, which accepts only the declared type's shape and
     nesting up to ``MAX_DEPTH``. json's own nesting is bounded by CPython's recursion limit, which
     raises ``RecursionError``. Any failure, running out of the server's memory included, is a
@@ -543,6 +555,7 @@ def _load_result(
         parsed = json.loads(
             text,
             parse_int=_parse_int,
+            parse_float=_parse_float,
             parse_constant=_refuse_constant,
             object_pairs_hook=_object,
         )

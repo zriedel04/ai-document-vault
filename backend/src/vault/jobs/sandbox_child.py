@@ -34,6 +34,7 @@ import importlib
 import inspect
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -56,6 +57,51 @@ UNNAMED_ERROR: Final = "Error"
 BYTES_KEY: Final = "$bytes"
 # How deep containers (lists, tuples, dataclasses) may nest in a result; the parent refuses deeper.
 MAX_DEPTH: Final = 64
+# The longest number literals written or read, sign included: every 64-bit integer fits in 20,
+# and the longest ``repr`` of a finite float is 24 (``-2.2250738585072014e-308``). A longer
+# literal is refused before ``int()`` or ``float()`` reads it.
+MAX_INT_CHARACTERS: Final = 20
+MAX_FLOAT_CHARACTERS: Final = 24
+
+
+def number_text(value: int | float) -> str:
+    """The text ``json.dumps`` writes for an ``int`` or ``float`` (its ``repr``), or
+    ``ValueError`` for a number the sandbox does not bring back: a float that is not finite, or
+    a literal longer than ``MAX_INT_CHARACTERS`` or ``MAX_FLOAT_CHARACTERS``.
+
+    The one rule for numbers: :func:`encode` writes only what this accepts, and the parent reads
+    a literal only if it is this function's text for the value it reads back
+    (:func:`read_number`), so every number that crosses round-trips exactly.
+    """
+    if type(value) is int:
+        text, limit = int.__repr__(value), MAX_INT_CHARACTERS
+    elif type(value) is float and math.isfinite(value):
+        text, limit = float.__repr__(value), MAX_FLOAT_CHARACTERS
+    else:
+        msg = "not a finite int or float"
+        raise ValueError(msg)
+    if len(text) > limit:
+        msg = "the number is too long"
+        raise ValueError(msg)
+    return text
+
+
+def read_number(text: str, kind: type[int] | type[float]) -> int | float:
+    """The number a JSON literal stands for, or ``ValueError`` unless ``text`` is exactly what
+    :func:`number_text` writes for it. This refuses a literal that overflows (``1e999`` is
+    ``inf``) or underflows (``1e-400`` is ``0.0``), loses precision (``0.10000000000000001``),
+    or is spelled another way (``1E5``, ``1.50``, ``-0``) than the child writes it."""
+    limit = MAX_INT_CHARACTERS if kind is int else MAX_FLOAT_CHARACTERS
+    if len(text) > limit:
+        msg = "the number is too long"
+        raise ValueError(msg)
+    value = int(text) if kind is int else float(text)
+    if number_text(value) != text:
+        msg = "not the text the child writes for this number"
+        raise ValueError(msg)
+    return value
+
+
 _READ_CHUNK: Final = 1 << 16
 
 
@@ -96,7 +142,10 @@ def _plain(value: object, depth: int) -> object:
     the sandbox does not bring back. Exact types only: a subclass (an ``IntEnum``, a ``str``
     subclass) or a dict is refused rather than guessed at."""
     kind = type(value)
-    if value is None or kind is bool or kind is int or kind is float or kind is str:
+    if value is None or kind is bool or kind is str:
+        return value
+    if kind is int or kind is float:
+        number_text(value)  # type: ignore[arg-type]  # refuses what the parent would not read
         return value
     if kind is bytes or kind is bytearray:
         return {BYTES_KEY: base64.b64encode(value).decode("ascii")}  # type: ignore[arg-type]

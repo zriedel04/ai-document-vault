@@ -12,6 +12,7 @@ import importlib
 import io
 import json
 import logging
+import math
 import os
 import pickle
 import subprocess
@@ -929,6 +930,23 @@ def test_an_entry_point_declares_its_result_type() -> None:
         (b"-Infinity", float),
         (b"1" * 21, int),
         (b"-" + b"9" * 20, int),
+        # Numbers whose literal is not the text the child writes for what they decode to.
+        (b"1e999", float),  # overflows to inf
+        (b"-1e999", float),  # to -inf
+        (b"[1e999]", list[float]),
+        (b'{"ratio":1e999}', None),
+        (b"1e-400", float),  # underflows to 0.0
+        (b"-1e-400", float),  # to -0.0
+        (b"0.10000000000000001", float),  # rounds to 0.1: precision lost
+        (b"9007199254740993.0", float),  # rounds to 9007199254740992.0
+        (b"1E5", float),
+        (b"1e5", float),  # the child writes 100000.0
+        (b"1.50", float),
+        (b"1.0e0", float),
+        (b"1e+20", int),  # a float literal where an int is declared
+        (b"-0", int),  # the child writes 0
+        (b"1" * 25 + b".0", float),  # longer than any float the child writes
+        (b"0." + b"0" * 400 + b"1", float),
         ('"caf\N{LATIN SMALL LETTER E WITH ACUTE}"'.encode(), str),  # not ASCII
         (b'"\xff"', str),
         (b"1 2", int),
@@ -992,13 +1010,63 @@ def test_deep_nesting_beyond_what_json_parses_is_refused_quickly(size: int) -> N
     assert time.monotonic() - started < 30
 
 
+NUMBERS: list[int | float] = [
+    0, -1, 2**63 - 1, -(2**63), 10**19, -(10**18),
+    0.0, -0.0, 0.1, -0.1, 1.5, 1e16, 1e20, 1e-7, 5e-324, -5e-324, 2.2250738585072014e-308,
+    -2.2250738585072014e-308, 1.7976931348623157e308, -1.7976931348623157e308, 9007199254740993.0,
+]  # fmt: skip
+
+
+def random_floats(count: int) -> list[float]:
+    """Finite floats from random bit patterns: every exponent and every mantissa is as likely."""
+    import random
+    import struct
+
+    rng = random.Random(0)  # noqa: S311 - reproducible test data, not a secret
+    values = (
+        struct.unpack("<d", rng.getrandbits(64).to_bytes(8, "little"))[0] for _ in range(count * 2)
+    )
+    return [value for value in values if math.isfinite(value)][:count]
+
+
+@pytest.mark.parametrize("value", NUMBERS + random_floats(2_000))
+def test_every_number_the_child_writes_comes_back_exactly(value: int | float) -> None:
+    payload = sandbox_child.encode(value)
+    assert payload.decode("ascii") == sandbox_child.number_text(value)  # one rule, both sides
+    built = decode(payload, type(value))
+    assert type(built) is type(value)
+    assert repr(built) == repr(value)  # bit for bit: -0.0 stays -0.0
+
+
+@pytest.mark.parametrize(
+    "value", [2**70, -(2**70), 10**20, float("inf"), float("-inf"), float("nan")], ids=repr
+)
+def test_the_child_refuses_a_number_the_server_would_not_read(value: int | float) -> None:
+    with pytest.raises(ValueError, match=r"number|finite"):
+        sandbox_child.encode(value)
+    with pytest.raises(SandboxResultError):  # and the same literal written by hand is refused
+        decode(repr(value).encode(), type(value))
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"), [("0" * 21, int), ("1" * 25 + ".0", float), ("1" * 5_000, int)]
+)
+def test_a_long_literal_is_refused_by_its_length_before_it_is_read(
+    text: str, kind: type[int] | type[float]
+) -> None:
+    """Refused for its length, not for the value it would read as: neither int() nor float()
+    runs on more characters than the child ever writes."""
+    with pytest.raises(ValueError, match="too long"):
+        sandbox_child.read_number(text, kind)
+
+
 def test_large_integers_are_refused_before_int_reads_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
     real = sandbox._parse_int
 
-    def recording(text: str) -> int:
+    def recording(text: str) -> object:
         calls.append(text)
         return real(text)
 
