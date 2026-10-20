@@ -33,11 +33,15 @@ def test_entry_point_runs_uvicorn_on_the_configured_loopback_address(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AIVAULT_CONFIG", raising=False)
     monkeypatch.setenv("AIVAULT_SERVER__PORT", "9200")
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: calls.append(kwargs))
+    servers: list[uvicorn.Server] = []
+    monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets=None: servers.append(self))
     entry.main()
-    assert calls == [{"host": "127.0.0.1", "port": 9200, "log_config": None, "access_log": False}]
     logging.getLogger().handlers.clear()
+    (server,) = servers
+    config = server.config
+    assert (config.host, config.port) == ("127.0.0.1", 9200)
+    assert config.log_config is None
+    assert config.access_log is False
 
 
 def free_port() -> int:
