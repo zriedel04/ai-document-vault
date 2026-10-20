@@ -19,6 +19,10 @@ port = 8765
 # English and Western European, cp1250 Central European, cp1251 Cyrillic, cp1253 Greek, cp932
 # Japanese, and the other Windows code pages listed in the error if you mistype one.
 text_fallback_encoding = "cp1252"
+# Heavy parsing runs in a child process: it is killed after this many seconds (1 to 3600) and
+# its memory is capped at this many MiB (256 to 65536).
+sandbox_timeout_seconds = 300
+sandbox_memory_mib = 2048
 
 [workers]
 # How many jobs of each processing stage may run at once (1 to 16).
