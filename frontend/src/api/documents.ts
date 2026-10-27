@@ -92,29 +92,45 @@ export function formatDate(iso: string): string {
     : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+/** A document's original bytes, or why they could not be had. */
+export type OriginalResult =
+  { status: "ok"; blob: Blob } | { status: "error"; error: DocumentsError };
+
 /**
- * Save a document's original file. The download needs the access token, which only travels in
- * the `Authorization` header (ADR 0016), so a plain link cannot fetch it: the page fetches the
- * bytes and hands them to the browser as a file. Returns the error, or null when it was saved.
+ * Fetch a document's original file through the API client. The download needs the access token,
+ * which only travels in the `Authorization` header (ADR 0016), so neither a plain link nor a
+ * viewer given an address can fetch it: the page fetches the bytes itself, from an address that
+ * holds nothing but the document's id. Only the status code decides the error.
+ */
+export async function fetchOriginal(api: Api, documentId: string): Promise<OriginalResult> {
+  try {
+    const { data, response } = await api.GET("/api/documents/{document_id}/file", {
+      params: { path: { document_id: documentId } },
+      parseAs: "blob",
+    });
+    // A 500 here is the one the download route gives for a missing or doubled stored copy.
+    if (!response.ok) {
+      const error = response.status === 500 ? "unavailable" : errorFor(response.status);
+      return { status: "error", error };
+    }
+    if (data === undefined) return { status: "error", error: "unreachable" };
+    return { status: "ok", blob: data };
+  } catch {
+    return { status: "error", error: "unreachable" };
+  }
+}
+
+/**
+ * Save a document's original file: `fetchOriginal` gets the bytes, and the page hands them to the
+ * browser as a file. Returns the error, or null when it was saved.
  */
 export async function saveOriginal(
   api: Api,
   document: Pick<DocumentItem, "id" | "name" | "extension">,
 ): Promise<DocumentsError | null> {
-  let blob: Blob | undefined;
-  try {
-    const { data, response } = await api.GET("/api/documents/{document_id}/file", {
-      params: { path: { document_id: document.id } },
-      parseAs: "blob",
-    });
-    // A 500 here is the one the download route gives for a missing or doubled stored copy.
-    if (!response.ok) return response.status === 500 ? "unavailable" : errorFor(response.status);
-    blob = data;
-  } catch {
-    return "unreachable";
-  }
-  if (blob === undefined) return "unreachable";
-  const url = URL.createObjectURL(blob);
+  const original = await fetchOriginal(api, document.id);
+  if (original.status === "error") return original.error;
+  const url = URL.createObjectURL(original.blob);
   const link = window.document.createElement("a");
   link.href = url;
   link.download = fileName(document);
@@ -128,6 +144,20 @@ export async function saveOriginal(
   }, 60_000);
   return null;
 }
+
+/**
+ * Whether the details page shows a document in the PDF viewer: by the media type the import's
+ * validator gave it from the file's signature (`ingest/validate.py`), not by its name.
+ */
+export function isPdf(document: Pick<DocumentItem, "mime">): boolean {
+  return document.mime === "application/pdf";
+}
+
+/** What the PDF viewer says when the file's bytes could not be fetched. */
+export const VIEWER_ERROR_TEXT: Record<DocumentsError, string> = {
+  ...ERROR_TEXT,
+  unreachable: "The PDF could not be loaded. Check that the backend is running.",
+};
 
 /** Moving a document to the trash, or bringing it back. */
 export type MoveAction = "trash" | "restore";
