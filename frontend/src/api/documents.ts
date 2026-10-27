@@ -283,14 +283,13 @@ export type RetryResult =
   | { status: "unknown" };
 
 /**
- * The jobs a Retry queues again: of each step, the latest job, when it failed. The backend lists a
- * document's jobs by step and, within a step, oldest first by queue time with the id breaking a tie,
- * and retries by the same rule.
+ * The jobs a Retry queues again, as the backend marks them (`retryable`): a failed job that is its
+ * document's current work for its step, decided by the queue's own rule from the document as it is
+ * now. The order of the jobs alone cannot show it: a document that moved to other bytes and back
+ * makes its older job current again.
  */
 export function retryableJobs(document: DocumentDetail): DocumentDetail["jobs"] {
-  const latest = new Map<string, DocumentDetail["jobs"][number]>();
-  for (const job of document.jobs) latest.set(job.stage, job);
-  return [...latest.values()].filter((job) => job.status === "failed");
+  return document.jobs.filter((job) => job.retryable);
 }
 
 /**

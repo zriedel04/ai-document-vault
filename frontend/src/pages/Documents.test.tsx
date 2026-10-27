@@ -68,6 +68,7 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
         max_attempts: 3,
         last_error: "ExtractionTimeout",
         finished_at: "2026-10-01T12:05:00Z",
+        retryable: true,
       },
     ],
     ...overrides,
@@ -785,6 +786,7 @@ describe("retry failed steps", () => {
         max_attempts: 3,
         last_error: "ExtractionTimeout",
         finished_at: null,
+        retryable: false,
       },
     ],
   });
@@ -833,10 +835,10 @@ describe("retry failed steps", () => {
       detail({ state: "trashed", trashed_at: "2026-10-05T09:30:00Z" }),
     ],
     [
-      "a later job replaced the failed one",
+      "the backend says the failed job is not current work",
       detail({
         jobs: [
-          ...failed.jobs,
+          ...failed.jobs.map((job) => ({ ...job, retryable: false })),
           {
             stage: "extract",
             status: "done",
@@ -844,6 +846,7 @@ describe("retry failed steps", () => {
             max_attempts: 3,
             last_error: null,
             finished_at: "2026-10-02T12:00:00Z",
+            retryable: false,
           },
         ],
       }),
@@ -853,6 +856,27 @@ describe("retry failed steps", () => {
     await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
     expect(await screen.findByText("Processing", { selector: "h3" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: RETRY })).toBeNull();
+  });
+
+  it("is offered for a failed job the backend marks retryable, though a newer job follows it", async () => {
+    const movedBack = detail({
+      state: "searchable",
+      jobs: [
+        ...failed.jobs,
+        {
+          stage: "extract",
+          status: "done",
+          attempts: 1,
+          max_attempts: 3,
+          last_error: null,
+          finished_at: "2026-10-02T12:00:00Z",
+          retryable: false,
+        },
+      ],
+    });
+    const spy = retryingBackend(movedBack);
+    await renderApp({ route: `/documents/${ID}`, fetch: spy, token: TEST_TOKEN });
+    expect(await screen.findByRole("button", { name: RETRY })).toBeEnabled();
   });
 
   it.each([
