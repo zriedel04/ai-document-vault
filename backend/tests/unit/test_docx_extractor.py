@@ -27,6 +27,7 @@ from vault.ingest.extractors.docx import (
     VERSION,
     CompatibilityError,
     NotDocxError,
+    UnterminatedFieldError,
     extract,
 )
 from vault.ingest.validate import OLE_SIGNATURE, Limits, Reason, check_docx
@@ -1150,6 +1151,166 @@ def test_every_emitted_element_is_swept_in_a_fields_code() -> None:
 
     assert swept == extractor.EMITTED
     assert {"characters", "text box"} <= {name for name, _, _ in EMITTING_CASES}
+
+
+# Fields across paragraphs, cells and rows: a field is delimited in its story (the body, or one
+# text box), so its state carries over from one paragraph or cell to the next.
+
+NAMESPACES = f"{W} {MC} {MATH} {W14} {FUTURE}"
+
+
+def story_text(*blocks: str) -> str:
+    """The text of a body made of ``blocks``: each a paragraph's content, or a whole ``w:tbl``."""
+
+    def fill(document: DocumentObject) -> None:
+        for block in blocks:
+            if block.startswith("<w:tbl"):
+                add_xml(document, block.replace("<w:tbl", f"<w:tbl {NAMESPACES}", 1))
+            else:
+                add_xml(document, paragraph(block))
+
+    return text_of(build(fill))
+
+
+def table(*rows: list[str]) -> str:
+    """A table whose cells each hold one paragraph with the given content."""
+    return (
+        "<w:tbl>"
+        + "".join(
+            "<w:tr>" + "".join(f"<w:tc><w:p>{c}</w:p></w:tc>" for c in row) + "</w:tr>"
+            for row in rows
+        )
+        + "</w:tbl>"
+    )
+
+
+BEGIN = fld("begin") + code("IF")
+CLOSE = fld("separate") + run("result") + fld("end")
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [pytest.param(content, expected, id=name) for name, content, expected in EMITTING_CASES],
+)
+def test_nothing_in_a_fields_code_is_given_across_paragraphs_and_cells(
+    content: str, expected: str
+) -> None:
+    # Whole paragraphs in the code.
+    assert story_text(BEGIN, content, CLOSE) == "result"
+    assert story_text(BEGIN, content, content, CLOSE) == "result"
+    # A whole table in the code.
+    assert story_text(BEGIN, table([content, content], [content]), CLOSE) == "result"
+    # A code that ends in a later cell of the table, and one that starts in a cell.
+    assert story_text(BEGIN, table([content], [content, CLOSE])) == "\tresult"
+    assert story_text(table([run("a"), BEGIN], [content]), content, CLOSE) == f"a\t{PB}result"
+    # In a field nested in the code, with the outer field's markers in other paragraphs.
+    nested = f"{fld('begin')}{code('DATE')}{fld('separate')}{content}{fld('end')}"
+    assert story_text(BEGIN, nested, CLOSE) == "result"
+    # In the result, across paragraphs, it is read.
+    if expected:
+        assert story_text(BEGIN + fld("separate"), content, fld("end")) == expected
+
+
+PB = PARAGRAPH_BREAK
+
+
+def test_a_nested_fields_result_between_paragraphs_of_the_code_is_left_out() -> None:
+    # The finding's case: the outer begin, a nested field and the outer separate each in their own
+    # paragraph.
+    nested = f"{fld('begin')}{code('DATE')}{fld('separate')}{run(CANARY)}{fld('end')}"
+
+    assert story_text(BEGIN, nested, CLOSE + run(" after")) == "result after"
+
+
+def test_a_result_across_paragraphs_is_read_like_a_table_of_contents() -> None:
+    blocks = (
+        fld("begin") + code("TOC") + fld("separate") + run("one"),
+        run("two"),
+        run("three") + fld("end"),
+        run("after"),
+    )
+
+    assert story_text(*blocks).split(PB) == ["one", "two", "three", "after"]
+
+
+def test_a_heading_inside_a_fields_code_is_not_a_heading() -> None:
+    def fill(document: DocumentObject) -> None:
+        add_xml(document, paragraph(BEGIN))
+        add_xml(
+            document,
+            f'<w:p {W}><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>{run(CANARY)}</w:p>',
+        )
+        add_xml(document, paragraph(CLOSE))
+
+    page = extract(build(fill)).pages[0]
+
+    assert (page.text, page.headings) == ("result", ())
+
+
+def test_a_marker_in_a_deleted_row_does_not_count_across_the_table() -> None:
+    deleted = (
+        '<w:tr><w:trPr><w:del w:id="1" w:author="A"/></w:trPr>'
+        f"<w:tc><w:p>{fld('separate')}{run('gone')}</w:p></w:tc></w:tr>"
+    )
+    blocks = (
+        BEGIN,
+        f"<w:tbl>{deleted}<w:tr><w:tc><w:p>{run(CANARY)}</w:p></w:tc></w:tr></w:tbl>",
+        fld("end") + run("after"),
+    )
+
+    assert story_text(*blocks) == "after"
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        pytest.param((BEGIN, run(CANARY)), id="code open at the end of the body"),
+        pytest.param((run("a"), table([BEGIN])), id="code open from a table cell"),
+        pytest.param((fld("begin"),), id="a begin alone"),
+        pytest.param(
+            (BEGIN, fld("begin") + code("X") + fld("separate") + run(CANARY)),
+            id="outer code open around a nested result",
+        ),
+    ],
+)
+def test_a_story_that_ends_inside_a_fields_code_is_refused(blocks: tuple[str, ...]) -> None:
+    with pytest.raises(UnterminatedFieldError) as caught:
+        story_text(*blocks)
+    assert CANARY not in str(caught.value)
+
+
+def test_a_story_that_ends_inside_a_fields_result_keeps_the_result() -> None:
+    assert story_text(BEGIN + fld("separate") + run("open"), run("result")) == f"open{PB}result"
+
+
+def text_box_with(*paragraphs: str) -> str:
+    inner = "".join(f"<w:p>{p}</w:p>" for p in paragraphs)
+    return f"<w:r><w:pict><w:txbxContent>{inner}</w:txbxContent></w:pict></w:r>"
+
+
+def test_a_text_box_is_a_story_of_its_own() -> None:
+    # The box is anchored before the body's field begins, but read after its anchor paragraph,
+    # when the body's field is in its code: its own state keeps its text. Its own field, which
+    # spans its paragraphs, does not reach the body.
+    box = text_box_with(run("boxed"), BEGIN, run(CANARY), CLOSE)
+    blocks = (run("Anchor") + box + BEGIN, CLOSE + run(" body"), run("after"))
+
+    assert story_text(*blocks).split(PB) == ["Anchor", "boxed", "result", "result body", "after"]
+
+
+def test_a_text_box_that_ends_inside_a_fields_code_is_refused() -> None:
+    # The body closes a field afterwards, but the box is its own story.
+    with pytest.raises(UnterminatedFieldError):
+        story_text(run("Anchor") + text_box_with(BEGIN, run(CANARY)), CLOSE)
+
+
+def test_a_text_box_does_not_close_the_bodys_field() -> None:
+    # The box's separate and end have no begin in its story, so they close nothing in the body.
+    box = text_box_with(fld("separate") + run("in box") + fld("end"))
+
+    with pytest.raises(UnterminatedFieldError):
+        story_text(run("Anchor") + box + BEGIN, run(CANARY))
+    assert story_text(run("Anchor") + box).split(PB) == ["Anchor", "in box"]
 
 
 def test_every_excluded_element_is_decided_for_field_markers() -> None:

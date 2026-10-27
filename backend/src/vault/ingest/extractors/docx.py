@@ -51,7 +51,13 @@ What the text holds:
   line break, a non-breaking hyphen a hyphen, and a soft hyphen nothing.
 - Field results are kept and field codes are not (``w:instrText``, and everything between a
   complex field's ``begin`` and ``separate``, a field nested in the code and a text box anchored
-  there included: every element that gives content, ``EMITTED``, passes one gate). A field marker
+  there included: every element that gives content, ``EMITTED``, passes one gate). A field is
+  delimited in its story (the body, or one text box), not in its paragraph: its code and result
+  may run over paragraphs, table cells and rows, and whole paragraphs or tables in a code are left
+  out like text in one. A story that ends inside a field's code would hide everything after the
+  ``begin``, so it is refused (``UnterminatedFieldError``); a field left open in its result at the
+  end of a story is closed there, its result kept. Following LibreOffice's DOCX import, which keeps
+  one field stack per story and none per table. A field marker
   (``w:fldChar``) counts wherever the text around it is left out because it is not shown: in a
   hidden run, a ruby guide or an equation (``FIELDS_ONLY``). A hidden ``separate`` still ends the
   code, so the result after it is read, and a hidden ``begin`` still starts one, so a nested
@@ -88,9 +94,9 @@ rather than read as empty.
 DOCX has no reliable pages (Word lays them out when it renders), so the whole text is one page, as
 for text files. The section anchors in the text view come from the headings.
 
-Errors are ``NotDocxError``, ``ImportedContentError`` or ``CompatibilityError`` with fixed text
-naming a reason, never the file's name or content, and without the library's exception attached,
-because a library message can quote a part of the file.
+Errors are ``NotDocxError``, ``ImportedContentError``, ``CompatibilityError`` or
+``UnterminatedFieldError`` with fixed text naming a reason, never the file's name or content, and
+without the library's exception attached, because a library message can quote a part of the file.
 """
 
 from __future__ import annotations
@@ -235,6 +241,17 @@ class CompatibilityError(ExtractionError):
         super().__init__("The DOCX uses markup compatibility rules this extractor cannot apply.")
 
 
+class UnterminatedFieldError(ExtractionError):
+    """A story of the DOCX (the body or a text box) ends inside a complex field's code: a ``begin``
+    with no ``separate`` or ``end`` after it. Everything after the ``begin`` would be read as code
+    and left out, so the file is refused rather than reported as read without that text."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The DOCX has a field whose code never ends, which hides the text after it."
+        )
+
+
 class NotDocxError(ExtractionError):
     """The blob is not a DOCX this extractor can read. ``reason`` is the validator's reason when its
     DOCX rule refused the bytes, and None when python-docx could not read a part."""
@@ -276,7 +293,7 @@ def extract(data: bytes, limits: Limits = DEFAULT_LIMITS) -> Extraction:
     parts: list[str] = []
     headings: list[Heading] = []
     position = 0
-    for text, level in _segments(body, levels, top=True):
+    for text, level in _story(body, levels, top=True):
         if not text.strip():
             continue
         if parts:
@@ -334,21 +351,58 @@ def _heading_styles(styles: BaseOxmlElement) -> dict[str, int]:
     return levels
 
 
-def _segments(
+class _Story:
+    """The complex fields open in one story: the body, or one text box. A field is delimited in its
+    story, not in its paragraph or table cell, so its code may run over paragraphs, cells and rows,
+    and the state is kept from one to the next in document order. A text box is a story of its own
+    (its paragraphs are read after its anchor, not in its place)."""
+
+    def __init__(self) -> None:
+        self._fields: list[bool] = []  # one per open field: True while in its code
+
+    @property
+    def in_code(self) -> bool:
+        """Whether some open field is in its code, so content here is not shown."""
+        return any(self._fields)
+
+    def field(self, kind: str | None) -> None:
+        if kind == "begin":
+            self._fields.append(True)
+        elif kind == "separate" and self._fields:
+            self._fields[-1] = False
+        elif kind == "end" and self._fields:
+            self._fields.pop()
+
+
+def _story(
     container: BaseOxmlElement, levels: dict[str, int], *, top: bool
 ) -> Iterator[tuple[str, int | None]]:
-    """Each paragraph and table under ``container`` as (text, heading level or None), in order.
-    Headings are recognised only at the top of the body (``top``)."""
+    """The segments of one story (``_segments``). A story that ends inside a field's code (a
+    ``begin`` never followed by its ``separate`` or ``end``) is refused: its text after that point
+    cannot be told from the code, and reading it as code would drop it unseen. A field left open
+    in its result at the end is closed there, and its result is kept."""
+    story = _Story()
+    yield from _segments(container, levels, top=top, story=story)
+    if story.in_code:
+        raise UnterminatedFieldError
+
+
+def _segments(
+    container: BaseOxmlElement, levels: dict[str, int], *, top: bool, story: _Story
+) -> Iterator[tuple[str, int | None]]:
+    """Each paragraph and table under ``container`` as (text, heading level or None), in order,
+    with the field state of ``story``. Headings are recognised only at the top of the body
+    (``top``). The text boxes a paragraph anchors follow it, each read as a story of its own."""
     for block in _blocks(container, (_P, _TBL)):
         if block.tag == _TBL:
-            yield _table_text(block, levels), None
+            yield _table_text(block, levels, story), None
             continue
-        inline = _Inline()
+        inline = _Inline(story)
         inline.walk(block)
         text = _LINE_BREAK.sub("\n", "".join(inline.parts))
         yield text, _heading_level(block, levels) if top else None
         for box in inline.boxes:
-            yield from _segments(box, levels, top=False)
+            yield from _story(box, levels, top=False)
 
 
 def _blocks(container: BaseOxmlElement, wanted: tuple[str, ...]) -> Iterator[BaseOxmlElement]:
@@ -488,7 +542,7 @@ def _understood(choice: BaseOxmlElement) -> bool:
     return set(namespaces) <= UNDERSTOOD
 
 
-def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
+def _table_text(table: BaseOxmlElement, levels: dict[str, int], story: _Story) -> str:
     rows: list[str] = []
     for row in _blocks(table, (_TR,)):
         properties = row.find(_TRPR)
@@ -496,7 +550,10 @@ def _table_text(table: BaseOxmlElement, levels: dict[str, int]) -> str:
             continue
         cells = [
             _CELL_SPACE.sub(
-                " ", " ".join(t for t, _ in _segments(cell, levels, top=False) if t.strip())
+                " ",
+                " ".join(
+                    t for t, _ in _segments(cell, levels, top=False, story=story) if t.strip()
+                ),
             ).strip()
             for cell in _blocks(row, (_TC,))
             if not _cell_deleted(cell)
@@ -519,8 +576,9 @@ class _Inline:
 
     A complex field's code runs from ``begin`` to ``separate`` and its result, the part shown, from
     ``separate`` to ``end``; text is kept only outside every open field's code, so a field nested in
-    another field's code is left out too. The field state is kept per paragraph. Recursion is
-    bounded: libxml2 refuses a document nested deeper than 256 elements.
+    another field's code is left out too. The field state is the story's (``_Story``), so it
+    carries over from the paragraphs and cells before. Recursion is bounded: libxml2 refuses a
+    document nested deeper than 256 elements.
 
     ``shown`` is False inside content that is in the document but not shown (a hidden run, an
     element of ``FIELDS_ONLY``): no text or text box is taken from it, but its field markers still
@@ -530,10 +588,10 @@ class _Inline:
     outside every field's code), so a text box in a field's code is left out like its text.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, story: _Story) -> None:
         self.parts: list[str] = []
         self.boxes: list[BaseOxmlElement] = []
-        self._fields: list[bool] = []  # one per open field: True while in its code
+        self._story = story
 
     def walk(self, element: BaseOxmlElement, *, shown: bool = True) -> None:
         for child in element.iterchildren():
@@ -543,27 +601,19 @@ class _Inline:
                     self.walk(child, shown=False)
                 continue
             if tag == _FLD_CHAR:
-                self._field(child.get(_FLD_CHAR_TYPE))
+                self._story.field(child.get(_FLD_CHAR_TYPE))
             elif tag == _ALT_CHUNK:  # block content, but refused wherever it is met
                 raise ImportedContentError
             elif tag in EMITTED:
                 # The one place content leaves the walker: text, a character, or a text box, and
                 # only when it is shown and outside every open field's code.
-                if shown and not any(self._fields):
+                if shown and not self._story.in_code:
                     if tag == _TXBX_CONTENT:
                         self.boxes.append(child)
                     else:
                         self.parts.append(child.text or "" if tag == _T else CHARACTERS[tag])
             else:
                 self.walk(child, shown=shown and not (tag == _R and _hidden(child)))
-
-    def _field(self, kind: str | None) -> None:
-        if kind == "begin":
-            self._fields.append(True)
-        elif kind == "separate" and self._fields:
-            self._fields[-1] = False
-        elif kind == "end" and self._fields:
-            self._fields.pop()
 
 
 def _hidden(run: BaseOxmlElement) -> bool:
