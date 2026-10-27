@@ -352,7 +352,7 @@ def _round_trips(cls: type) -> bool:
     ``__setattr__`` (other than a frozen dataclass's own), ``__getattribute__`` or ``__getattr__``
     of the class's own, a metaclass, and a field whose class attribute is a descriptor (it would
     run on every read and write). A ``ClassVar`` is no field, so it is neither written nor read,
-    and ``kw_only`` fields are passed by name: both are accepted.
+    and ``kw_only`` fields are passed by name wherever ``__init__`` puts them: both are accepted.
     """
     fields = dataclasses.fields(cls)
     if type(cls) is not type or any(not item.init for item in fields):
@@ -365,9 +365,12 @@ def _round_trips(cls: type) -> bool:
     except (TypeError, ValueError):
         return False
     kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    if [parameter.name for parameter in parameters] != [item.name for item in fields] or any(
-        parameter.kind not in kinds for parameter in parameters
-    ):
+    # By name, not by position: dataclasses moves keyword-only fields after the others in
+    # __init__, and the converter passes every field by keyword. Sorted lists, not sets, so a
+    # name missing, extra or repeated on either side still differs.
+    if sorted(parameter.name for parameter in parameters) != sorted(
+        item.name for item in fields
+    ) or any(parameter.kind not in kinds for parameter in parameters):
         return False
     if getattr(cls, "__post_init__", None) is not None or getattr(cls, "__getattr__", None):
         return False

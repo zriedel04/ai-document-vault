@@ -8,7 +8,9 @@ memory limit, ``TerminateJobObject`` and kill-on-close. The limits are small so 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import importlib
+import inspect
 import io
 import json
 import logging
@@ -22,7 +24,7 @@ import time
 import tracemalloc
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import InitVar, dataclass, field
+from dataclasses import KW_ONLY, InitVar, dataclass, field
 from enum import IntFlag
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Optional, Union
@@ -716,6 +718,49 @@ class KeywordOnly:
     b: str = "x"
 
 
+# Keyword-only fields declared before positional ones: __init__ takes them last, so the order of
+# its parameters differs from the order of the fields.
+@dataclass
+class KeywordFirst:
+    a: int = field(kw_only=True)
+    b: str
+
+
+@dataclass
+class KeywordSentinel:
+    a: int
+    _: KW_ONLY
+    b: str
+    c: int = 0
+
+
+@dataclass(kw_only=True)
+class KeywordBase:
+    a: int
+    b: str = "x"
+
+
+@dataclass
+class PositionalChild(KeywordBase):
+    c: int
+    d: str = "y"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenKeywordFirst:
+    a: tuple[int, ...] = field(kw_only=True)
+    b: bytes
+
+
+# Mixed orders that must still be refused: a field the __init__ does not take, or a parameter
+# that is no field.
+@dataclass
+class KeywordFirstWithInitVar:
+    a: int = field(kw_only=True)
+    b: str
+    c: InitVar[int] = 0
+
+
 class Flag(IntFlag):
     A = 1
 
@@ -767,6 +812,11 @@ ROUND_TRIPS: list[tuple[object, object]] = [
     (WithClassVar(a=1), WithClassVar),
     (Derived(a=1, b="b"), Derived),
     (KeywordOnly(a=1), KeywordOnly),
+    (KeywordFirst(a=1, b="b"), KeywordFirst),
+    (KeywordSentinel(1, b="b", c=2), KeywordSentinel),
+    (PositionalChild(c=3, a=1), PositionalChild),
+    (FrozenKeywordFirst(b"x", a=(1, 2)), FrozenKeywordFirst),
+    ([KeywordFirst(a=1, b="b")], list[KeywordFirst]),
     (sandbox_probes.every_kind(b"one\ntwo, three"), ProbeKinds),
     (sandbox_probes.every_kind(b""), ProbeKinds),
 ]
@@ -777,6 +827,15 @@ def test_every_declared_field_kind_round_trips(value: object, result_type: objec
     built = round_trip(value, result_type)
     assert built == value
     assert type(built) is type(value)
+
+
+def test_a_class_whose_init_order_differs_from_its_fields_is_accepted() -> None:
+    """The case the review named: __init__ lists ``b`` before ``a``, the fields ``a`` first."""
+    parameters = list(inspect.signature(KeywordFirst.__init__).parameters)[1:]
+    assert parameters == ["b", "a"]
+    assert [item.name for item in dataclasses.fields(KeywordFirst)] == ["a", "b"]
+    assert sandbox._round_trips(KeywordFirst)
+    assert EntryPoint(f"{PROBES}:echo", KeywordFirst).result_type is KeywordFirst
 
 
 def test_bytes_and_tuples_come_back_as_declared() -> None:
@@ -862,6 +921,7 @@ def test_a_recursive_value_is_refused_by_the_child() -> None:
         Callable[[], int],
         WithInitVar,
         WithDefaultInitVar,
+        KeywordFirstWithInitVar,
         OwnInit,
         InheritedInit,
         Checked,  # a __post_init__ that only checks is refused too: it cannot be told apart
