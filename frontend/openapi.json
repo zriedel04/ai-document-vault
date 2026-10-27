@@ -394,6 +394,10 @@
             "title": "Max Attempts",
             "type": "integer"
           },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
           "stage": {
             "enum": [
               "extract",
@@ -423,7 +427,8 @@
           "attempts",
           "max_attempts",
           "last_error",
-          "finished_at"
+          "finished_at",
+          "retryable"
         ],
         "title": "Job",
         "type": "object"

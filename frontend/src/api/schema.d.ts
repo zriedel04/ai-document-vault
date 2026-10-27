@@ -481,6 +481,8 @@ export interface components {
             last_error: string | null;
             /** Max Attempts */
             max_attempts: number;
+            /** Retryable */
+            retryable: boolean;
             /**
              * Stage
              * @enum {string}
