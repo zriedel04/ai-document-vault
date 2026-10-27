@@ -46,6 +46,7 @@ from vault.db.schema import (
     jobs,
     pages,
 )
+from vault.jobs.queue import retryable
 
 MAX_PAGE: Final = 100
 DEFAULT_PAGE: Final = 50
@@ -211,6 +212,9 @@ class JobDetail:
     max_attempts: int
     last_error: str | None  # the exception's class name, never its message (vault.jobs.queue)
     finished_at: datetime | None
+    # Retry would queue it again: the queue's own rule (vault.jobs.queue.retryable), so the page
+    # offers exactly what the button does.
+    retryable: bool
 
 
 @dataclass(frozen=True)
@@ -262,7 +266,11 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
             .where(import_sources.c.document_id == document_id)
             .order_by(import_sources.c.imported_at, import_sources.c.id)
         ).all()
-        job_rows = connection.execute(select(jobs).where(jobs.c.document_id == document_id)).all()
+        job_rows = connection.execute(
+            select(jobs, retryable(jobs).label("retryable")).where(
+                jobs.c.document_id == document_id
+            )
+        ).all()
 
     source_details = tuple(_source(source) for source in sources)
     summary = DocumentSummary(
@@ -285,10 +293,11 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
             max_attempts=job.max_attempts,
             last_error=job.last_error,
             finished_at=None if job.finished_at is None else _utc(job.finished_at),
+            retryable=bool(job.retryable),
         )
-        # Within a stage by the time it was queued, the id breaking a tie: the rule by which
-        # vault.jobs.queue.JobQueue.retry_document finds a stage's latest job. ULIDs made in the
-        # same millisecond sort at random, so the id alone could put an older job last.
+        # Within a stage by the time it was queued, the id breaking a tie (ULIDs made in the
+        # same millisecond sort at random, so the id alone could put an older job last). Which
+        # job Retry runs is not read from this order but from ``retryable``.
         for job in sorted(
             job_rows, key=lambda job: (stage_order[job.stage], job.created_at, job.id)
         )
