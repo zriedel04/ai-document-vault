@@ -1,6 +1,7 @@
 """Extractors turn a stored blob into pages of plain text with their structure (plan, section 7).
 
-Each format has a module of its own (``text`` for TXT and Markdown so far; PDF and DOCX follow).
+Each format has a module of its own (``text`` for TXT and Markdown, ``docx`` for DOCX; PDF
+follows).
 What an extractor returns is derived data: it can be rebuilt from the blob at any time, so the
 result records the extractor's version, and a new version re-queues extraction (hash chain).
 
