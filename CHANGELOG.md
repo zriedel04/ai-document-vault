@@ -54,3 +54,7 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 - The root `README.md` is rewritten for readers new to the project: the honest status (Phase 0 nearly done, Phase 1 in progress, and what is not built), the architecture with a link to each ADR, the privacy and safety design, how Claude Code, OpenAI Codex and the owner divide the work, the measured sqlite-vec spike figures, quick start, layout and checks.
 - `@types/node` is pinned to the oldest Node.js release the frontend supports (22.13, was 22.20), and Dependabot no longer proposes its major or minor updates; a test in `scripts/tests/test_node_types.py` checks that `engines.node`, CI and the types agree.
 - Dependabot no longer proposes a TypeScript major version (TypeScript 7 does not install next to `openapi-typescript` and `typescript-eslint`, so the npm group failed to resolve) or a `uv-build` bump (the build backend is pinned to the tested minor series and is bumped by hand).
+
+### Security
+
+- Dependencies with new advisories that made the CI audits fail: Pillow 13.0.0 in the demo generator, opentelemetry-api 1.45.1 in the backend, and Vite 8.3.5, Zod 4.6.7 and undici 7.30.1 in the frontend (all three are development dependencies: Vite builds the app, Zod comes with the React hooks lint rules and undici with jsdom). No shipped code changes.
