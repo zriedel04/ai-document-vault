@@ -120,6 +120,8 @@ class Job(BaseModel):
     max_attempts: int
     last_error: str | None
     finished_at: datetime | None
+    # True when Retry would queue this job again (the queue's rule, vault.jobs.queue.retryable).
+    retryable: bool
 
 
 class DocumentDetail(DocumentItem):
