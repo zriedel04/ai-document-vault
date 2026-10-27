@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from vault.core.config import Settings
 from vault.db import ids
+from vault.db.documents import get_document
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
 from vault.db.schema import JOB_STAGES, blobs, document_versions, documents, jobs
@@ -24,9 +25,11 @@ from vault.jobs.queue import (
     UNNAMED_ERROR,
     JobLostError,
     JobQueue,
+    Recovery,
     RetryRefusal,
     backoff,
     error_name,
+    retryable,
 )
 from vault.main import create_app
 
@@ -518,10 +521,18 @@ def test_retry_document_leaves_a_failed_job_a_later_job_replaced(
     queue.complete(done, WORKER)
     assert queue.retry_document(document_id) == 0
     assert status_of(engine, old) == "failed"
-    # Of two failed jobs of one stage only the later one runs again.
+    # A failed job for bytes the document does not hold is history even when it is the newest.
     newest = fail_later(queue, clock, document_id, input_hash=OTHER_HASH)
+    assert queue.retry_document(document_id) == 0
+    # Of two failed jobs of the work the document needs now, only the later one runs again.
+    first, second = (fail_later(queue, clock, document_id) for _ in range(2))
     assert queue.retry_document(document_id) == 1
-    assert (status_of(engine, old), status_of(engine, newest)) == ("failed", "queued")
+    assert [status_of(engine, job) for job in (old, newest, first, second)] == [
+        "failed",
+        "failed",
+        "failed",
+        "queued",
+    ]
 
 
 def test_retry_document_breaks_a_tie_in_time_by_id(engine: Engine, queue: JobQueue) -> None:
@@ -739,3 +750,237 @@ def test_the_database_refuses_a_worker_id_that_is_not_a_ulid(
             ),
             {"id": job_id},
         )
+
+
+def document_state(engine: Engine, document_id: str) -> tuple[str, str | None]:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(documents.c.state, documents.c.state_before_trash).where(
+                documents.c.id == document_id
+            )
+        ).one()
+    return row.state, row.state_before_trash
+
+
+def trash(engine: Engine, document_id: str) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            update(documents)
+            .where(documents.c.id == document_id)
+            .values(state="trashed", state_before_trash=documents.c.state, trashed_at=START)
+        )
+
+
+@pytest.mark.parametrize("before", ["processing", "searchable", "ready", "failed"])
+def test_a_job_that_uses_up_its_attempts_fails_its_document(
+    engine: Engine, queue: JobQueue, before: str
+) -> None:
+    document_id = add_document(engine)
+    other = add_document(engine)
+    with engine.begin() as connection:
+        connection.execute(update(documents).values(state=before))
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=2)
+    queue.claim(WORKER, ["chunk"])
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "queued"
+    assert document_state(engine, document_id) == (before, None)  # attempts are left
+    with engine.begin() as connection:
+        connection.execute(update(jobs).values(run_after=START))
+    queue.claim(WORKER, ["chunk"])
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "failed"
+    assert document_state(engine, document_id) == ("failed", None)
+    assert document_state(engine, other) == (before, None)
+
+
+def test_a_document_in_the_trash_keeps_failed_for_its_restore(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    queue.claim(WORKER, ["chunk"])
+    trash(engine, document_id)
+    assert queue.fail(job_id, WORKER, RuntimeError()) == "failed"
+    assert document_state(engine, document_id) == ("trashed", "failed")
+
+
+def test_recovery_that_fails_a_job_fails_its_document(engine: Engine, queue: JobQueue) -> None:
+    last_try, retried, trashed = (add_document(engine) for _ in range(3))
+    queue.enqueue(last_try, "extract", HASH, max_attempts=1)
+    queue.enqueue(retried, "extract", HASH)
+    queue.enqueue(trashed, "extract", HASH, max_attempts=1)
+    for _ in range(3):
+        assert queue.claim(WORKER, ["extract"]) is not None
+    trash(engine, trashed)
+    assert queue.recover().failed == 2
+    assert document_state(engine, last_try) == ("failed", None)
+    assert document_state(engine, retried) == ("processing", None)
+    assert document_state(engine, trashed) == ("trashed", "failed")
+
+
+def test_a_job_completed_in_the_callers_transaction_commits_and_rolls_back_with_it(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    job = queue.claim(WORKER, ["chunk"])
+    assert job is not None
+    assert job.worker_id == WORKER
+    searchable = update(documents).where(documents.c.id == document_id).values(state="searchable")
+
+    def store_then_crash() -> None:
+        with engine.begin() as connection:
+            connection.execute(searchable)
+            queue.complete(job.id, job.worker_id, connection=connection)
+            raise RuntimeError
+
+    with pytest.raises(RuntimeError):
+        store_then_crash()
+    assert status_of(engine, job_id) == "running"  # the result and the job's end, both undone
+    assert document_state(engine, document_id) == ("processing", None)
+    with engine.begin() as connection:
+        connection.execute(searchable)
+        queue.complete(job.id, job.worker_id, connection=connection)
+    # A crash now finds nothing running: the last attempt cannot fail what it stored.
+    assert queue.recover() == Recovery(requeued=0, failed=0)
+    assert status_of(engine, job_id) == "done"
+    assert document_state(engine, document_id) == ("searchable", None)
+
+
+def test_a_worker_that_lost_its_job_stores_nothing_in_the_completing_transaction(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH)
+    job = queue.claim(WORKER, ["chunk"])
+    assert job is not None
+    queue.recover()  # taken back while the worker ran it
+
+    def store() -> None:
+        with engine.begin() as connection:
+            connection.execute(
+                update(documents).where(documents.c.id == document_id).values(state="searchable")
+            )
+            queue.complete(job.id, job.worker_id, connection=connection)
+
+    with pytest.raises(JobLostError):
+        store()
+    assert document_state(engine, document_id) == ("processing", None)
+    assert status_of(engine, job_id) == "queued"
+
+
+def move_to(engine: Engine, document_id: str, sha256: str) -> None:
+    """Point the document's current version at other bytes (a blob row for them is added once)."""
+    with engine.begin() as connection:
+        if (
+            connection.execute(select(blobs.c.sha256).where(blobs.c.sha256 == sha256)).first()
+            is None
+        ):
+            connection.execute(
+                insert(blobs).values(
+                    sha256=sha256, size=1, ext="txt", mime="text/plain", created_at=START
+                )
+            )
+        version_id: str = connection.execute(
+            select(documents.c.current_version_id).where(documents.c.id == document_id)
+        ).scalar_one()
+        connection.execute(
+            update(document_versions)
+            .where(document_versions.c.id == version_id)
+            .values(blob_sha256=sha256)
+        )
+
+
+def retryable_ids(engine: Engine, document_id: str) -> set[str]:
+    with engine.connect() as connection:
+        return set(
+            connection.execute(
+                select(jobs.c.id).where(jobs.c.document_id == document_id, retryable(jobs))
+            ).scalars()
+        )
+
+
+@pytest.mark.parametrize("ending", ["fail", "recover"])
+def test_a_job_for_an_input_the_document_no_longer_needs_fails_without_its_document(
+    engine: Engine, queue: JobQueue, clock: Clock, ending: str
+) -> None:
+    moved, other_stage, same_bytes = (add_document(engine) for _ in range(3))
+    for document_id in (moved, other_stage, same_bytes):
+        set_document_state(engine, document_id, "searchable")
+    old = queue.enqueue(moved, "chunk", HASH, max_attempts=1)
+    kept = queue.enqueue(other_stage, "chunk", HASH, max_attempts=1)
+    newer_ignored = queue.enqueue(same_bytes, "chunk", HASH, max_attempts=1)
+    for _ in range(3):
+        assert queue.claim(WORKER, ["chunk"]) is not None
+    clock.advance(timedelta(seconds=1))
+    move_to(engine, moved, OTHER_HASH)  # a new version: its job decides now
+    queue.enqueue(moved, "chunk", OTHER_HASH)
+    queue.enqueue(other_stage, "extract", OTHER_HASH)  # another stage replaces nothing
+    # A later job of the stage for bytes the document does not hold replaces nothing either.
+    queue.enqueue(same_bytes, "chunk", OTHER_HASH)
+    if ending == "fail":
+        for job_id in (old, kept, newer_ignored):
+            assert queue.fail(job_id, WORKER, RuntimeError()) == "failed"
+    else:
+        assert queue.recover().failed == 3
+    assert status_of(engine, old) == "failed"
+    assert document_state(engine, moved) == ("searchable", None)
+    assert document_state(engine, other_stage) == ("failed", None)
+    assert document_state(engine, same_bytes) == ("failed", None)
+
+
+@pytest.mark.parametrize("ending", ["fail", "recover"])
+def test_a_document_that_moved_away_and_back_fails_with_its_current_work_and_can_retry_it(
+    engine: Engine, queue: JobQueue, clock: Clock, ending: str
+) -> None:
+    # Job A runs; the document moves to bytes B (job B is queued), then back to A, whose enqueue
+    # returns the open job A. A uses up its attempts and B ends as stale. A is the current work,
+    # though B was queued later: the document is failed and Retry runs A.
+    document_id = add_document(engine)
+    set_document_state(engine, document_id, "searchable")
+    job_a = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    assert queue.claim(WORKER, ["chunk"]) is not None
+    clock.advance(timedelta(seconds=1))
+    move_to(engine, document_id, OTHER_HASH)
+    job_b = queue.enqueue(document_id, "chunk", OTHER_HASH)
+    move_to(engine, document_id, HASH)
+    assert queue.enqueue(document_id, "chunk", HASH) == job_a
+    if ending == "fail":
+        assert queue.fail(job_a, WORKER, RuntimeError()) == "failed"
+    else:
+        assert queue.recover().failed == 1
+    assert queue.claim(OTHER_WORKER, ["chunk"]) is not None
+    queue.complete(job_b, OTHER_WORKER)  # stale: the document no longer holds B
+    assert document_state(engine, document_id) == ("failed", None)
+    assert retryable_ids(engine, document_id) == {job_a}
+    # The document page offers what the button does.
+    detail = get_document(engine, document_id)
+    assert detail is not None
+    assert [(job.status, job.retryable) for job in detail.jobs] == [
+        ("failed", True),
+        ("done", False),
+    ]
+    assert queue.retry_document(document_id) == 1
+    assert status_of(engine, job_a) == "queued"
+    assert document_state(engine, document_id) == ("processing", None)
+
+
+def test_a_failed_attempt_recorded_in_the_callers_transaction_commits_and_rolls_back_with_it(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "chunk", HASH, max_attempts=1)
+    job = queue.claim(WORKER, ["chunk"])
+    assert job is not None
+
+    def decide_then_crash() -> None:
+        with engine.begin() as connection:
+            queue.fail(job.id, job.worker_id, RuntimeError(), connection=connection)
+            raise ConnectionAbortedError
+
+    with pytest.raises(ConnectionAbortedError):
+        decide_then_crash()
+    assert status_of(engine, job_id) == "running"
+    assert document_state(engine, document_id) == ("processing", None)
+    with engine.begin() as connection:
+        assert queue.fail(job.id, job.worker_id, RuntimeError(), connection=connection) == "failed"
+    assert status_of(engine, job_id) == "failed"
+    assert document_state(engine, document_id) == ("failed", None)
