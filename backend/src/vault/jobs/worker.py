@@ -5,7 +5,11 @@ embedding 1, AI enrichment 2 by default; ``[workers]`` in ``config.toml``), so a
 run more jobs at once than its limit, whatever the others do. A thread claims one job of its own
 stage from the queue, runs the stage's handler, and reports the outcome:
 
-- the handler returns: the job is ``complete``;
+- the handler returns: the job is ``complete``, unless the handler returned a ``Completion``:
+  it marked the job done (``RECORDED``) or recorded its failed attempt (``ATTEMPT_QUEUED``,
+  ``ATTEMPT_FAILED``) itself, in the transaction that decided it, so that nothing can come
+  between the decision and the job's end (a handler that writes to ``vault.db`` or decides from
+  it must do this; see ``vault.jobs.queue.Completion``);
 - the handler raises: the attempt is recorded with ``fail``, which stores only the exception's
   class name and queues the job again after a back-off, or fails it after its last attempt. Every
   exception is caught, ``BaseException`` too: an exception that left the thread would end it (the
@@ -45,11 +49,12 @@ from typing import Final
 from vault.core.logging import log_event, metric
 from vault.db import ids
 from vault.db.schema import JOB_STAGES
-from vault.jobs.queue import Job, JobLostError, JobQueue
+from vault.jobs.queue import Completion, Job, JobLostError, JobQueue
 
 logger = logging.getLogger(__name__)
 
-type Handler = Callable[[Job], None]
+# Returns a Completion when it ended the attempt in its own transaction, else None.
+type Handler = Callable[[Job], Completion | None]
 
 # The plan's limits (section 7): extraction 2, OCR 1, embedding 1, AI 2; the rest one at a time.
 DEFAULT_LIMITS: Final[Mapping[str, int]] = {
@@ -239,9 +244,15 @@ class WorkerPool:
 
     def _work(self, handler: Handler, job: Job, worker_id: str) -> Outcome:
         try:
-            handler(job)
+            completion = handler(job)
         except BaseException as error:  # every exception: see the module docstring
             return self._report_failure(job, worker_id, error)
+        if completion is Completion.RECORDED:
+            return Outcome.DONE
+        if completion is Completion.ATTEMPT_QUEUED:
+            return Outcome.RETRY
+        if completion is Completion.ATTEMPT_FAILED:
+            return Outcome.FAILED
         try:
             self._queue.complete(job.id, worker_id)
         except JobLostError:

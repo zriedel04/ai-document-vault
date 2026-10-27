@@ -17,6 +17,7 @@ from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
+from vault.ingest import chunk_stage
 from vault.ingest.importer import Importer
 from vault.ingest.orphans import sweep_orphans
 from vault.jobs.queue import JobQueue
@@ -66,7 +67,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         upgrade_to_latest(paths.db)
         engine = create_vault_engine(paths.db)
         # Before any worker runs: jobs a killed process left running are queued again.
-        recovery = JobQueue(engine).recover()
+        queue = JobQueue(engine)
+        recovery = queue.recover()
         log_event(
             logger,
             "jobs.recovered",
@@ -83,8 +85,12 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             strays=metric(orphans.strays),
         )
         importer = Importer(engine, blobs)
-        # No stage has a handler yet (extraction arrives next), so the pool starts no threads.
-        workers = WorkerPool(JobQueue(engine), handlers={}, limits=settings.workers.limits())
+        # Only the chunk stage has a handler so far; jobs of the others wait in the queue.
+        workers = WorkerPool(
+            queue,
+            handlers={chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine, queue)},
+            limits=settings.workers.limits(),
+        )
     else:
         token = new_token()
 
