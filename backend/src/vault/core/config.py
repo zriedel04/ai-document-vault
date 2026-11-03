@@ -73,6 +73,19 @@ class ProcessingSettings(_Section):
     # order mark (vault.ingest.extractors.text). Windows-1252 suits English and Western European
     # notes; Windows-1251 Cyrillic ones, cp932 Japanese, and so on.
     text_fallback_encoding: str = FALLBACK_ENCODING
+    # Heavy parsing runs in a child process (vault.jobs.sandbox) that is killed after this many
+    # seconds, and whose memory is capped at this many MiB (committed memory on Windows, address
+    # space on Linux).
+    sandbox_timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    sandbox_memory_mib: int = Field(default=2048, ge=256, le=65536)
+
+    @field_validator("sandbox_timeout_seconds", "sandbox_memory_mib", mode="before")
+    @classmethod
+    def _not_a_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            msg = "a sandbox limit must be a number"
+            raise ValueError(msg)
+        return value
 
     @field_validator("text_fallback_encoding")
     @classmethod
