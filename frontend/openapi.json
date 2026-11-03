@@ -30,6 +30,13 @@
             "title": "Jobs",
             "type": "array"
           },
+          "labels": {
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
           "local_only": {
             "title": "Local Only",
             "type": "boolean"
@@ -71,6 +78,16 @@
             ],
             "title": "State",
             "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Title"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "trashed_at": {
             "anyOf": [
@@ -118,7 +135,9 @@
           "version_no",
           "version_origin",
           "import_sources",
-          "jobs"
+          "jobs",
+          "labels",
+          "title"
         ],
         "title": "DocumentDetail",
         "type": "object"
@@ -431,6 +450,69 @@
           "retryable"
         ],
         "title": "Job",
+        "type": "object"
+      },
+      "Label": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "collection",
+              "category",
+              "course",
+              "project",
+              "tag",
+              "topic",
+              "person",
+              "org",
+              "folder"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Path",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "user",
+              "ai",
+              "import_path",
+              "rule"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "suggested",
+              "accepted",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "path",
+          "source",
+          "status"
+        ],
+        "title": "Label",
         "type": "object"
       },
       "Me": {
@@ -851,6 +933,25 @@
         "title": "StageJobs",
         "type": "object"
       },
+      "Title": {
+        "properties": {
+          "source": {
+            "const": "filename",
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "source"
+        ],
+        "title": "Title",
+        "type": "object"
+      },
       "UploadResult": {
         "properties": {
           "batch_id": {
@@ -1065,7 +1166,7 @@
         ]
       },
       "get": {
-        "description": "One document, in use or in the trash: what the list shows, plus its hash, current version,\nevery import (oldest first; the first names the document) and its processing jobs (in the\norder of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message\ndoes not repeat it.",
+        "description": "One document, in use or in the trash: what the list shows, plus its hash, current version,\nevery import (oldest first; the first names the document), its processing jobs (in the\norder of the pipeline), its labels (each import's folders, by kind and path) and its title\nwith where it came from. An unknown id, or one that is not an id at all, is a 404 whose message\ndoes not repeat it.",
         "operationId": "read_document_api_documents__document_id__get",
         "parameters": [
           {
