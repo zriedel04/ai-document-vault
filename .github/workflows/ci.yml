@@ -394,6 +394,35 @@ jobs:
           finally {
             & powershell -NoProfile -File .\vault.ps1 stop
           }
+      - name: Restore the backup into new vault folders, in both PowerShell editions
+        shell: pwsh
+        run: |
+          # The backup folder of the step above (a space, an accented letter, given here with a
+          # trailing backslash, so its latest snapshot is restored), into a new folder named the
+          # same way. Neither folder may be printed. The restored vault must pass the integrity
+          # check, and a second restore into it must be refused.
+          $backups = Join-Path $env:RUNNER_TEMP ('Backups Jos' + [char]0x00E9)
+          foreach ($edition in 'powershell', 'pwsh') {
+            Write-Host "== $edition"
+            $name = 'Restored Jos' + [char]0x00E9 + " $edition"
+            $restored = Join-Path $env:RUNNER_TEMP $name
+            $text = & $edition -NoProfile -File .\vault.ps1 restore -From ($backups + '\') -To ($restored + '\') 2>&1 | Out-String
+            Write-Host $text
+            if ($LASTEXITCODE -ne 0) { throw "restore failed in $edition" }
+            if ($text -notmatch 'Snapshot \d{4}-\d{2}-\d{2}T\d{6}Z restored') { throw "restore in $edition did not report its snapshot" }
+            if ($text.Contains($name) -or $text.Contains('Backups Jos') -or $text.Contains('Restored Jos')) { throw "restore in $edition printed a folder" }
+            if (-not (Test-Path -LiteralPath (Join-Path $restored 'vault.db') -PathType Leaf)) { throw "the restored vault has no vault.db in $edition" }
+            $env:AIVAULT_VAULT__PATH = $restored
+            try {
+              $check = & $edition -NoProfile -File .\vault.ps1 check 2>&1 | Out-String
+              if ($LASTEXITCODE -ne 0) { throw "check failed on the restored vault in ${edition}: $check" }
+            }
+            finally {
+              Remove-Item Env:AIVAULT_VAULT__PATH
+            }
+            $again = & $edition -NoProfile -File .\vault.ps1 restore -From $backups -To $restored 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -or $again -notmatch 'already holds files') { throw "a restore over the restored vault was not refused in ${edition}: $again" }
+          }
       - name: run refuses a port that something else holds
         shell: pwsh
         run: |
