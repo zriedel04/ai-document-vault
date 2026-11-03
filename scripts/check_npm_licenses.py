@@ -48,6 +48,11 @@ REVIEWED: dict[str, tuple[str, str]] = {
         "Blue Oak Model License is a permissive licence in the same family as ISC. "
         "Development-only (ESLint and test tooling).",
     ),
+    "@isaacs/nonrecursive-glob-match": (
+        "BlueOak-1.0.0",
+        "Blue Oak Model License is a permissive licence in the same family as ISC. "
+        "Development-only (a dependency of minimatch 11, under ESLint and openapi-typescript).",
+    ),
     "caniuse-lite": (
         "CC-BY-4.0",
         "Browser-support data under an attribution-only licence. Development-only (Vite's "
