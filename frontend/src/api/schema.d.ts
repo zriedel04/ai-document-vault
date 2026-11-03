@@ -69,7 +69,9 @@ export interface paths {
         /**
          * Download Document
          * @description The document's current bytes, exactly as imported, saved under the name of its first import.
-         *     Always an attachment, so the browser saves it and never shows it as a page of this origin.
+         *     Always an attachment, so the browser saves it and never shows it as a page of this origin, and
+         *     only ever with a type from :data:`SERVED_TYPES` (``nosniff`` comes from the security headers).
+         *     The image viewer fetches its images here; the bytes are never decoded on the server.
          */
         get: operations["download_document_api_documents__document_id__file_get"];
         put?: never;
