@@ -93,6 +93,28 @@ export function formatDate(iso: string): string {
 }
 
 /**
+ * The bytes of a document's current version, fetched with the token header (ADR 0016), or the
+ * error by status code alone. A 500 is the one the route gives for a missing or doubled stored copy.
+ */
+export async function fetchOriginal(
+  api: Api,
+  id: string,
+): Promise<{ blob: Blob } | { error: DocumentsError }> {
+  try {
+    const { data, response } = await api.GET("/api/documents/{document_id}/file", {
+      params: { path: { document_id: id } },
+      parseAs: "blob",
+    });
+    if (!response.ok) {
+      return { error: response.status === 500 ? "unavailable" : errorFor(response.status) };
+    }
+    return data === undefined ? { error: "unreachable" } : { blob: data };
+  } catch {
+    return { error: "unreachable" };
+  }
+}
+
+/**
  * Save a document's original file. The download needs the access token, which only travels in
  * the `Authorization` header (ADR 0016), so a plain link cannot fetch it: the page fetches the
  * bytes and hands them to the browser as a file. Returns the error, or null when it was saved.
@@ -101,19 +123,9 @@ export async function saveOriginal(
   api: Api,
   document: Pick<DocumentItem, "id" | "name" | "extension">,
 ): Promise<DocumentsError | null> {
-  let blob: Blob | undefined;
-  try {
-    const { data, response } = await api.GET("/api/documents/{document_id}/file", {
-      params: { path: { document_id: document.id } },
-      parseAs: "blob",
-    });
-    // A 500 here is the one the download route gives for a missing or doubled stored copy.
-    if (!response.ok) return response.status === 500 ? "unavailable" : errorFor(response.status);
-    blob = data;
-  } catch {
-    return "unreachable";
-  }
-  if (blob === undefined) return "unreachable";
+  const original = await fetchOriginal(api, document.id);
+  if ("error" in original) return original.error;
+  const { blob } = original;
   const url = URL.createObjectURL(blob);
   const link = window.document.createElement("a");
   link.href = url;

@@ -43,6 +43,8 @@ import {
 import { useSessionState } from "../api/session-context";
 import { loadDocument, useDocument } from "../api/useDocuments";
 import { DEFAULT_SEARCH } from "./documents-search";
+import { isImageType } from "./image-limits";
+import { ImageView } from "./ImageView";
 import { TextView } from "./TextView";
 
 const METHOD_LABEL: Record<Detail["import_sources"][number]["method"], string> = {
@@ -503,6 +505,15 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
         </Table.ScrollContainer>
       )}
 
+      {isImageType(document.mime) && (
+        <ImageView
+          key={document.version_id}
+          documentId={document.id}
+          versionId={document.version_id}
+          mime={document.mime}
+          size={document.size}
+        />
+      )}
       <TextView documentId={document.id} />
     </Stack>
   );
