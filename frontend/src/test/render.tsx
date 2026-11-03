@@ -40,17 +40,17 @@ export const healthyBackend: FetchFn = (input) => {
 
 /**
  * Renders the app once the router has matched the first address, so tests can query at once. The
- * result also carries the router, whose `state.location` is the address the app is at.
+ * router is returned too, so a test can read the address and the history.
  */
 export async function renderApp(options: { route?: string; fetch?: FetchFn; token?: string } = {}) {
   if (options.token) saveToken(options.token);
   const api = createApi(options.fetch ?? healthyBackend);
   const router = createAppRouter(createMemoryHistory({ initialEntries: [options.route ?? "/"] }));
   await router.load();
-  const rendered = render(
+  const result = render(
     <MantineProvider defaultColorScheme="light">
       <App api={api} router={router} />
     </MantineProvider>,
   );
-  return Object.assign(rendered, { router });
+  return { ...result, router };
 }
