@@ -12,6 +12,7 @@ import { parseDocumentsSearch } from "./pages/documents-search";
 import { Import } from "./pages/Import";
 import { NotFound } from "./pages/NotFound";
 import { Placeholder } from "./pages/Placeholder";
+import { Search } from "./pages/Search";
 import { Shell } from "./Shell";
 
 /** The route table. Pass a memory history in tests; the browser's history is the default. */
@@ -38,7 +39,13 @@ export function createAppRouter(history?: RouterHistory) {
     path: "/import",
     component: Import,
   });
-  const built = new Set(["/", "/documents", "/import"]);
+  // No search parameters: the query is component state only and never part of the address.
+  const search = createRoute({
+    getParentRoute: () => root,
+    path: "/search",
+    component: Search,
+  });
+  const built = new Set(["/", "/documents", "/import", "/search"]);
   const sections = NAV_ITEMS.filter((item) => !built.has(item.path)).map((item) =>
     createRoute({
       getParentRoute: () => root,
@@ -47,7 +54,14 @@ export function createAppRouter(history?: RouterHistory) {
     }),
   );
   return createRouter({
-    routeTree: root.addChildren([dashboard, documents, documentDetail, upload, ...sections]),
+    routeTree: root.addChildren([
+      dashboard,
+      documents,
+      documentDetail,
+      upload,
+      search,
+      ...sections,
+    ]),
     history,
   });
 }
