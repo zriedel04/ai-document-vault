@@ -394,6 +394,34 @@ jobs:
           finally {
             & powershell -NoProfile -File .\vault.ps1 stop
           }
+      - name: Export while the server runs, in both PowerShell editions
+        shell: pwsh
+        run: |
+          # A space and an accented letter: the folder must reach the backend intact and never be
+          # printed, and an export never writes into a folder that already holds one.
+          & powershell -NoProfile -File .\vault.ps1 run -NoBrowser
+          if ($LASTEXITCODE -ne 0) { throw 'run failed' }
+          try {
+            foreach ($edition in 'powershell', 'pwsh') {
+              $name = "Export Jos$([char]0x00E9) $edition"
+              $target = Join-Path $env:RUNNER_TEMP $name
+              $text = & $edition -NoProfile -File .\vault.ps1 export -To ($target + '\') 2>&1 | Out-String
+              Write-Host $text
+              if ($LASTEXITCODE -ne 0) { throw "export failed in $edition" }
+              if ($text -notmatch 'Documents exported: \d+') { throw "export in $edition did not report its count" }
+              if ($text.Contains($name) -or $text.Contains('Export Jos')) { throw "export in $edition printed the folder" }
+              foreach ($file in 'manifest.json', 'manifest.csv') {
+                if (-not (Test-Path -LiteralPath (Join-Path $target $file) -PathType Leaf)) { throw "the export has no $file" }
+              }
+              $manifest = Get-Content -LiteralPath (Join-Path $target 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+              if ($manifest.format -ne 'ai-document-vault-export') { throw 'manifest.json is not an export manifest' }
+              $again = & $edition -NoProfile -File .\vault.ps1 export -To $target 2>&1 | Out-String
+              if ($LASTEXITCODE -eq 0 -or $again -notmatch 'not empty') { throw "a second export into the folder was not refused in ${edition}: $again" }
+            }
+          }
+          finally {
+            & powershell -NoProfile -File .\vault.ps1 stop
+          }
       - name: run refuses a port that something else holds
         shell: pwsh
         run: |

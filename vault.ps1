@@ -16,9 +16,15 @@
     .\vault.ps1 backup -To <folder>
                           Snapshot the database and copy the original files that are not yet
                           in the backup folder. Safe while the app runs.
+    .\vault.ps1 export -To <folder> [-IncludeTrash]
+                          Write every document's original into a new or empty folder, in the
+                          folders it was imported from, with manifest.json and manifest.csv.
+                          Documents in the trash are left out unless -IncludeTrash is given.
 
     -NoBrowser            Do not open the browser (run and dev).
-    -To <folder>          The backup folder (backup), outside the vault folder.
+    -To <folder>          The backup folder (backup) or export folder (export), outside the
+                          vault folder.
+    -IncludeTrash         Also export the documents in the trash (export).
 
     The settings come from backend\config.toml (copy config.example.toml there and set the vault
     folder) or from the file named by the AIVAULT_CONFIG environment variable.
@@ -34,12 +40,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'run', 'stop', 'dev', 'check', 'backup')]
+    [ValidateSet('install', 'run', 'stop', 'dev', 'check', 'backup', 'export')]
     [string]$Command,
 
     [switch]$NoBrowser,
 
-    [string]$To
+    [string]$To,
+
+    [switch]$IncludeTrash
 )
 
 Set-StrictMode -Version 2.0
@@ -68,6 +76,8 @@ $script:LaunchVariable = 'VAULT_LAUNCH_ID'
 # The environment variable that carries the backup folder to the backend; see
 # backend/src/vault/backup.py.
 $script:BackupVariable = 'VAULT_BACKUP_TO'
+# The environment variable that carries the export folder; see backend/src/vault/export.py.
+$script:ExportVariable = 'VAULT_EXPORT_TO'
 
 
 function Test-TokenShape {
@@ -681,9 +691,46 @@ function Invoke-Backup {
     }
 }
 
+function Invoke-Export {
+    <# Export the vault into a new or empty folder (docs/launcher.md). The folder goes to the
+       backend in an environment variable, as for backup and for the same reason, and a relative
+       folder is taken from this window's location. The backend prints counts only. -Python
+       replaces the backend's interpreter, for the tests. #>
+    param([string]$Target, [switch]$IncludeTrash, [object]$Python)
+    if (-not $Target) {
+        throw 'name the export folder, for example: .\vault.ps1 export -To E:\VaultExport'
+    }
+    if ($null -eq $Python) { $Python = Get-BackendPython }
+    $folder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Target)
+    $arguments = @('-m', 'vault.export')
+    if ($IncludeTrash) { $arguments += '--include-trash' }
+    $previous = [Environment]::GetEnvironmentVariable($script:ExportVariable, 'Process')
+    [Environment]::SetEnvironmentVariable($script:ExportVariable, $folder, 'Process')
+    Push-Location -LiteralPath $script:BackendDir
+    try {
+        # As in Invoke-Backup: the backend's error output is passed on as plain lines.
+        $ErrorActionPreference = 'Continue'
+        & $Python @arguments 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = 'Stop'
+        Pop-Location
+        if ($null -eq $previous) {
+            [Environment]::SetEnvironmentVariable($script:ExportVariable, [NullString]::Value, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($script:ExportVariable, $previous, 'Process')
+        }
+    }
+    if ($code -ne 0) {
+        throw "the export did not complete (exit code $code); see the messages above"
+    }
+}
+
 function Main {
     if (-not $Command) {
-        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|check|backup> [-NoBrowser] [-To <folder>]   (Get-Help .\vault.ps1 for details)'
+        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|check|backup|export> [-NoBrowser] [-To <folder>] [-IncludeTrash]   (Get-Help .\vault.ps1 for details)'
         exit 2
     }
     try {
@@ -694,6 +741,7 @@ function Main {
             'dev' { Invoke-Dev }
             'check' { Invoke-Check }
             'backup' { Invoke-Backup $To }
+            'export' { Invoke-Export $To -IncludeTrash:$IncludeTrash }
         }
     }
     catch {
