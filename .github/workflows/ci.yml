@@ -423,6 +423,8 @@ jobs:
             $again = & $edition -NoProfile -File .\vault.ps1 restore -From $backups -To $restored 2>&1 | Out-String
             if ($LASTEXITCODE -eq 0 -or $again -notmatch 'already holds files') { throw "a restore over the restored vault was not refused in ${edition}: $again" }
           }
+          # The refused restore above leaves a non-zero exit code, which would fail the step.
+          exit 0
       - name: run refuses a port that something else holds
         shell: pwsh
         run: |
