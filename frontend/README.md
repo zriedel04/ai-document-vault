@@ -1,6 +1,6 @@
 # Frontend
 
-The React app (Vite, TypeScript, Mantine, TanStack Router, as in the stack table of `docs/architecture.md`) that the backend serves in normal use. It has the shell (navigation, light and dark mode, a typed API client that shows the backend's health), the Documents section and the Import page; the other sections are placeholders until their features arrive.
+The React app (Vite, TypeScript, Mantine, TanStack Router, as in the stack table of `docs/architecture.md`) that the backend serves in normal use. It has the shell (navigation, light and dark mode, a typed API client that shows the backend's health), the Documents section, the Import page and the Search page; the other sections are placeholders until their features arrive.
 
 ## Commands
 
@@ -52,6 +52,18 @@ Each file shows Waiting, Uploading, then one outcome:
 - **Unknown** for a 5xx, a lost connection or a 200 whose body is not a complete answer (a missing document id, an unknown outcome or reason, a batch that is not a ULID): the request may have reached the backend. Adding the file again is safe, because the same bytes become a second source of the same document and show as already in the vault.
 
 Only the status code and the fields of a 200 decide what a row says; the server's own message is never shown. File names are shown in the list and never written to the console or a log (a test runs every outcome with private-looking names and checks the console), and file contents are never read by the page.
+
+## Search
+
+`/search` (**Search** in the navigation, `src/pages/Search.tsx`) is the keyword search of plan section 8 over `POST /api/search` (the backend README describes its grammar). The owner types a query and presses **Search**; nothing is sent while typing, and a blank query sends nothing. The field's hint gives the grammar: every word must match, quotes make a phrase, and a trailing `*` matches the start of a word.
+
+The query is as private as a file name, so it is kept in the page's React state only. The route has no search parameters; the form has no action and the page handles its submission (a test checks that the submission is prevented and that the address and the history do not change); the field has no `name` and asks the browser not to remember it (`autocomplete="off"`); the request carries the query in its body (`searchDocuments` in `src/api/search.ts`); and nothing is written to the console (a test runs every outcome with a private-looking query and checks). Leaving the page forgets it.
+
+Each result is one document: its name linking to `/documents/<id>`, its type, the page for a PDF (the one type whose pages are the file's own), its section path, the snippet of its best passage and how many of its passages match. The words the query matched are marked in the snippet, the name and the section titles from the backend's segments (`Highlighted`): each segment is a React text child, inside a Mantine `Mark` when it matched, never HTML, because it is document text (a test renders `<img onerror>`, `<script>` and `<b>` in each and checks that no element is made). The text view cannot open at a page or heading yet, so a result links to the document itself; a link to the page can come with the PDF viewer's page jump.
+
+The **Types** checkboxes are the endpoint's `types` filter (`SEARCH_TYPES`, which a test compares with the enum in `openapi.json`); none checked searches every type, and a change searches again from the first page. Results come 20 at a time (`SEARCH_PAGE_SIZE`) with Mantine's `Pagination`, never past the backend's largest offset (`MAX_SEARCH_PAGE`); a page that is past the end when its answer arrives (documents changed meanwhile) moves to the last page. Pressing **Search** again asks again, from the first page.
+
+No match, refusals and errors are fixed texts chosen by the status code alone (`SEARCH_ERROR_TEXT`), never the server's message. A 422 is a query the grammar refuses (over 500 characters or 16 terms, or a character that is not text) and has no retry; a 503, another error or a lost connection has **Try again**. The search runs only once the session check has accepted the token, and a 401 asks the session again so the token notice comes back, as for the documents (`useRequest` in `src/api/useDocuments.ts`, which also drops the answer to an earlier search). The backend leaves out documents in the trash and older versions. Keyword is the only mode until Phase 4 brings semantic and hybrid search, and the label and date filters come with those features. Until the chunking stage writes chunks, a real vault finds nothing.
 
 ## Typed API client
 

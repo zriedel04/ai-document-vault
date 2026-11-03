@@ -15,24 +15,30 @@ import {
 } from "./documents";
 import { useSessionState } from "./session-context";
 
-export type Loaded<T> =
-  { status: "loading" } | { status: "ok"; data: T } | { status: "error"; error: DocumentsError };
+/** A request's state. `E` is why it gave no answer: a documents error unless a caller adds more. */
+export type Loaded<T, E extends string = DocumentsError> =
+  { status: "loading" } | { status: "ok"; data: T } | { status: "error"; error: E };
 
 /** A request the page can repeat, for example after the owner pasted a token. */
-export interface Request<T> {
-  state: Loaded<T>;
+export interface Request<T, E extends string = DocumentsError> {
+  state: Loaded<T, E>;
   reload: () => void;
 }
 
 /**
  * Run `load` whenever `key` changes, and report only the answer to the latest request: an answer
- * to an older key (the previous page, say) is never shown for the current one.
+ * to an older key (the previous page, say) is never shown for the current one. The key is React
+ * state only, so a private value in it (a search query) never reaches the address.
  *
  * A refused token (401) also asks the shared session again, so the token notice comes back: the
  * token can stop working while the page is open (a new `local-token` after a restart).
  */
-function useRequest<T>(key: string, load: () => Promise<Loaded<T>>): Request<T> {
-  const [answer, setAnswer] = useState<{ key: string; state: Loaded<T> } | null>(null);
+export function useRequest<T, E extends string = DocumentsError>(
+  key: string,
+  load: () => Promise<Loaded<T, E>>,
+): Request<T, E | "unreachable"> {
+  type State = Loaded<T, E | "unreachable">;
+  const [answer, setAnswer] = useState<{ key: string; state: State } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const { recheck } = useSessionState();
   const current = `${String(attempt)}:${key}`;
@@ -40,7 +46,7 @@ function useRequest<T>(key: string, load: () => Promise<Loaded<T>>): Request<T> 
   useEffect(() => {
     let cancelled = false;
     void load()
-      .catch((): Loaded<T> => ({ status: "error", error: "unreachable" }))
+      .catch((): State => ({ status: "error", error: "unreachable" }))
       .then((state) => {
         if (cancelled) return;
         setAnswer({ key: current, state });
