@@ -35,11 +35,13 @@ from sqlalchemy import ColumnElement, Connection, Engine, Row, delete, exists, f
 
 from vault.db import ids
 from vault.db.engine import read_snapshot, write_transaction
+from vault.db.labels import LabelDetail, delete_unused_folder_labels, labels_of
 from vault.db.schema import (
     JOB_STAGES,
     TRASHED,
     blobs,
     chunks,
+    document_labels,
     document_versions,
     documents,
     import_sources,
@@ -227,11 +229,12 @@ class DocumentDetail:
     version_origin: str
     sources: tuple[SourceDetail, ...]  # oldest first; the first one names the document
     jobs: tuple[JobDetail, ...]  # by the pipeline's stages, each oldest first by queue time
+    labels: tuple[LabelDetail, ...]  # by kind, then path (vault.db.labels.labels_of)
 
 
 def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
     """Everything the detail panel shows about one document, or None if there is no such document
-    (in use or in the trash). The three reads share one snapshot, so the parts agree."""
+    (in use or in the trash). The reads share one snapshot, so the parts agree."""
     if not ids.is_ulid(document_id):
         return None
     with read_snapshot(engine) as connection:
@@ -271,6 +274,7 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
                 jobs.c.document_id == document_id
             )
         ).all()
+        label_details = labels_of(connection, document_id)
 
     source_details = tuple(_source(source) for source in sources)
     summary = DocumentSummary(
@@ -311,6 +315,7 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
         version_origin=row.origin,
         sources=source_details,
         jobs=job_details,
+        labels=label_details,
     )
 
 
@@ -446,6 +451,7 @@ DOCUMENT_ROWS: Final = (
     "chunks",
     "pages",
     "jobs",
+    "document_labels",
     "import_sources",
     "document_versions",
     "documents",
@@ -454,9 +460,11 @@ DOCUMENT_ROWS: Final = (
 
 def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | DeleteRefusal:
     """Remove a document in the trash and every row that belongs to it, in one transaction: its
-    chunks (and with them their keyword index rows), pages, jobs, import sources and versions,
-    then the ``blobs`` row of each of its blobs that no remaining version uses (another document
-    can hold the same bytes only through its own version, so a shared blob keeps its row).
+    chunks (and with them their keyword index rows), pages, jobs, labels, import sources and
+    versions, the folder labels no other document carries (a folder name is the owner's, and a
+    label no document uses would only keep it), then the ``blobs`` row of each of its blobs that
+    no remaining version uses (another document can hold the same bytes only through its own
+    version, so a shared blob keeps its row).
 
     The transaction holds the write lock from its first statement (``write_transaction``), so a
     restore, a move to the trash or an import that brings the document back comes wholly before it
@@ -486,6 +494,10 @@ def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | Delete
         connection.execute(delete(chunks).where(chunks.c.document_id == document_id))
         connection.execute(delete(pages).where(pages.c.version_id.in_(versions)))
         connection.execute(delete(jobs).where(jobs.c.document_id == document_id))
+        connection.execute(
+            delete(document_labels).where(document_labels.c.document_id == document_id)
+        )
+        delete_unused_folder_labels(connection)
         connection.execute(
             delete(import_sources).where(import_sources.c.document_id == document_id)
         )

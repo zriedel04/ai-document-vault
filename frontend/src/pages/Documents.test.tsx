@@ -71,6 +71,8 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
         retryable: true,
       },
     ],
+    labels: [],
+    title: { value: "Lease agreement", source: "filename" },
     ...overrides,
   };
 }
