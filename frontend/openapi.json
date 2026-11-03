@@ -1111,7 +1111,7 @@
     },
     "/api/documents/{document_id}/file": {
       "get": {
-        "description": "The document's current bytes, exactly as imported, saved under the name of its first import.\nAlways an attachment, so the browser saves it and never shows it as a page of this origin.",
+        "description": "The document's current bytes, exactly as imported, saved under the name of its first import.\nAlways an attachment, so the browser saves it and never shows it as a page of this origin, and\nonly ever with a type from :data:`SERVED_TYPES` (``nosniff`` comes from the security headers).\nThe image viewer fetches its images here; the bytes are never decoded on the server.",
         "operationId": "download_document_api_documents__document_id__file_get",
         "parameters": [
           {

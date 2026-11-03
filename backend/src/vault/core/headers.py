@@ -11,6 +11,10 @@ frontend and its files, and the refusals of ``LocalSecurityMiddleware`` and the 
     Everything is denied unless listed. Scripts come only from this origin, as files: no inline
     script, no ``eval``, no other host. Requests (``fetch``), images and fonts go only to this
     origin, which also means that injected markup or CSS has nowhere outside to send what it reads.
+    Images may also be ``blob:`` addresses: the image viewer fetches a document's image with the
+    token header and shows it through one, since an ``<img>`` cannot send the header. Only a script
+    of this origin can make such an address, and loading it sends nothing over the network, so it
+    opens no channel outward. ``data:`` images stay refused.
     Styles may be inline because Mantine writes its theme into ``<style>`` elements while the page
     runs; with every outward channel closed, an injected style can change how the page looks but
     cannot carry data away. No page may frame this one, no ``<base>`` may redirect its relative
@@ -44,7 +48,7 @@ CONTENT_SECURITY_POLICY: Final = "; ".join(
         "default-src 'none'",
         "script-src 'self'",
         "style-src 'self' 'unsafe-inline'",
-        "img-src 'self'",
+        "img-src 'self' blob:",
         "font-src 'self'",
         "connect-src 'self'",
         "manifest-src 'self'",

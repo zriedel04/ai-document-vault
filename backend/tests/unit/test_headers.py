@@ -40,8 +40,11 @@ def test_the_policy_denies_by_default_and_allows_scripts_only_from_this_origin()
     assert directives["frame-ancestors"] == "'none'"
     assert directives["base-uri"] == "'none'"
     # Nothing an injected style or image could use to send data to another host.
-    for outward in ("connect-src", "img-src", "font-src", "form-action"):
+    for outward in ("connect-src", "font-src", "form-action"):
         assert directives[outward] == "'self'", outward
+    # Images also from blob: addresses (the image viewer), which only this origin's scripts make
+    # and which send nothing over the network: still no other host, no data: and no wildcard.
+    assert directives["img-src"] == "'self' blob:"
 
 
 @pytest.mark.parametrize(
