@@ -119,6 +119,7 @@ You need Windows, [uv](https://docs.astral.sh/uv/) and Node.js 22.13 or newer on
 | Backend tests, lint and types (in `backend/`) | `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` |
 | Frontend checks (in `frontend/`) | `npm test`, `npm run lint`, `npm run format:check`, `npm run build` |
 | Python and npm licence checks | `uv run python ../scripts/check_python_licenses.py --ignore vault` (in `backend/`), `python scripts/check_npm_licenses.py` |
+| Third-party notices, npm (after `npm ci` in `frontend/`) | `python scripts/third_party_notices.py check npm` (the Python check and `write` need a runtime-only environment: see the script's docstring) |
 | Demo corpus tests (in `demo/generate/`) | `uv run python -m unittest discover -s tests -v` |
 | Rebuild the corpus and eval set (in `demo/generate/`) | `uv run python build.py` (`--check` fails if the committed files differ) |
 
@@ -126,4 +127,4 @@ This table mirrors the one in [`AGENTS.md`](AGENTS.md), which is the one kept cu
 
 ## Licence
 
-[Apache License 2.0](LICENSE). Why this licence: [ADR 0017](docs/decisions/0017-project-licence.md).
+[Apache License 2.0](LICENSE). Why this licence: [ADR 0017](docs/decisions/0017-project-licence.md). The packages the app runs on and their licence texts are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); the [licence audit](docs/licence-audit.md) covers every dependency, development tools included.
