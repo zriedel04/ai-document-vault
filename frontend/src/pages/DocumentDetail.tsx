@@ -44,6 +44,8 @@ import {
 import { useSessionState } from "../api/session-context";
 import { loadDocument, useDocument } from "../api/useDocuments";
 import { DEFAULT_SEARCH } from "./documents-search";
+import { isImageType } from "./image-limits";
+import { ImageView } from "./ImageView";
 import { PdfViewer } from "./PdfViewer";
 import { TextView } from "./TextView";
 
@@ -530,7 +532,18 @@ function Details({
           onPageChange={place.onPageChange}
         />
       ) : (
-        <TextView documentId={document.id} />
+        <>
+          {isImageType(document.mime) && (
+            <ImageView
+              key={document.version_id}
+              documentId={document.id}
+              versionId={document.version_id}
+              mime={document.mime}
+              size={document.size}
+            />
+          )}
+          <TextView documentId={document.id} />
+        </>
       )}
     </Stack>
   );
