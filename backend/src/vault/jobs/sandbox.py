@@ -88,8 +88,8 @@ the group's id stays reserved until the group has been killed, also after a norm
 Linux the target cannot start a process that could leave the group; on Windows the job allows
 no breakaway.
 
-Nothing calls this yet: the extraction stage's handler will be the first caller. The runner logs
-nothing; the worker logs the job's outcome.
+The metadata stage (:mod:`vault.ingest.metadata_stage`) is the first caller; the extraction
+stage's handler will be the next. The runner logs nothing; the worker logs the job's outcome.
 """
 
 from __future__ import annotations
@@ -113,6 +113,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING, Final
 
+from vault.ingest.extractors import CoreProperties
 from vault.jobs import sandbox_child as child
 
 if TYPE_CHECKING:
@@ -446,8 +447,15 @@ class EntryPoint:
         object.__setattr__(self, "_decoder", _compile_result_type(self.result_type))
 
 
-# The extractors register their entry points here when the extraction stage is wired in.
-ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType({})
+# The functions the stages run. The extractors register theirs here when the extraction stage is
+# wired in; the metadata stage (vault.ingest.metadata_stage) reads a DOCX's core properties.
+ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
+    {
+        "docx_properties": EntryPoint(
+            "vault.ingest.extractors.docx:read_properties", CoreProperties
+        ),
+    }
+)
 
 
 @dataclass(frozen=True)

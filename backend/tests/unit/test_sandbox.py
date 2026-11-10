@@ -32,6 +32,7 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 import pytest
 
 from vault.core.config import ProcessingSettings, Settings
+from vault.ingest.extractors import CoreProperties
 from vault.jobs import sandbox, sandbox_child, sandbox_probes
 from vault.jobs.sandbox import (
     MIB,
@@ -1302,8 +1303,14 @@ def test_an_entry_not_on_the_allowlist_is_refused() -> None:
         sandbox.run(1, b"", LIMITS, entry_points=ENTRIES)  # type: ignore[arg-type]
 
 
-def test_the_production_allowlist_is_empty_until_extraction_is_wired() -> None:
-    assert dict(sandbox.ENTRY_POINTS) == {}
+def test_the_production_allowlist_holds_only_the_stages_entry_points() -> None:
+    """Until extraction is wired, the only entry point is the metadata stage's DOCX reader, and
+    the server builds nothing from its answer but ``CoreProperties``."""
+    assert dict(sandbox.ENTRY_POINTS) == {
+        "docx_properties": sandbox.EntryPoint(
+            "vault.ingest.extractors.docx:read_properties", CoreProperties
+        )
+    }
 
 
 @pytest.mark.parametrize(

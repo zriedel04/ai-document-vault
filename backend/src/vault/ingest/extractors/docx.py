@@ -73,9 +73,9 @@ What the text holds:
 - Left out: headers and footers (letterhead and page numbers repeated on every page), footnotes,
   endnotes and comments (separate parts, not the body), equations (``m:oMath``: their linear text
   would lose the structure that gives it meaning), content control properties, and the document's
-  properties (title, author, dates: the metadata stage reads those later). Runs placed directly in
-  the body or a cell, outside any paragraph (allowed by the schema for tracked changes, not written
-  by Word), are not read.
+  properties (title, author, dates: ``read_properties`` reads those for the metadata stage). Runs
+  placed directly in the body or a cell, outside any paragraph (allowed by the schema for tracked
+  changes, not written by Word), are not read.
 
 Headings are paragraphs in the body (not in a table or a text box) whose paragraph style is one of
 the built-in ``Heading 1`` to ``Heading 9`` (levels 1 to 9) or ``Title`` (level 1), matched by the
@@ -94,6 +94,20 @@ rather than read as empty.
 DOCX has no reliable pages (Word lays them out when it renders), so the whole text is one page, as
 for text files. The section anchors in the text view come from the headings.
 
+``read_properties`` reads the core properties part (``docProps/core.xml`` in a file Word
+writes, found through the package's relationship, wherever it is): the title (``dc:title``),
+the author (``dc:creator``) and the dates created and last modified (``dcterms:created``,
+``dcterms:modified``). The bytes go through the same checks and bounded copy first, and
+python-docx must open the copy as a document, so a file the extractor refuses is refused here too.
+Each value is the element's text exactly as written, cleaned and parsed by nobody here: the
+metadata stage does that on its own side of the sandbox (``vault.ingest.metadata_stage``). A value
+is left out (None) rather than guessed when the element is missing, appears more than once, holds
+an element, a comment or a processing instruction, or, for a date, does not declare itself
+``dcterms:W3CDTF`` (``xsi:type``, which the Open Packaging Conventions require on both dates). A
+file with no core properties part, more than one, or one that is not a core properties part has
+no properties; python-docx would make up default ones (the title "Word Document", the time of
+reading as the date modified) if asked for them, so it is never asked.
+
 Errors are ``NotDocxError``, ``ImportedContentError``, ``CompatibilityError`` or
 ``UnterminatedFieldError`` with fixed text naming a reason, never the file's name or content, and
 without the library's exception attached, because a library message can quote a part of the file.
@@ -110,10 +124,12 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE
+from docx.opc.parts.coreprops import CorePropertiesPart
 from docx.oxml.ns import qn
 from docx.oxml.xmlchemy import BaseOxmlElement
 
-from vault.ingest.extractors import Extraction, ExtractionError, Heading, Page
+from vault.ingest.extractors import CoreProperties, Extraction, ExtractionError, Heading, Page
 from vault.ingest.validate import DEFAULT_LIMITS, Limits, Reason, check_docx
 
 VERSION: Final = "docx-1"
@@ -218,6 +234,19 @@ EMITTED: Final = frozenset({_T, _TXBX_CONTENT, *CHARACTERS})
 _OFF: Final = frozenset({"0", "false", "off"})
 _HEADING_LEVELS: Final = {"title": 1, **{f"heading {n}": n for n in range(1, 10)}}
 _LINE_BREAK: Final = re.compile(r"\r\n?")
+_CORE: Final = "{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}"
+_DC: Final = "{http://purl.org/dc/elements/1.1/}"
+_DCTERMS_NAMESPACE: Final = "http://purl.org/dc/terms/"
+_XSI_TYPE: Final = "{http://www.w3.org/2001/XMLSchema-instance}type"
+# The core properties read, by the field of ``CoreProperties`` each fills.
+PROPERTIES: Final = {
+    "title": f"{_DC}title",
+    "creator": f"{_DC}creator",
+    "created": f"{{{_DCTERMS_NAMESPACE}}}created",
+    "modified": f"{{{_DCTERMS_NAMESPACE}}}modified",
+}
+# XML white space, which a schema type that collapses white space (a QName) ignores at the ends.
+_XML_SPACE: Final = " \t\r\n"
 _CELL_SPACE: Final = re.compile(r"[\t\n]+")
 
 
@@ -303,6 +332,63 @@ def extract(data: bytes, limits: Limits = DEFAULT_LIMITS) -> Extraction:
         parts.append(text)
         position += len(text)
     return Extraction(VERSION, (Page(1, PARAGRAPH_BREAK.join(parts), tuple(headings)),))
+
+
+def read_properties(data: bytes, limits: Limits = DEFAULT_LIMITS) -> CoreProperties:
+    """The core properties of the DOCX in ``data``, each as written or None (see the module)."""
+    reason = check_docx(data, limits)
+    if reason is not None:
+        raise NotDocxError(reason)
+    bounded = _bounded_copy(data)
+    try:
+        document = Document(io.BytesIO(bounded))
+        relationships = document.part.package.rels.values()
+        parts = [
+            relationship.target_part
+            for relationship in relationships
+            if relationship.reltype == RELATIONSHIP_TYPE.CORE_PROPERTIES
+            and not relationship.is_external
+        ]
+    except MemoryError:
+        raise
+    except Exception:
+        raise NotDocxError from None  # the library's message may quote the file
+    del bounded
+    none = CoreProperties(title=None, creator=None, created=None, modified=None)
+    if len(parts) != 1 or not isinstance(parts[0], CorePropertiesPart):
+        return none
+    root = parts[0].element
+    if root.tag != f"{_CORE}coreProperties":
+        return none
+    return CoreProperties(
+        title=_property(root, PROPERTIES["title"], date=False),
+        creator=_property(root, PROPERTIES["creator"], date=False),
+        created=_property(root, PROPERTIES["created"], date=True),
+        modified=_property(root, PROPERTIES["modified"], date=True),
+    )
+
+
+def _property(root: BaseOxmlElement, tag: str, *, date: bool) -> str | None:
+    """The text of the one child ``tag`` of ``root``, or None (see the module)."""
+    found = list(root.iterchildren(tag))
+    if len(found) != 1:
+        return None
+    (element,) = found
+    if len(element):  # lxml counts comments and processing instructions as children too
+        return None
+    if date and not _typed_w3cdtf(element):
+        return None
+    text: str = element.text or ""
+    return text
+
+
+def _typed_w3cdtf(element: BaseOxmlElement) -> bool:
+    """Whether ``xsi:type`` on the element names ``dcterms:W3CDTF``, its prefix resolved where it
+    is written."""
+    value = (element.get(_XSI_TYPE) or "").strip(_XML_SPACE)
+    prefix, colon, local = value.rpartition(":")
+    namespace = element.nsmap.get(prefix if colon else None)
+    return local == "W3CDTF" and namespace == _DCTERMS_NAMESPACE
 
 
 def _bounded_copy(data: bytes) -> bytes:

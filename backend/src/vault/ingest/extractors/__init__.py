@@ -1,7 +1,8 @@
 """Extractors turn a stored blob into pages of plain text with their structure (plan, section 7).
 
 Each format has a module of its own (``text`` for TXT and Markdown, ``docx`` for DOCX; PDF
-follows).
+follows). The ``docx`` module also reads a DOCX's core properties (``CoreProperties``) for the
+metadata stage (``vault.ingest.metadata_stage``).
 What an extractor returns is derived data: it can be rebuilt from the blob at any time, so the
 result records the extractor's version, and a new version re-queues extraction (hash chain).
 
@@ -62,3 +63,21 @@ class Extraction:
     extractor: str
     pages: tuple[Page, ...]
     encoding: str | None = None
+
+
+@dataclass(frozen=True)
+class CoreProperties:
+    """The core properties of an Office file (``docProps/core.xml``), as the file states them.
+
+    Each is the element's text exactly as written, or None when the file has no such element,
+    has it more than once, or has it in a form the reader does not take (see
+    ``vault.ingest.extractors.docx.read_properties``). Nothing here is cleaned or parsed: the text
+    comes from the sandbox, which a hostile file may control, so the metadata stage cleans the
+    names and parses the dates itself (``vault.ingest.metadata_stage``). Defined here and not in
+    the ``docx`` module, so that the server can name the type without importing python-docx.
+    """
+
+    title: str | None
+    creator: str | None
+    created: str | None
+    modified: str | None
