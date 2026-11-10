@@ -36,7 +36,7 @@ from vault.db.pages import (
     PageDataError,
     read_current_pages,
 )
-from vault.ingest.path_metadata import title_from_filename
+from vault.ingest.path_metadata import resolved_title
 from vault.ingest.validate import MIME_TYPES
 from vault.jobs.queue import JobQueue, RetryRefusal, utc_now
 from vault.jobs.worker import WorkerPool
@@ -210,8 +210,8 @@ async def _detail(engine: Engine, document_id: str) -> DocumentDetail:
 
 def _title(name: str | None) -> Title | None:
     """The lowest tier of the resolution order: a title from the name of the first import."""
-    value = None if name is None else title_from_filename(name)
-    return None if value is None else Title(value=value, source="filename")
+    resolved = resolved_title(name)
+    return None if resolved is None else Title(value=resolved[0], source="filename")
 
 
 @router.post("/documents/{document_id}/trash", responses={404: {"description": "No such document"}})
