@@ -11,7 +11,7 @@ only stores and reads them. Names are the owner's own words and are never logged
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -134,21 +134,13 @@ def labels_of(connection: Connection, document_id: str) -> tuple[LabelDetail, ..
         )
     )
     rows = {row.id: row for row in connection.execute(select(known)).all()}
-
-    def path(label_id: str) -> tuple[str, ...]:
-        names: list[str] = []
-        current: str | None = label_id
-        while current is not None and current in rows and len(names) < MAX_PATH_LEVELS:
-            names.append(rows[current].name)
-            current = rows[current].parent_id
-        return tuple(reversed(names))
-
+    tree_of = {label_id: (row.name, row.parent_id) for label_id, row in rows.items()}
     details = (
         LabelDetail(
             id=row.label_id,
             kind=rows[row.label_id].kind,
             name=rows[row.label_id].name,
-            path=path(row.label_id),
+            path=label_path(tree_of, row.label_id),
             source=row.source,
             status=row.status,
         )
@@ -157,11 +149,32 @@ def labels_of(connection: Connection, document_id: str) -> tuple[LabelDetail, ..
     return tuple(
         sorted(
             details,
-            key=lambda label: (
-                label.kind,
-                [name_key(name) for name in label.path],
-                label.source,
-                label.id,
-            ),
+            key=lambda label: label_order(label.kind, label.path, label.source, label.id),
         )
+    )
+
+
+def label_path(tree: Mapping[str, tuple[str, str | None]], label_id: str) -> tuple[str, ...]:
+    """The names from the outermost label down to ``label_id``, from each label's ``(name,
+    parent_id)`` in ``tree``. A parent that ``tree`` does not hold ends the path, and so does a
+    path deeper than ``MAX_PATH_LEVELS`` (a parent loop written by hand)."""
+    names: list[str] = []
+    current: str | None = label_id
+    while current is not None and current in tree and len(names) < MAX_PATH_LEVELS:
+        name, current = tree[current]
+        names.append(name)
+    return tuple(reversed(names))
+
+
+def label_order(
+    kind: object, path: Sequence[object], source: object, label_id: object
+) -> tuple[str, list[str], str, str]:
+    """The order labels are listed in, everywhere (the detail panel and the export): by kind, then
+    path as Windows compares folder names, then source, then id, so the order never depends on how
+    the database returned the rows. A value a hand edit left empty sorts as ``""``."""
+    return (
+        "" if kind is None else str(kind),
+        [name_key(str(name)) for name in path],
+        "" if source is None else str(source),
+        "" if label_id is None else str(label_id),
     )

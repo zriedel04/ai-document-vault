@@ -14,17 +14,22 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from unittest import mock
 
 import pytest
+from sqlalchemy import text
 
 from vault import export as cli
+from vault.api.documents import FieldSource
 from vault.db import ids
-from vault.db.documents import move_to_trash
-from vault.db.engine import create_vault_engine
+from vault.db.documents import get_document, move_to_trash
+from vault.db.engine import create_vault_engine, write_transaction
+from vault.db.fields import FILE_PROPERTIES, FileProperties, replace_file_properties
+from vault.db.labels import MAX_PATH_LEVELS, add_folder_labels
 from vault.db.migrate import upgrade_to_latest
 from vault.ingest.importer import Importer, ImportRequest
+from vault.ingest.path_metadata import FILENAME, PENDING_KEY, label_pending_sources, resolved_title
 from vault.storage import export as export_module
 from vault.storage.blobs import BlobStore
 from vault.storage.export import (
@@ -55,6 +60,11 @@ class Vault:
         self.root = tmp_path / "vault"
         self.root.mkdir()
         upgrade_to_latest(self.root / "vault.db")
+        engine = create_vault_engine(self.root / "vault.db")
+        try:  # as the app's start-up does after migrating
+            label_pending_sources(engine, NOW)
+        finally:
+            engine.dispose()
         self.incoming = tmp_path / "incoming"
         self.incoming.mkdir()
         self.store = BlobStore(self.root / "blobs")
@@ -533,6 +543,270 @@ class TestHandEditedRecords:
         assert not target.parent.exists() or list(target.parent.iterdir()) == []
 
 
+def csv_rows(target: Path) -> list[dict[str, str]]:
+    text = (target / "manifest.csv").read_bytes().decode("utf-8-sig")
+    return list(csv.DictReader(io.StringIO(text, newline="")))
+
+
+def give_file_title(vault: Vault, document_id: str, title: str) -> None:
+    """A DOCX title for the document's current version, stored as the metadata stage stores it."""
+    engine = create_vault_engine(vault.root / "vault.db")
+    try:
+        with write_transaction(engine) as connection:
+            version_id: str = connection.execute(
+                text("SELECT current_version_id FROM documents WHERE id = :id"), {"id": document_id}
+            ).scalar_one()
+            replace_file_properties(
+                connection, document_id, version_id, FileProperties(title=title)
+            )
+    finally:
+        engine.dispose()
+
+
+def give_labels(vault: Vault, document_id: str, names: Sequence[str]) -> None:
+    """Folder labels written as the importer writes them, with names no import path could give
+    (a line break), as a later label kind or a hand edit may."""
+    engine = create_vault_engine(vault.root / "vault.db")
+    try:
+        with write_transaction(engine) as connection:
+            add_folder_labels(connection, document_id, names, datetime(2026, 11, 2, 8, 0))
+    finally:
+        engine.dispose()
+
+
+# Label and title text a spreadsheet or a CSV reader could misread: separators, quotes, line
+# breaks, formula starts and letters outside ASCII (built from code points).
+HOSTILE = [
+    "Fees, 2026",
+    'The "final" draft',
+    "line\nbreak",
+    "cr\rlf\r\nend",
+    "=SUM(A1:A9)",
+    "+cmd",
+    "-2+3",
+    "@risk",
+    "\uff1dfull width",
+    "Z\u00fcrich \u6771\u4eac \U0001f642",
+]
+
+
+class TestTitlesAndLabels:
+    def test_each_document_has_its_title_and_folder_labels(
+        self, vault: Vault, target: Path
+    ) -> None:
+        nested = vault.add("Lab_report_3.txt", ["School", "CSE485"])
+        flat = vault.add("upload.txt")
+        export(vault, target)
+        documents = {d["id"]: d for d in manifest(target)["documents"]}
+        assert manifest(target)["format_version"] == 2
+        assert manifest(target)["labels_complete"] is True
+        assert documents[nested]["title"] == {"value": "Lab report 3", "source": "filename"}
+        labels = documents[nested]["labels"]
+        assert [(label["kind"], label["path"]) for label in labels] == [
+            ("folder", ["School"]),
+            ("folder", ["School", "CSE485"]),
+        ]
+        assert [label["name"] for label in labels] == ["School", "CSE485"]
+        assert {(label["source"], label["status"]) for label in labels} == {
+            ("import_path", "accepted")
+        }
+        assert documents[flat]["labels"] == []
+        rows = {row["document_id"]: row for row in csv_rows(target)}
+        assert (rows[nested]["title"], rows[nested]["title_source"]) == ("Lab report 3", "filename")
+        assert json.loads(rows[nested]["labels"]) == labels
+        assert json.loads(rows[flat]["labels"]) == []
+
+    def test_the_title_and_labels_are_the_ones_the_library_shows(
+        self, vault: Vault, target: Path
+    ) -> None:
+        data = b"one document, two imports\n"
+        document = vault.add("b_notes.txt", ["beta", "Inner"], data)
+        assert vault.add("other_name.txt", ["Alpha"], data) == document
+        give_labels(vault, document, ["alpha", "zeta"])  # under the same Alpha: one label
+        export(vault, target)
+        exported = manifest(target)["documents"][0]
+        engine = create_vault_engine(vault.root / "vault.db")
+        try:
+            detail = get_document(engine, document)
+        finally:
+            engine.dispose()
+        assert detail is not None
+        shown = [(label.id, label.kind, list(label.path)) for label in detail.labels]
+        assert [(e["id"], e["kind"], e["path"]) for e in exported["labels"]] == shown
+        assert [e["path"] for e in exported["labels"]] == [
+            ["Alpha"], ["Alpha", "zeta"], ["beta"], ["beta", "Inner"],
+        ]  # fmt: skip
+        assert exported["title"]["value"] == "b notes"  # the first import names it
+        # Every source the library can show a title from is one the export writes.
+        assert set(get_args(FieldSource)) == {FILENAME, FILE_PROPERTIES}
+
+    def test_a_docx_title_comes_before_the_file_name_as_in_the_library(
+        self, vault: Vault, target: Path
+    ) -> None:
+        document = vault.add("b_notes.txt", ["beta"])
+        plain = vault.add("plain.txt", ["beta"], b"another document\n")
+        give_file_title(vault, document, HOSTILE[4])
+        export(vault, target)
+        by_id = {d["id"]: d for d in manifest(target)["documents"]}
+        assert by_id[document]["title"] == {"value": HOSTILE[4], "source": FILE_PROPERTIES}
+        assert by_id[plain]["title"] == {"value": "plain", "source": FILENAME}
+        engine = create_vault_engine(vault.root / "vault.db")
+        try:
+            for document_id in (document, plain):
+                detail = get_document(engine, document_id)
+                assert detail is not None
+                resolved = resolved_title(detail.summary.name, detail.file_properties.title)
+                assert resolved is not None
+                assert by_id[document_id]["title"] == {"value": resolved[0], "source": resolved[1]}
+        finally:
+            engine.dispose()
+        rows = {row["document_id"]: row for row in csv_rows(target)}
+        assert rows[document]["title_source"] == FILE_PROPERTIES
+        assert rows[document]["title"] == "'" + HOSTILE[4]  # neutralised like any title
+
+    def test_a_title_of_another_version_or_a_database_without_fields_falls_back(
+        self, vault: Vault, target: Path, tmp_path: Path
+    ) -> None:
+        document = vault.add("b_notes.txt")
+        give_file_title(vault, document, "Stated title")
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("UPDATE document_fields SET version_id = 'not-the-current-one'")
+        connection.close()
+        export(vault, target)
+        assert manifest(target)["documents"][0]["title"] == {"value": "b notes", "source": FILENAME}
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("DROP TABLE document_fields")
+        connection.close()
+        again = tmp_path / "again"
+        assert export(vault, again).exported == 1
+        assert manifest(again)["documents"][0]["title"]["source"] == FILENAME
+
+    def test_the_order_does_not_depend_on_how_the_rows_were_written(
+        self, vault: Vault, tmp_path: Path
+    ) -> None:
+        document = vault.add("x.txt")
+        give_labels(vault, document, ["b"])
+        give_labels(vault, document, ["A"])
+        give_labels(vault, document, ["c"])
+        first, second = tmp_path / "first", tmp_path / "second"
+        export(vault, first)
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            rows = connection.execute("SELECT * FROM document_labels").fetchall()
+            connection.execute("DELETE FROM document_labels")
+            connection.executemany(
+                "INSERT INTO document_labels VALUES (?, ?, ?, ?, ?, ?, ?)", reversed(rows)
+            )
+        connection.close()
+        export(vault, second)
+        assert manifest(first)["documents"] == manifest(second)["documents"]
+        assert [e["name"] for e in manifest(first)["documents"][0]["labels"]] == ["A", "b", "c"]
+        assert (first / "manifest.csv").read_bytes() == (second / "manifest.csv").read_bytes()
+
+    def test_labels_a_spreadsheet_could_misread_survive_both_manifests(
+        self, vault: Vault, target: Path
+    ) -> None:
+        document = vault.add("x.txt")
+        for name in HOSTILE:
+            give_labels(vault, document, [name])
+        export(vault, target)
+        labels = manifest(target)["documents"][0]["labels"]
+        assert sorted(label["name"] for label in labels) == sorted(HOSTILE)
+        raw = (target / "manifest.csv").read_bytes().decode("utf-8-sig")
+        assert raw.count("\r\n") == 2  # the header and one row: no break leaks out of the cell
+        assert "\n" not in raw.replace("\r\n", "")
+        assert "\r" not in raw.replace("\r\n", "")
+        (row,) = csv_rows(target)
+        assert json.loads(row["labels"]) == labels
+        assert not row["labels"].startswith(export_module.FORMULA_STARTS)
+
+    @pytest.mark.parametrize("folder", [name for name in HOSTILE if "\n" not in name])
+    def test_a_folder_label_from_an_import_survives_both_manifests(
+        self, vault: Vault, target: Path, folder: str
+    ) -> None:
+        vault.add("x.txt", [folder])
+        export(vault, target)
+        (label,) = manifest(target)["documents"][0]["labels"]
+        assert label["path"] == [folder]
+        (row,) = csv_rows(target)
+        assert json.loads(row["labels"]) == [label]
+
+    @pytest.mark.parametrize("stem", [name for name in HOSTILE if not set(name) & set("\r\n")])
+    def test_a_title_a_spreadsheet_could_misread_is_text_in_the_csv(
+        self, vault: Vault, target: Path, stem: str
+    ) -> None:
+        vault.add(stem + ".txt")
+        export(vault, target)
+        assert manifest(target)["documents"][0]["title"] == {"value": stem, "source": "filename"}
+        (row,) = csv_rows(target)
+        assert row["title"] == neutralise(stem)
+        assert row["title_source"] == "filename"
+        assert not row["title"].startswith(export_module.FORMULA_STARTS)
+
+    def test_a_document_without_an_import_has_no_title(self, vault: Vault, target: Path) -> None:
+        vault.add("gone.txt", ["Kept"])
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("DELETE FROM import_sources")
+        connection.close()
+        export(vault, target)
+        document = manifest(target)["documents"][0]
+        assert document["title"] is None
+        assert [label["path"] for label in document["labels"]] == [["Kept"]]
+        (row,) = csv_rows(target)
+        assert (row["title"], row["title_source"]) == ("", "")
+
+    def test_a_vault_the_app_has_not_labelled_yet_says_so(self, vault: Vault, target: Path) -> None:
+        vault.add("x.txt", ["Kept"])
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("INSERT INTO app_meta (key, value) VALUES (?, '1')", (PENDING_KEY,))
+        connection.close()
+        result = export(vault, target)
+        assert result.labels_complete is False
+        assert manifest(target)["labels_complete"] is False
+        assert [e["path"] for e in manifest(target)["documents"][0]["labels"]] == [["Kept"]]
+
+    def test_a_database_from_before_labels_still_exports(self, vault: Vault, target: Path) -> None:
+        document = vault.add("x.txt", ["Kept"])
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("DROP TABLE document_labels")
+            connection.execute("DROP TABLE labels")
+        connection.close()
+        result = export(vault, target)
+        assert (result.exported, result.labels_complete) == (1, False)
+        assert manifest(target)["documents"][0]["labels"] == []
+        assert files_of(target)[document] == "files/Kept/x.txt"
+
+    def test_an_assignment_whose_label_is_gone_keeps_its_id(
+        self, vault: Vault, target: Path
+    ) -> None:
+        vault.add("x.txt", ["Gone"])
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            (label_id,) = connection.execute("SELECT id FROM labels").fetchone()
+            connection.execute("DELETE FROM labels")
+        connection.close()
+        export(vault, target)
+        (label,) = manifest(target)["documents"][0]["labels"]
+        assert label == {
+            "id": label_id, "kind": None, "name": None, "path": [],
+            "source": "import_path", "status": "accepted",
+        }  # fmt: skip
+
+    def test_a_parent_loop_ends_the_path(self, vault: Vault, target: Path) -> None:
+        vault.add("x.txt", ["Outer", "Inner"])
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute(
+                "UPDATE labels SET parent_id = (SELECT id FROM labels WHERE name = 'Inner') "
+                "WHERE name = 'Outer'"
+            )
+        connection.close()
+        export(vault, target)
+        paths = [label["path"] for label in manifest(target)["documents"][0]["labels"]]
+        assert all(len(path) == MAX_PATH_LEVELS for path in paths)
+
+
 class TestTheCommandLine:
     @pytest.fixture
     def settings(self, vault: Vault, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -553,6 +827,19 @@ class TestTheCommandLine:
         out, err = capsys.readouterr()
         assert "Documents exported: 1" in out
         assert err == ""
+        for word in self.private_words(vault, target):
+            assert word not in out + err
+
+    def test_labels_not_complete_are_a_warning_that_names_none(
+        self, settings: Path, vault: Vault, target: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vault.add("intake.txt", ["Clinic"])
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("INSERT INTO app_meta (key, value) VALUES (?, '1')", (PENDING_KEY,))
+        connection.close()
+        assert cli.main(["--to", str(target)]) == 0
+        out, err = capsys.readouterr()
+        assert "folder labels are not complete" in out
         for word in self.private_words(vault, target):
             assert word not in out + err
 
@@ -666,10 +953,11 @@ class TestTheCommandLine:
     def test_the_report_names_every_count(self) -> None:
         result = ExportResult(
             exported=1, missing=2, damaged=3, unreadable=4, trash_left_out=5, renamed=6,
-            placed_higher=7, leftovers=8, private=False,
+            placed_higher=7, leftovers=8, labels_complete=False, private=False,
         )  # fmt: skip
         text = "\n".join(cli.report(result))
         for figure in range(1, 9):
             assert f": {figure}" in text
         assert "Warning: other accounts" in text
+        assert "folder labels are not complete" in text
         assert result.problems == 2 + 3 + 4

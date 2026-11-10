@@ -41,14 +41,17 @@ from typing import Final
 from sqlalchemy import Connection, Engine, delete, func, select
 
 from vault.db.engine import write_transaction
+from vault.db.fields import FILE_PROPERTIES
 from vault.db.labels import add_folder_labels
-from vault.db.schema import MAX_LABEL_CHARS, app_meta, import_sources
+from vault.db.schema import MAX_FIELD_CHARS, MAX_LABEL_CHARS, app_meta, import_sources
 
 # How many folders deep labels go; deeper folders are left out (the outermost are kept, since each
 # label hangs under the one above it). Windows' classic 260-character path limit allows about 130.
 MAX_DEPTH: Final = 64
 # The marker migration 0006 leaves for sources recorded before folder labels existed.
 PENDING_KEY: Final = "pending.folder_labels"
+# The source of a title worked out from a file name (the lowest tier of the resolution order).
+FILENAME: Final = "filename"
 
 # Characters a label never keeps: the bidirectional controls, which reorder how the text around
 # them is shown, and the invisible ones that would make two names that look the same differ (soft
@@ -112,6 +115,21 @@ def title_from_filename(filename: str) -> str | None:
         stem = filename
     title = clean(stem.replace("_", " "))[:MAX_LABEL_CHARS].strip()
     return title or None
+
+
+def resolved_title(first_filename: object, from_file: object = None) -> tuple[str, str] | None:
+    """The title a document shows and where it came from, by the resolution order's tiers that
+    exist: the file's own title (``from_file``, a DOCX's ``dc:title`` stored by the metadata
+    stage, source ``FILE_PROPERTIES``), then a title from the file name of its first import
+    (``FILENAME``), or None. The detail panel and the export both read it here, so they never
+    disagree. A value that is not text of 1 to ``MAX_FIELD_CHARS`` characters, or a name that is
+    not text (only a hand edit writes either), is passed over."""
+    if type(from_file) is str and 1 <= len(from_file) <= MAX_FIELD_CHARS:
+        return from_file, FILE_PROPERTIES
+    if not isinstance(first_filename, str):
+        return None
+    value = title_from_filename(first_filename)
+    return None if value is None else (value, FILENAME)
 
 
 def record_import_labels(

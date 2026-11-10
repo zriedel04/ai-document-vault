@@ -85,11 +85,12 @@ Everything is written into a new folder beside the target, `.vault-restore-<rand
 <folder>\
   files\School\CSE485\syllabus.pdf   each original, in the folders of its first import
   files\upload.txt                   a browser upload, which has no folders
-  manifest.json                      every document's states, versions, imports, hashes, sizes
+  manifest.json                      every document's states, title, labels, versions, imports,
+                                     hashes, sizes
   manifest.csv                       the same for Excel, one row per import
 ```
 
-Names are made safe for Windows (no `<>:"/\|?*` or control characters, no trailing dot or space, no device name such as `CON` or `NUL`, at most 120 characters), two documents with the same name in a folder (in any case) are both kept as `name.txt` and `name (2).txt`, and every path stays under 260 characters, so Explorer opens all of it; the manifest keeps the original names and folders. `manifest.csv` is UTF-8 with a byte order mark, and a cell that would start a formula in Excel (`=`, `+`, `-`, `@`, a tab) gets a `'` in front; `manifest.json` has the exact values. The export is built in a hidden `.vault-export-...` folder beside the target and renamed only when complete; one left by an interrupted export can be deleted. The command prints counts only. Details: `backend/README.md`, section Export.
+Names are made safe for Windows (no `<>:"/\|?*` or control characters, no trailing dot or space, no device name such as `CON` or `NUL`, at most 120 characters), two documents with the same name in a folder (in any case) are both kept as `name.txt` and `name (2).txt`, and every path stays under 260 characters, so Explorer opens all of it; the manifest keeps the original names and folders, and each document's title and labels (in `manifest.csv`, the labels are one cell holding a JSON list). `manifest.csv` is UTF-8 with a byte order mark, and a cell that would start a formula in Excel (`=`, `+`, `-`, `@`, a tab) gets a `'` in front; `manifest.json` has the exact values. The export is built in a hidden `.vault-export-...` folder beside the target and renamed only when complete; one left by an interrupted export can be deleted. The command prints counts only. Details: `backend/README.md`, section Export.
 
 ## The token
 

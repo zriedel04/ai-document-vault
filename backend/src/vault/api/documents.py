@@ -29,6 +29,7 @@ from vault.db.documents import (
     move_to_trash,
     restore,
 )
+from vault.db.fields import FILE_PROPERTIES
 from vault.db.pages import (
     DEFAULT_WINDOW,
     MAX_WINDOW,
@@ -36,7 +37,7 @@ from vault.db.pages import (
     PageDataError,
     read_current_pages,
 )
-from vault.ingest.path_metadata import title_from_filename
+from vault.ingest.path_metadata import resolved_title
 from vault.ingest.validate import MIME_TYPES
 from vault.jobs.queue import JobQueue, RetryRefusal, utc_now
 from vault.jobs.worker import WorkerPool
@@ -225,12 +226,13 @@ async def _detail(engine: Engine, document_id: str) -> DocumentDetail:
 
 
 def _title(from_file: str | None, name: str | None) -> Title | None:
-    """The title by the resolution order's tiers that exist: the file's own title, then a title
-    from the name of the first import."""
-    if from_file is not None:
-        return Title(value=from_file, source="file_properties")
-    value = None if name is None else title_from_filename(name)
-    return None if value is None else Title(value=value, source="filename")
+    """The title by the resolution order's tiers that exist (``resolved_title``, which the
+    export reads too): the file's own title, then a title from the name of the first import."""
+    resolved = resolved_title(name, from_file)
+    if resolved is None:
+        return None
+    value, source = resolved
+    return Title(value=value, source="file_properties" if source == FILE_PROPERTIES else "filename")
 
 
 @router.post("/documents/{document_id}/trash", responses={404: {"description": "No such document"}})

@@ -2,17 +2,22 @@
 
     <target>/
       files/<folders of the first import>/<name of the first import>   each current original
-      manifest.json   every exported document: states, versions, import sources, hashes, sizes
+      manifest.json   every exported document: states, title, labels, versions, import sources,
+                      hashes, sizes
       manifest.csv    the same, one row per import source, for a spreadsheet
 
 The layout follows the first import (earliest, ties broken by id: the rule that names a document
-in the library); collections and labels do not exist yet. Documents in the trash are left out
-unless ``include_trash`` is set. Names are untrusted text and are made safe as Windows path
-components (:func:`safe_name`), every path stays within ``MAX_PATH``, and names that collide in a
-folder, compared without regard to case, are numbered in a fixed order. ``manifest.csv`` is UTF-8
-with a byte order mark and neutralises cells that a spreadsheet would run as formulas
-(:func:`neutralise`); ``manifest.json`` holds the exact values. ``backend/README.md`` (section
-Export) gives every rule.
+in the library); collections do not exist yet. Each document's title is the one the library
+shows, with its source (``vault.ingest.path_metadata.resolved_title``: a DOCX's own title, else
+the first import's file name), and its labels are listed
+in the library's order (``vault.db.labels.label_order``) with their full path. Documents in the
+trash are left out unless ``include_trash`` is set. Names are untrusted text and are made safe as
+Windows path components (:func:`safe_name`), every path stays within ``MAX_PATH``, and names that
+collide in a folder, compared without regard to case, are numbered in a fixed order.
+``manifest.csv`` is UTF-8 with a byte order mark and neutralises cells that a spreadsheet would
+run as formulas (:func:`neutralise`); its ``labels`` cell is the JSON list of ``manifest.json``,
+which escapes every line break, and ``manifest.json`` holds the exact values.
+``backend/README.md`` (section Export) gives every rule.
 
 The export is built in a new folder beside the target and renamed to it only when complete, so a
 folder under the target's name is always a whole export; the target must be new or empty, and is
@@ -38,6 +43,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
+from vault.db.fields import FILE_PROPERTIES
+from vault.db.labels import label_order, label_path
+from vault.ingest.path_metadata import PENDING_KEY, resolved_title
 from vault.storage.backup import (
     BackupError,
     _secure_target,
@@ -62,7 +70,7 @@ MANIFEST_CSV: Final = "manifest.csv"
 TEMP_PREFIX: Final = ".vault-export-"
 TEMP_NAME_UNITS: Final = len(TEMP_PREFIX) + 8  # tempfile.mkdtemp adds eight characters
 FORMAT: Final = "ai-document-vault-export"
-FORMAT_VERSION: Final = 1
+FORMAT_VERSION: Final = 2  # 2: title and labels
 TRASHED: Final = "trashed"
 
 # Windows path limits, in UTF-16 code units, as Windows counts them. MAX_PATH is 260 with the
@@ -87,13 +95,15 @@ FORMULA_STARTS: Final = ("=", "+", "-", "@", "\t", "\r", "\uff1d", "\uff0b", "\u
 DOCUMENT_COLUMNS: Final = (
     "id", "file", "problem", "state", "state_before_trash", "local_only", "created_at", "trashed_at"
 )  # fmt: skip
+# The document's title, the title's source and its labels (a JSON list, as in manifest.json).
+DESCRIPTION_COLUMNS: Final = ("title", "title_source", "labels")
 VERSION_COLUMNS: Final = ("id", "version_no", "sha256", "size", "extension", "mime")
 SOURCE_COLUMNS: Final = (
     "id", "original_filename", "original_path", "folder_segments", "original_mtime",
     "imported_at", "method", "import_batch_id",
 )  # fmt: skip
 CSV_COLUMNS: Final = (
-    "document_id", *DOCUMENT_COLUMNS[1:], "version_id", *VERSION_COLUMNS[1:],
+    "document_id", *DOCUMENT_COLUMNS[1:], *DESCRIPTION_COLUMNS, "version_id", *VERSION_COLUMNS[1:],
     "source_no", "source_id", *SOURCE_COLUMNS[1:],
 )  # fmt: skip
 
@@ -112,6 +122,7 @@ class ExportResult:
     renamed: int  # documents given a numbered name because another took theirs
     placed_higher: int  # documents placed above their folder to keep the path short
     leftovers: int  # folders of earlier exports that did not finish, beside the target
+    labels_complete: bool  # False: the app has not yet labelled the imports of an older vault
     private: bool | None  # Windows: is the export, all of it, owner-only? None elsewhere
 
     @property
@@ -313,9 +324,54 @@ def _segments(raw: object) -> tuple[object, list[str]]:
     return raw, []
 
 
-def _read_database(db: Path) -> tuple[list[sqlite3.Row], list[sqlite3.Row], list[sqlite3.Row]]:
-    """Documents, versions with their blob records, and import sources, all from one read-only
-    snapshot (the database is in WAL mode, so the app can go on writing)."""
+@dataclass(frozen=True)
+class _Rows:
+    documents: list[sqlite3.Row]
+    versions: list[sqlite3.Row]
+    sources: list[sqlite3.Row]
+    labels: list[sqlite3.Row]  # every label: id, kind, name, parent_id
+    assignments: list[sqlite3.Row]  # document_id, label_id, source, status
+    labels_complete: bool
+    file_titles: dict[tuple[str, str], object]  # (document_id, version_id): the file's own title
+
+
+def _read_labels(connection: sqlite3.Connection) -> tuple[list[Any], list[Any], bool]:
+    """Every label and assignment, and whether they are complete: a database the app has not
+    migrated to labels yet has none, and one whose imports the app has not labelled yet (the
+    marker of migration 0006, ``PENDING_KEY``) has only those of later imports."""
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if not {"labels", "document_labels", "app_meta"} <= tables:
+        return [], [], False
+    labels = connection.execute("SELECT id, kind, name, parent_id FROM labels").fetchall()
+    assignments = connection.execute(
+        "SELECT document_id, label_id, source, status FROM document_labels"
+    ).fetchall()
+    pending = connection.execute("SELECT 1 FROM app_meta WHERE key = ?", (PENDING_KEY,)).fetchone()
+    return labels, assignments, pending is None
+
+
+def _read_file_titles(connection: sqlite3.Connection) -> dict[tuple[str, str], object]:
+    """The title each version's file states about itself (``document_fields``, source
+    ``file_properties``, written by the metadata stage), by document and version. A database the
+    app has not migrated to fields yet has none."""
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "document_fields" not in tables:
+        return {}
+    rows = connection.execute(
+        "SELECT document_id, version_id, value FROM document_fields "
+        "WHERE field = 'title' AND source = ?",
+        (FILE_PROPERTIES,),
+    ).fetchall()
+    return {(row["document_id"], row["version_id"]): row["value"] for row in rows}
+
+
+def _read_database(db: Path) -> _Rows:
+    """Documents, versions with their blob records, import sources and labels, all from one
+    read-only snapshot (the database is in WAL mode, so the app can go on writing)."""
     if not _is_real_file(_lstat(db)):
         msg = "the vault folder has no database yet; start the app once before exporting it"
         raise ExportError(msg)
@@ -338,13 +394,15 @@ def _read_database(db: Path) -> tuple[list[sqlite3.Row], list[sqlite3.Row], list
                 "original_mtime, imported_at, method, import_batch_id FROM import_sources "
                 "ORDER BY document_id, imported_at, id"
             ).fetchall()
+            labels, assignments, complete = _read_labels(connection)
+            file_titles = _read_file_titles(connection)
             connection.execute("COMMIT")
         finally:
             connection.close()
     except sqlite3.Error:
         msg = "SQLite could not read the vault database; nothing was exported"
         raise ExportError(msg) from None
-    return documents, versions, sources
+    return _Rows(documents, versions, sources, labels, assignments, complete, file_titles)
 
 
 def _version_entry(row: sqlite3.Row) -> dict[str, Any]:
@@ -372,6 +430,37 @@ def _source_entry(row: sqlite3.Row) -> dict[str, Any]:
         "method": row["method"],
         "import_batch_id": row["import_batch_id"],
     }
+
+
+def _label_entries(rows: _Rows) -> dict[str, list[dict[str, Any]]]:
+    """Each document's labels as the manifest lists them, in the library's order. An assignment
+    whose label is gone (only a hand edit with foreign keys off leaves one) keeps its id, source
+    and status, with no kind, name or path."""
+    known = {row["id"]: row for row in rows.labels}
+    tree = {row["id"]: (row["name"], row["parent_id"]) for row in rows.labels}
+    of: dict[str, list[dict[str, Any]]] = {}
+    for assignment in rows.assignments:
+        label = known.get(assignment["label_id"])
+        of.setdefault(assignment["document_id"], []).append(
+            {
+                "id": assignment["label_id"],
+                "kind": None if label is None else label["kind"],
+                "name": None if label is None else label["name"],
+                "path": [] if label is None else list(label_path(tree, label["id"])),
+                "source": assignment["source"],
+                "status": assignment["status"],
+            }
+        )
+    for entries in of.values():
+        entries.sort(key=lambda e: label_order(e["kind"], e["path"], e["source"], e["id"]))
+    return of
+
+
+def _title_entry(sources: list[sqlite3.Row], from_file: object) -> dict[str, str] | None:
+    """The title the library shows: the current version's own title, else the first import's
+    file name (``resolved_title``)."""
+    resolved = resolved_title(sources[0]["original_filename"] if sources else None, from_file)
+    return None if resolved is None else {"value": resolved[0], "source": resolved[1]}
 
 
 def _blob_ok(version: sqlite3.Row) -> bool:
@@ -403,7 +492,17 @@ def csv_bytes(documents: list[dict[str, Any]]) -> bytes:
         current: dict[str, Any] = next(
             (v for v in document["versions"] if v["id"] == document["current_version_id"]), {}
         )
-        head = [document[c] for c in DOCUMENT_COLUMNS] + [current.get(c) for c in VERSION_COLUMNS]
+        title = document["title"] or {}
+        description = [
+            title.get("value"),
+            title.get("source"),
+            json.dumps(document["labels"], ensure_ascii=False),
+        ]
+        head = [
+            *(document[c] for c in DOCUMENT_COLUMNS),
+            *description,
+            *(current.get(c) for c in VERSION_COLUMNS),
+        ]
         for number, source in enumerate(document["sources"] or [None], start=1):
             tail: list[object] = [None] * (1 + len(SOURCE_COLUMNS))
             if source is not None:
@@ -456,9 +555,11 @@ class _Counts:
 
 
 def _export_documents(
-    layout: _Layout, store: BlobStore, rows: tuple[list[Any], list[Any], list[Any]], *, trash: bool
+    layout: _Layout, store: BlobStore, rows: _Rows, *, trash: bool
 ) -> tuple[list[dict[str, Any]], _Counts]:
-    documents, versions, sources = rows
+    documents, versions, sources = rows.documents, rows.versions, rows.sources
+    file_titles = rows.file_titles
+    labels_of = _label_entries(rows)
     by_document: dict[str, list[sqlite3.Row]] = {}
     for version in versions:
         by_document.setdefault(version["document_id"], []).append(version)
@@ -519,6 +620,11 @@ def _export_documents(
                 "local_only": bool(document["local_only"]),
                 "created_at": _time(document["created_at"]),
                 "trashed_at": _time(document["trashed_at"]),
+                "title": _title_entry(
+                    own_sources,
+                    file_titles.get((document["id"], document["current_version_id"])),
+                ),
+                "labels": labels_of.get(document["id"], []),
                 "current_version_id": document["current_version_id"],
                 "versions": [_version_entry(v) for v in own_versions],
                 "sources": [_source_entry(s) for s in own_sources],
@@ -573,6 +679,7 @@ def run_export(
             "format_version": FORMAT_VERSION,
             "exported_at": now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "trash_included": include_trash,
+            "labels_complete": rows.labels_complete,
             "documents": entries,
         }
         text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
@@ -602,5 +709,6 @@ def run_export(
         renamed=counts.renamed,
         placed_higher=counts.placed_higher,
         leftovers=leftovers,
+        labels_complete=rows.labels_complete,
         private=private,
     )

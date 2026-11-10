@@ -526,3 +526,19 @@ def test_the_detail_shows_labels_and_a_title(client: TestClient, app: Any, tmp_p
     assert body["title"] is None
     assert body["labels"] == []
     assert get_document(app.state.engine, untitled) is not None
+
+
+def test_the_files_own_title_comes_first_and_a_value_out_of_shape_is_passed_over() -> None:
+    from vault.db.fields import FILE_PROPERTIES
+    from vault.db.schema import MAX_FIELD_CHARS
+    from vault.ingest.path_metadata import FILENAME, resolved_title
+
+    assert resolved_title("b_notes.txt", "Stated") == ("Stated", FILE_PROPERTIES)
+    assert resolved_title("b_notes.txt", "x" * MAX_FIELD_CHARS) == (
+        "x" * MAX_FIELD_CHARS,
+        FILE_PROPERTIES,
+    )
+    for bad in (None, "", "x" * (MAX_FIELD_CHARS + 1), 7, b"Stated"):
+        assert resolved_title("b_notes.txt", bad) == ("b notes", FILENAME)
+    assert resolved_title(None, None) is None
+    assert resolved_title(None, "Stated") == ("Stated", FILE_PROPERTIES)
