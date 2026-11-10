@@ -36,7 +36,9 @@ from vault.db.schema import document_versions, documents, pages
 EXTRACTOR: Final = re.compile(r"[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*-[1-9][0-9]{0,5}")
 ENCODING: Final = re.compile(r"[a-z][a-z0-9_-]{0,39}")
 MAX_EXTRACTOR_LENGTH: Final = 40
-HEADING_LEVELS: Final = range(1, 7)
+# Heading levels a page may store: 1 to 9, the range of the built-in DOCX styles `Heading 1` to
+# `Heading 9`, which covers Markdown's 1 to 6. A test ties every extractor's levels to this range.
+HEADING_LEVELS: Final = range(1, 10)
 
 
 class VersionNotFoundError(LookupError):
@@ -152,7 +154,7 @@ def _check_headings(page: PageText) -> None:
             msg = f"{where} is not a heading."
             raise ValueError(msg)
         if not is_int(heading.level) or heading.level not in HEADING_LEVELS:
-            msg = f"{where} has a level outside 1 to 6."
+            msg = f"{where} has a level outside 1 to 9."
             raise ValueError(msg)
         if not isinstance(heading.title, str) or not is_storable(heading.title):
             msg = f"{where} has a title that is not storable text."

@@ -174,7 +174,7 @@ def test_deleting_a_document_deletes_its_pages(engine: Engine, version_id: str) 
         ([PageText(1, "abc", [PageHeading(1, "a", 0, 1)])], "tuple"),  # type: ignore[arg-type]
         ([PageText(1, "abc", ("heading",))], "not a heading"),  # type: ignore[arg-type]
         ([PageText(1, "abc", (PageHeading(0, "a", 0, 1),))], "level"),
-        ([PageText(1, "abc", (PageHeading(7, "a", 0, 1),))], "level"),
+        ([PageText(1, "abc", (PageHeading(10, "a", 0, 1),))], "level"),
         ([PageText(1, "abc", (PageHeading(True, "a", 0, 1),))], "level"),
         ([PageText(1, "abc", (PageHeading(1, "a\x00", 0, 1),))], "title"),
         ([PageText(1, "abc", (PageHeading(1, None, 0, 1),))], "title"),  # type: ignore[arg-type]
@@ -275,7 +275,7 @@ def test_no_error_quotes_the_text(engine: Engine, version_id: str) -> None:
     bad = [
         [PageText(1, f"{CANARY}\x00")],
         [PageText(1, CANARY, (PageHeading(1, CANARY, 0, len(CANARY) + 1),))],
-        [PageText(1, CANARY, (PageHeading(9, CANARY, 0, 1),))],
+        [PageText(1, CANARY, (PageHeading(10, CANARY, 0, 1),))],
     ]
     for pages_in in bad:
         with pytest.raises(ValueError, match=r"[Pp]age 1") as caught:

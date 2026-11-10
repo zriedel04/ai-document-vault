@@ -31,7 +31,7 @@ from tests.unit.test_documents_api import Library
 from vault.core.config import Settings
 from vault.db import ids
 from vault.db.engine import read_snapshot
-from vault.db.pages import PageHeading, PageText, read_pages
+from vault.db.pages import HEADING_LEVELS, PageHeading, PageText, read_pages
 from vault.db.schema import blobs, document_versions, documents, jobs
 from vault.ingest import extract_stage
 from vault.ingest.chunk_stage import CHUNK_STAGE
@@ -203,6 +203,29 @@ def test_a_docx_file_is_extracted_too(library: Library, engine: Engine, store: B
     assert stored.pages == (
         PageText(1, "Week 1\n\nRead chapter one.", (PageHeading(1, "Week 1", 0, 6),)),
     )
+
+
+def test_docx_headings_at_every_built_in_level_are_stored(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    # Heading 7 to 9 are valid DOCX styles; storage must accept every level the extractor emits.
+    document = docx.Document()
+    for level in range(1, 10):
+        document.add_heading(f"Level {level}", level=level)
+    out = io.BytesIO()
+    document.save(out)
+    document_id, _ = add(library, "levels.docx", out.getvalue())
+    queue, job = claimed(engine, document_id)
+    assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert [h.level for h in stored.pages[0].headings] == list(range(1, 10))
+
+
+def test_every_heading_level_an_extractor_can_emit_can_be_stored() -> None:
+    docx_levels = set(docx_extractor._HEADING_LEVELS.values())
+    markdown_levels = set(range(1, 7))  # `#` to `######`, the CommonMark range (ADR 0018)
+    assert docx_levels | markdown_levels <= set(HEADING_LEVELS)
 
 
 def test_each_extractor_is_an_entry_point_with_the_version_its_extractor_writes() -> None:
@@ -490,7 +513,7 @@ TEXT_PAGE = Page(1, "Week 1\n", (Heading(1, "Week 1", 0, 6),))
         Extraction("text-1", (), "utf-8"),  # no page
         Extraction("text-1", (Page(2, "x"),), "utf-8"),  # not numbered from 1
         Extraction("text-1", (Page(1, "x", (Heading(1, "x", 0, 9),)),), "utf-8"),
-        Extraction("text-1", (Page(1, "x", (Heading(7, "x", 0, 1),)),), "utf-8"),
+        Extraction("text-1", (Page(1, "x", (Heading(10, "x", 0, 1),)),), "utf-8"),
         Extraction("text-1", (Page(1, "a\x00b"),), "utf-8"),
     ],
 )
