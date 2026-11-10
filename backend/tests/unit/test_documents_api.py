@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, event, func, select, update
 
 from vault.api.documents import (
+    SERVED_TYPES,
     JobStatus,
     LabelKind,
     LabelSource,
@@ -37,10 +38,12 @@ from vault.db.schema import (
     LABEL_STATUSES,
     TRASHED,
     VERSION_ORIGINS,
+    blobs,
     documents,
     import_sources,
 )
 from vault.ingest.importer import Importer, ImportRequest, Outcome
+from vault.ingest.validate import MIME_TYPES
 from vault.jobs.queue import JobQueue
 from vault.main import create_app
 
@@ -453,6 +456,62 @@ def test_a_utf16_text_is_not_labelled_utf8(client: TestClient, library: Library)
     response = client.get(f"{URL}/{result.document_id}/file")
     assert response.content == data
     assert response.headers["content-type"] == "text/plain"
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(24))
+JPEG = b"\xff\xd8\xff\xe0" + bytes(range(24))
+
+
+def import_bytes(library: Library, name: str, data: bytes) -> str:
+    path = library.folder / f"incoming-{ids.new_ulid()}{Path(name).suffix}"
+    path.write_bytes(data)
+    result = library.importer.import_file(
+        ImportRequest(path=path, original_filename=name, method="upload", batch_id=ids.new_ulid())
+    )
+    assert result.document_id is not None
+    return result.document_id
+
+
+@pytest.mark.parametrize(
+    ("name", "data", "mime"),
+    [
+        ("scan.png", PNG, "image/png"),
+        ("photo.jpg", JPEG, "image/jpeg"),
+        ("photo.jpeg", JPEG, "image/jpeg"),
+    ],
+)
+def test_an_image_is_served_with_its_image_type_and_nosniff(
+    client: TestClient, library: Library, name: str, data: bytes, mime: str
+) -> None:
+    response = client.get(f"{URL}/{import_bytes(library, name, data)}/file")
+    assert response.content == data
+    assert response.headers["content-type"] == mime
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-disposition"].startswith("attachment;")
+
+
+@pytest.mark.parametrize(
+    "stored", ["text/html", "image/svg+xml", "application/xhtml+xml", "text/xml", "image/png+x"]
+)
+def test_a_stored_type_the_importer_never_gives_is_served_as_octet_stream(
+    client: TestClient, library: Library, stored: str
+) -> None:
+    document_id = import_bytes(library, "scan.png", PNG)
+    with library.engine.begin() as connection:
+        connection.execute(update(blobs).values(mime=stored))
+    response = client.get(f"{URL}/{document_id}/file")
+    assert response.content == PNG
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_every_type_the_importer_gives_is_served_as_it_is() -> None:
+    assert set(MIME_TYPES.values()) == SERVED_TYPES
+    # Nothing a browser would render as a page or run scripts in (HTML, SVG, any XML document).
+    for mime in SERVED_TYPES:
+        assert "html" not in mime, mime
+        assert "svg" not in mime, mime
+        assert not mime.endswith(("/xml", "+xml")), mime
 
 
 @pytest.mark.parametrize(
