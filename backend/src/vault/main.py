@@ -20,7 +20,8 @@ from vault.db.migrate import upgrade_to_latest
 from vault.ingest import chunk_stage
 from vault.ingest.importer import Importer
 from vault.ingest.orphans import sweep_orphans
-from vault.jobs.queue import JobQueue
+from vault.ingest.path_metadata import label_pending_sources
+from vault.jobs.queue import JobQueue, utc_now
 from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
@@ -40,8 +41,9 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     With ``vault.path`` set, the vault folder is validated and created, the install's token is read
     (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
     every blob is made read-only again), the database is migrated, blobs that no database row uses
-    are moved to ``blobs/orphans/`` and jobs that a killed process left running are queued again,
-    all before the first request. The worker pool (``vault.jobs.worker``) starts with the server
+    are moved to ``blobs/orphans/``, jobs that a killed process left running are queued again and
+    import sources recorded before folder labels existed get their labels (once), all before the
+    first request. The worker pool (``vault.jobs.worker``) starts with the server
     and is stopped when it shuts down. A bad vault folder (inside a Git repository, say) or a
     damaged blob store (the temporary folder is a link) stops the start-up.
     Without a vault (demo mode, tests) there is no database and the token is random for this
@@ -84,6 +86,15 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             failed=metric(orphans.failed),
             strays=metric(orphans.strays),
         )
+        # Before any import can run: sources recorded before folder labels existed get theirs.
+        backfill = label_pending_sources(engine, utc_now())
+        if backfill is not None:
+            log_event(
+                logger,
+                "labels.backfilled",
+                added=metric(backfill.added),
+                skipped=metric(backfill.skipped),
+            )
         importer = Importer(engine, blobs)
         # Only the chunk stage has a handler so far; jobs of the others wait in the queue.
         workers = WorkerPool(
