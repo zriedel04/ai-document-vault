@@ -7,7 +7,9 @@ metadata of every package installed in the current environment, so run it with t
 interpreter (`uv run python ../scripts/check_python_licenses.py` from `backend/`).
 
 A package passes if its SPDX expression (`License-Expression`), else its licence classifiers, else a
-short `License` field names only allowed licences. A package whose licence cannot be read fails: it
+short `License` field names only allowed licences. A `License` field written in words the check
+cannot parse is read through TRANSLATED, for the one package and exact value listed there, as the
+SPDX expression it means, which must then pass like any other. A package whose licence cannot be read fails: it
 is never assumed to be fine. A package reviewed case by case is listed in REVIEWED below with the
 licence it was reviewed under and why it is acceptable; the exception stops applying if the
 package's licence changes. `--strict` ignores REVIEWED and is used on the runtime-only environment,
@@ -84,6 +86,25 @@ REVIEWED: dict[str, tuple[str, str]] = {
         "MIT-CMU (the HPND family) is a permissive licence that only asks for the copyright and "
         "permission notice to be kept. It is not yet on the allowed list. Pillow is used by the "
         "demo corpus generator in demo/generate, which is a development tool that is not shipped.",
+    ),
+}
+
+# Free-text `License` fields that name allowed licences in words the check cannot parse, each tied
+# to one package and translated to the SPDX expression it means. Key: normalised package name.
+# Value: the field exactly as the package writes it, the expression, and the Accepted ADR that
+# reviewed the package. Unlike REVIEWED this is not an exception: the expression must still pass
+# the allowed list, so it holds under --strict too. A package that writes any other value, or
+# gains an expression or licence classifiers (which win over the field), is judged by those.
+TRANSLATED: dict[str, tuple[str, str, str]] = {
+    "pypdfium2": (
+        "BSD-3-Clause, Apache-2.0, dependency licenses",
+        "Apache-2.0 OR BSD-3-Clause",
+        "ADR 0012 accepts pypdfium2 for PDF text (Apache-2.0 or BSD-3-Clause). The licences of "
+        "the PDFium build it bundles are shipped as files beside it and were read for it: PDFium "
+        "(BSD-3-Clause), FreeType (FTL), ICU (Unicode), libjpeg-turbo (IJG, BSD-3-Clause), "
+        "libpng, zlib, lcms (MIT), OpenJPEG (BSD-2-Clause), Abseil (Apache-2.0), LLVM libc "
+        "(Apache-2.0 WITH LLVM-exception), fast_float, simdutf and AGG, all permissive; the GPL "
+        "text in ICU's file covers build scripts (autoconf exceptions), not the library.",
     ),
 }
 
@@ -192,9 +213,21 @@ def licence_source(package: Package) -> tuple[str, ...]:
     return ()
 
 
+def translated(package: Package) -> str | None:
+    """The SPDX expression TRANSLATED gives this package, if the field is its licence source (no
+    expression, no licence classifiers) and is exactly the field listed for it."""
+    entry = TRANSLATED.get(normalise(package.name))
+    if entry is None or package.expression or package.classifiers or package.field != entry[0]:
+        return None
+    return entry[1]
+
+
 def package_allowed(package: Package) -> bool:
     if package.expression:
         return expression_allowed(package.expression)
+    expression = translated(package)
+    if expression is not None:
+        return expression_allowed(expression)
     source = licence_source(package)
     return bool(source) and all(name_allowed(value) for value in source)
 

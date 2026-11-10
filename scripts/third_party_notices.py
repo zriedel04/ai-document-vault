@@ -37,10 +37,17 @@ licence text needs no regeneration.
 
 `check python` runs on Linux and on Windows, where the app runs, because a dependency can pull in
 a package on one platform only (a `sys_platform == 'win32'` marker) or ship other licence files in
-its Windows wheel. None does today. If one ever does, no single file can pass both checks, since
-each compares the exact set of packages it sees: CI then stays red until this script learns
-platform-specific entries (a platform column that each check filters on, and a `write` that merges
-the two lists). That change belongs in the same PR as the dependency that needs it.
+its Windows wheel. One does: pypdfium2's wheels ship the licences of the libraries built into
+PDFium under a folder named for the platform (`data/linux_x64/BUILD_LICENSES/`,
+`data/windows_x64/BUILD_LICENSES/`), with the same files and the same texts in each (checked for
+5.14.0, apart from line endings, which `tidy` removes). PLATFORM_FOLDERS names such a folder per
+package, and its label says `<platform>` in its place, so one file passes both checks. A wheel
+whose platform folders hold different files or texts still fails one of the two checks, as it
+should. A dependency that pulls in a package on one platform only, or ships other texts there,
+still has no single file that passes both checks, since each compares the exact set of packages it
+sees: CI then stays red until this script learns platform-specific entries (a platform column that
+each check filters on, and a `write` that merges the two lists). That change belongs in the same PR
+as the dependency that needs it.
 
 Standard library only.
 """
@@ -56,7 +63,7 @@ from dataclasses import dataclass, replace
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
 
-from check_python_licenses import licence_source, normalise
+from check_python_licenses import licence_source, normalise, translated
 from check_python_licenses import read as read_distribution
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,7 +89,9 @@ LICENCE_FOLDER = re.compile(
 TEXT_SUFFIXES = frozenset({"txt", "text", "md", "markdown", "rst", "html", "htm"})
 # A lower-case part that names the component the text belongs to, reviewed one by one: markdown-it-py
 # ships the licence of the JavaScript markdown-it it ports as `licenses/LICENSE.markdown-it`.
-COMPONENT_SUFFIXES = frozenset({"markdown-it"})
+# libjpeg-turbo's IJG licence comes as `README.ijg`, which pypdfium2 ships as `libjpeg_turbo.ijg`
+# beside the libraries built into PDFium.
+COMPONENT_SUFFIXES = frozenset({"markdown-it", "ijg"})
 OTHER_SUFFIXES = frozenset(
     {
         *("js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "map", "css", "scss"),
@@ -233,20 +242,34 @@ def npm_notices(lockfile: Path = LOCKFILE, base: Path = NODE_MODULES) -> list[No
 
 
 def python_licence(distribution: Distribution) -> str:
+    """The licence the licence check judges: the SPDX expression, else the expression TRANSLATED
+    gives for the package's exact licence field, else the classifiers or the field."""
     package = read_distribution(distribution)
     if package.expression:
         return package.expression
+    if (expression := translated(package)) is not None:
+        return expression
     return " AND ".join(licence_source(package)) or "no licence found"
 
 
-def python_label(path: str) -> str:
+# Packages whose wheels put licence files under a folder named for the platform (see the module
+# notes), reviewed one by one: the normalised package name and the folder inside its metadata folder.
+PLATFORM_FOLDERS: dict[str, re.Pattern[str]] = {
+    "pypdfium2": re.compile(r"(?<=^licenses/data/)[a-z0-9]+_[a-z0-9]+(?=/BUILD_LICENSES/)"),
+}
+
+
+def python_label(path: str, name: str = "") -> str:
     """A licence file's label: its path inside the metadata folder (``licenses/LICENSE``), or,
     for a file the package installs elsewhere (a vendored library's ``pkg/_vendor/LICENSE``), its
     installed path. The metadata folder's own name holds the version, which would make every
-    version bump look like a changed notice."""
-    if ".dist-info/" in path:
-        return path.split(".dist-info/", 1)[1]
-    return path
+    version bump look like a changed notice. For a package in PLATFORM_FOLDERS (``name``), the
+    platform folder's name becomes ``<platform>``, so the label is the same on every platform."""
+    if ".dist-info/" not in path:
+        return path
+    label = path.split(".dist-info/", 1)[1]
+    folder = PLATFORM_FOLDERS.get(normalise(name))
+    return folder.sub("<platform>", label, count=1) if folder else label
 
 
 def read_installed(distribution: Distribution, path: str) -> str | None:
@@ -269,7 +292,7 @@ def python_notices(
         if normalise(name) in skipped:
             continue
         texts = tuple(
-            (python_label(path), text)
+            (python_label(path, name), text)
             for path in sorted(str(f) for f in distribution.files or [])
             if is_licence_file(Path(path).as_posix())
             and (text := read_installed(distribution, path)) is not None
