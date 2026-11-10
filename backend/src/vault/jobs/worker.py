@@ -15,13 +15,17 @@ stage from the queue, runs the stage's handler, and reports the outcome:
   exception is caught, ``BaseException`` too: an exception that left the thread would end it (the
   stage would quietly lose a worker) and Python's thread hook would print its message, which can
   quote document text;
+- the handler returns ``Completion.DEFERRED``: it gave the job back for later itself
+  (``JobQueue.defer``), because the setup failed and not the document;
 - the queue says the worker no longer holds the job (``JobLostError``: a retry or start-up
   recovery took it back): the outcome is dropped, since the job belongs to someone else now.
 
 A stage with no handler is never claimed: its jobs wait in the queue until a later version
-registers one. A thread with nothing to do sleeps until ``wake()`` (call it after queueing work)
-or until ``idle_seconds`` have passed, which is how a job whose back-off has ended is found; it
-never spins on the database.
+registers one. A stage registered with ``extensions`` claims only the jobs whose blob has one of
+them (``JobQueue.claim``); its jobs for other types wait the same way. A job that ends done wakes
+the idle threads, since its handler may have queued the next stage. A thread with nothing to do
+sleeps until ``wake()`` (call it after queueing work) or until ``idle_seconds`` have passed, which
+is how a job whose back-off has ended is found; it never spins on the database.
 
 ``pause()`` stops threads from claiming new jobs; jobs already running finish. ``resume()``
 undoes it. ``stop()`` asks every thread to end after its current job and waits for them. A claim
@@ -82,6 +86,7 @@ class Stage(StrEnum):
 
 class Outcome(StrEnum):
     DONE = "done"
+    DEFERRED = "deferred"
     RETRY = "retry"
     FAILED = "failed"
     LOST = "lost"
@@ -96,11 +101,13 @@ class WorkerPool:
         handlers: Mapping[str, Handler],
         limits: Mapping[str, int] = DEFAULT_LIMITS,
         *,
+        extensions: Mapping[str, frozenset[str]] | None = None,
         idle_seconds: float = IDLE_SECONDS,
     ) -> None:
+        extensions = extensions or {}
         unknown = set(handlers) - set(JOB_STAGES)
-        if unknown:
-            msg = "handlers may only be registered for the known job stages"
+        if unknown or not set(extensions) <= set(handlers):
+            msg = "handlers and extensions may only be registered for the known job stages"
             raise ValueError(msg)
         for stage in handlers:
             limit = limits.get(stage)
@@ -113,6 +120,7 @@ class WorkerPool:
         self._queue = queue
         self._handlers = dict(handlers)
         self._limits = {stage: limits[stage] for stage in handlers}
+        self._extensions = dict(extensions)
         self._idle_seconds = idle_seconds
         lock = threading.Lock()
         self._condition = threading.Condition(lock)
@@ -203,6 +211,8 @@ class WorkerPool:
                 continue
             outcome = self._work(handler, job, worker_id)
             log_event(logger, "workers.job_ended", stage=Stage(stage), outcome=outcome)
+            if outcome is Outcome.DONE:
+                self.wake()  # the handler may have queued the next stage
 
     def _claim(self, stage: str, worker_id: str) -> Job | None:
         """Claim a job, counted in ``_claiming`` until it is kept or given back. Keeping it is
@@ -212,7 +222,7 @@ class WorkerPool:
         kept = False
         try:
             try:
-                job = self._queue.claim(worker_id, (stage,))
+                job = self._queue.claim(worker_id, (stage,), extensions=self._extensions.get(stage))
             except Exception:  # the database is busy or gone: try again after a pause
                 log_event(logger, "workers.claim_failed", level=logging.WARNING, stage=Stage(stage))
                 return None
@@ -249,6 +259,8 @@ class WorkerPool:
             return self._report_failure(job, worker_id, error)
         if completion is Completion.RECORDED:
             return Outcome.DONE
+        if completion is Completion.DEFERRED:
+            return Outcome.DEFERRED
         if completion is Completion.ATTEMPT_QUEUED:
             return Outcome.RETRY
         if completion is Completion.ATTEMPT_FAILED:

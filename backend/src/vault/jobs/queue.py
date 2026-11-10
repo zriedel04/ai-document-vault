@@ -16,6 +16,9 @@ A job is one processing stage (``extract``, ``ocr``, ...) for one document. Its 
   unless the job is no longer its document's current work for its stage (``current_work``).
   Both act only for the worker that holds the job, and say so (``JobLostError``) if it no longer
   does.
+- ``defer`` gives a claimed job back after a delay, without using its attempt, for a failure of
+  the setup rather than of the document (the extraction stage's sandbox cannot start): the job
+  keeps the error's class name and the document is never failed by it.
 - ``release`` gives a claimed job back unstarted, with the attempt it counted returned (the
   worker pool calls it when it was paused or stopped while the claim was on its way).
 - ``retry`` queues a failed job again with fresh attempts. ``retry_document`` does it for every
@@ -32,7 +35,7 @@ the first stage that has work to do.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -57,7 +60,7 @@ from sqlalchemy.exc import IntegrityError
 
 from vault.db import ids
 from vault.db.engine import write_transaction
-from vault.db.schema import JOB_STAGES, TRASHED, document_versions, documents, jobs
+from vault.db.schema import JOB_STAGES, TRASHED, blobs, document_versions, documents, jobs
 
 DEFAULT_MAX_ATTEMPTS: Final = 3
 BACKOFF_BASE: Final = timedelta(seconds=30)
@@ -150,6 +153,7 @@ class Completion(StrEnum):
     """
 
     RECORDED = "recorded"  # the job is done
+    DEFERRED = "deferred"  # the setup failed, not the document: ``defer`` queued it again
     ATTEMPT_QUEUED = "queued"  # the attempt failed; the job runs again after its back-off
     ATTEMPT_FAILED = "failed"  # the attempt failed and was the last: the job is failed
 
@@ -322,18 +326,41 @@ class JobQueue:
             job_id = own.execute(existing).scalar_one()
         return job_id
 
-    def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
+    def claim(
+        self,
+        worker_id: str,
+        stages: Iterable[str],
+        *,
+        extensions: Collection[str] | None = None,
+    ) -> Job | None:
         """Give the worker the most urgent ready job of these stages, or None if there is none.
 
         Most urgent is the highest priority, then the one that has been ready longest, then the
         oldest. The attempt is counted here, so a job whose worker dies still uses up an attempt.
+
+        With ``extensions``, a job that is its document's current input (``current_input``) and
+        whose blob is stored under another extension is not claimed: it waits in the queue, as a
+        stage with no handler does, until a handler for its type is registered (the extraction
+        stage has no PDF extractor yet). A job for an input the document no longer needs is
+        claimed whatever its type, so that its handler ends it.
         """
         _check_worker(worker_id)
         chosen = _check_stages(stages)
         now = self._clock()
+        ready = and_(jobs.c.status == "queued", jobs.c.stage.in_(chosen), jobs.c.run_after <= now)
+        if extensions is not None:
+            if isinstance(extensions, str) or not all(isinstance(e, str) for e in extensions):
+                msg = "extensions is a collection of extensions, not one string"
+                raise TypeError(msg)
+            other_type = exists().where(
+                blobs.c.sha256 == jobs.c.input_hash, blobs.c.ext.not_in(sorted(extensions))
+            )
+            # current_input is NULL for a document that is gone: coalesce, never negate it.
+            stale = func.coalesce(current_input(jobs), "") != jobs.c.input_hash
+            ready = and_(ready, or_(~other_type, stale))
         candidate = (
             select(jobs.c.id)
-            .where(jobs.c.status == "queued", jobs.c.stage.in_(chosen), jobs.c.run_after <= now)
+            .where(ready)
             .order_by(jobs.c.priority.desc(), jobs.c.run_after, jobs.c.id)
             .limit(1)
             .scalar_subquery()
@@ -391,6 +418,32 @@ class JobQueue:
         else:
             with self._engine.begin() as own:
                 result = own.execute(statement)
+        if result.rowcount != 1:
+            msg = "the worker no longer holds this job"
+            raise JobLostError(msg)
+
+    def defer(self, job_id: str, worker_id: str, error: BaseException, delay: timedelta) -> None:
+        """Queue the worker's job again after ``delay``, with the attempt ``claim`` counted given
+        back and ``error``'s class name kept: the attempt failed for a reason outside the
+        document (the setup), so it neither uses an attempt nor fails the document. It runs again
+        as long as the setup keeps failing; the class name shows why it waits."""
+        _check_worker(worker_id)
+        if delay <= timedelta(0):
+            msg = "a deferred job waits a positive delay"
+            raise ValueError(msg)
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                update(jobs)
+                .where(self._held(job_id, worker_id))
+                .values(
+                    status="queued",
+                    locked_by=None,
+                    locked_at=None,
+                    attempts=jobs.c.attempts - 1,
+                    run_after=self._clock() + delay,
+                    last_error=error_name(error),
+                )
+            )
         if result.rowcount != 1:
             msg = "the worker no longer holds this job"
             raise JobLostError(msg)
