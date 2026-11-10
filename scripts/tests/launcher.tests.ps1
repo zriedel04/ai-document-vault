@@ -790,6 +790,88 @@ finally {
     Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- restore: both folders reach the backend in the environment, never on its command line -----
+$message = Get-ThrownMessage { Invoke-Restore '' 'D:\AIVault' }
+Assert-That 'restore without a snapshot says how to name one' (($null -ne $message) -and ($message -match '-From'))
+$message = Get-ThrownMessage { Invoke-Restore 'E:\VaultBackups' '' }
+Assert-That 'restore without a target says how to name one' (($null -ne $message) -and ($message -match '-To'))
+# The same in-process stand-in as for backup, recording both variables.
+$restoreDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vault-restore-tests-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $restoreDir
+$script:BackendDir = $restoreDir
+$script:restoreArguments = $null
+$script:restoreSource = $null
+$script:restoreTarget = $null
+$script:restoreFolder = $null
+$script:restoreCode = 0
+$restoreStandIn = {
+    $script:restoreArguments = $args -join ' '
+    $script:restoreSource = [Environment]::GetEnvironmentVariable('VAULT_RESTORE_FROM', 'Process')
+    $script:restoreTarget = [Environment]::GetEnvironmentVariable('VAULT_RESTORE_TO', 'Process')
+    $script:restoreFolder = (Get-Location).Path
+    Write-Output 'line from the stand-in'
+    $global:LASTEXITCODE = $script:restoreCode
+}
+function Invoke-RestoreLines {
+    <# Run restore with the stand-in and return its printed lines, or $null if it threw. #>
+    param([string]$Source, [string]$Target)
+    try {
+        return , @(Invoke-Restore $Source $Target -Python $restoreStandIn 6>&1 | ForEach-Object { [string]$_ })
+    }
+    catch {
+        Write-Host "     (restore said: $($_.Exception.Message))"
+        return $null
+    }
+}
+try {
+    $relativeBase = Join-Path $restoreDir 'here'
+    $null = New-Item -ItemType Directory -Path $relativeBase
+    Push-Location -LiteralPath $relativeBase
+    try {
+        $lines = Invoke-RestoreLines 'my backups' 'new vault'
+    }
+    finally {
+        Pop-Location
+    }
+    Assert-That 'restore passes when the backend succeeds' ($null -ne $lines)
+    Assert-That 'a relative snapshot folder is taken from the current location' `
+        ($script:restoreSource -ceq (Join-Path $relativeBase 'my backups'))
+    Assert-That 'a relative target folder is taken from the current location' `
+        ($script:restoreTarget -ceq (Join-Path $relativeBase 'new vault'))
+    Assert-That 'neither folder is on the backend command line' ($script:restoreArguments -ceq '-m vault.restore')
+    Assert-That 'restore runs in the backend folder' ($script:restoreFolder -eq $restoreDir)
+    Assert-That "the backend's lines are passed on by restore" (($null -ne $lines) -and ($lines -contains 'line from the stand-in'))
+    $startedIn = (Get-Location).Path
+    # A space, a letter outside ASCII (built from its code point: this file is read in the ANSI
+    # code page by Windows PowerShell 5.1) and a trailing backslash, for each folder.
+    $spacedSource = Join-Path $restoreDir ('My Backups Jos' + [char]0x00E9)
+    $spacedTarget = Join-Path $restoreDir 'New Vault'
+    [Environment]::SetEnvironmentVariable('VAULT_RESTORE_TO', 'kept from before', 'Process')
+    $lines = Invoke-RestoreLines ($spacedSource + '\') ($spacedTarget + '\')
+    Assert-That 'a snapshot folder with a space, an accent and a trailing backslash arrives intact' `
+        (($script:restoreSource -is [string]) -and ($script:restoreSource -match ('\A' + [regex]::Escape($spacedSource) + '\\?\z')))
+    Assert-That 'a target folder with a space and a trailing backslash arrives intact' `
+        (($script:restoreTarget -is [string]) -and ($script:restoreTarget -match ('\A' + [regex]::Escape($spacedTarget) + '\\?\z')))
+    Assert-That 'the snapshot folder is taken out of the environment afterwards' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_RESTORE_FROM', 'Process'))
+    Assert-That 'a value the variable had before is put back' `
+        ([Environment]::GetEnvironmentVariable('VAULT_RESTORE_TO', 'Process') -ceq 'kept from before')
+    [Environment]::SetEnvironmentVariable('VAULT_RESTORE_TO', [NullString]::Value, 'Process')
+    Assert-That 'restore returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+    $script:restoreCode = 1
+    $message = Get-ThrownMessage { Invoke-Restore (Join-Path $restoreDir 'VaultBackups') (Join-Path $restoreDir 'NewVault') -Python $restoreStandIn 6>&1 }
+    Assert-That 'a restore that fails stops with its exit code' (($null -ne $message) -and ($message -match 'exit code 1'))
+    Assert-That 'and repeats neither folder' `
+        (($null -ne $message) -and (-not $message.Contains('VaultBackups')) -and (-not $message.Contains('NewVault')))
+    $leftFrom = [Environment]::GetEnvironmentVariable('VAULT_RESTORE_FROM', 'Process')
+    $leftTo = [Environment]::GetEnvironmentVariable('VAULT_RESTORE_TO', 'Process')
+    Assert-That 'and takes both folders out of the environment' (($null -eq $leftFrom) -and ($null -eq $leftTo))
+    Assert-That 'and still returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+}
+finally {
+    Remove-Item -LiteralPath $restoreDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- how the script is called ------------------------------------------------------------------
 $shell = (Get-Process -Id $PID).Path
 $null = & $shell -NoProfile -File $launcher
@@ -806,6 +888,11 @@ $null = & $shell -NoProfile -File $launcher 'backup' 2>&1
 $backupExit = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 Assert-That 'backup without -To is refused' ($backupExit -eq 1)
+$ErrorActionPreference = 'Continue'
+$null = & $shell -NoProfile -File $launcher 'restore' -To 'D:\AIVault' 2>&1
+$restoreExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Assert-That 'restore without -From is refused' ($restoreExit -eq 1)
 
 # --- the token is never printed -----------------------------------------------------------------
 $printing = Select-String -LiteralPath $launcher -Pattern '^\s*(Write-Host|Write-Output|Write-Warning|Write-Verbose|Write-Information|\[Console\])' |
