@@ -36,6 +36,8 @@ const DETAIL: DocumentDetail = {
   version_origin: "import",
   import_sources: [],
   jobs: [],
+  labels: [],
+  title: { value: "Notes", source: "filename" },
 };
 
 function pagesOf(pages: DocumentPage[], overrides: Partial<DocumentPages> = {}): DocumentPages {
