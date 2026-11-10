@@ -17,6 +17,7 @@ from vault.ingest.validate import (
     Reason,
     _directory_claims,
     _directory_size_ok,
+    check_docx,
     sniff,
     validate_file,
 )
@@ -257,6 +258,31 @@ class TestZipLimits:
             index = data.find(b"PK\x01\x02", index + 1)
         path.write_bytes(bytes(data))
         assert validate_file(path).reason is Reason.ENCRYPTED_ARCHIVE
+
+    @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+    def test_compression_other_than_stored_or_deflated(self, tmp_path: Path, method: int) -> None:
+        # zipfile decompresses these a whole read at a time, with no bound on the output.
+        path = tmp_path / "a.docx"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", b"<Types/>")
+            archive.writestr("word/document.xml", b"<w:document/>", compress_type=method)
+        assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+        assert check_docx(path.read_bytes()) is Reason.UNSAFE_ARCHIVE
+
+    def test_stored_members_are_fine(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.docx"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("[Content_Types].xml", b"<Types/>")
+            archive.writestr("word/document.xml", b"<w:document/>")
+        assert validate_file(path).ok
+
+    def test_a_name_used_twice(self, tmp_path: Path) -> None:
+        path = self.docx(tmp_path)
+        # zipfile would read only the last of the two members, which the limits judged apart.
+        with zipfile.ZipFile(path, "a") as archive, pytest.warns(UserWarning, match="Duplicate"):
+            archive.writestr("word/document.xml", b"<w:document/>")
+        assert validate_file(path).reason is Reason.UNSAFE_ARCHIVE
+        assert check_docx(path.read_bytes()) is Reason.UNSAFE_ARCHIVE
 
     def test_a_truncated_or_garbled_zip(self, tmp_path: Path) -> None:
         good = self.docx(tmp_path).read_bytes()

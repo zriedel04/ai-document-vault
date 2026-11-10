@@ -348,6 +348,267 @@ try {
         }
     }
 
+    # --- the launch id in the record -------------------------------------------------------------
+    $recordedLaunch = New-LaunchId
+    Write-Record $self $facts $recordedLaunch
+    Assert-That 'the record keeps the launch id the server was started with' `
+        ((Get-RunningServer).Launch -ceq $recordedLaunch)
+    Write-Record $self $facts
+    Assert-That 'a record without a launch id still finds the process, without one' `
+        (((Get-RunningServer).Process.Id -eq $PID) -and ($null -eq (Get-RunningServer).Launch))
+    $now = Get-StartStamp $self
+    foreach ($case in @(
+            @{ name = 'a short id'; value = '"abc"' },
+            @{ name = 'a number'; value = '12345' },
+            @{ name = 'an id with a trailing newline'; value = '"' + $recordedLaunch + '\n"' },
+            @{ name = 'null'; value = 'null' }
+        )) {
+        Set-Content -LiteralPath $script:RecordFile -Encoding ASCII -Value ('{"pid": ' + $PID + ', "started": ' + $now + ', "host": "127.0.0.1", "port": 8765, "vault": "C:\\v", "launch": ' + $case.value + '}')
+        $read = Get-RunningServer
+        Assert-That "a record with $($case.name) as launch id finds the process but no id" `
+            (($null -ne $read) -and ($null -eq $read.Launch))
+    }
+    Remove-Record
+
+    # --- stop: a clean shutdown first, the forced end only as the fallback ------------------------
+    # A stand-in for the server on a free port. GET /api/health answers $Health; POST /api/shutdown
+    # answers $Status and, with -Obey, ends $Process as a server that shuts down would. The first
+    # line and the headers of every request are kept, to see what was sent where.
+    function Start-StopServer {
+        param([string]$Health, [int]$Status = 202, [object]$Process, [switch]$Obey)
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $seen = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $shell = [powershell]::Create().AddScript({
+                param($listener, $health, $status, $process, $obey, $seen)
+                while ($true) {
+                    try { $client = $listener.AcceptTcpClient() } catch { return }
+                    try {
+                        $stream = $client.GetStream()
+                        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::ASCII)
+                        $lines = New-Object System.Collections.ArrayList
+                        while ($true) {
+                            $line = $reader.ReadLine()
+                            if ($null -eq $line -or $line -eq '') { break }
+                            $null = $lines.Add($line)
+                        }
+                        $null = $seen.Add(($lines -join "`n"))
+                        $first = if ($lines.Count -gt 0) { [string]$lines[0] } else { '' }
+                        $code = 404
+                        $body = '{"detail": "Not Found"}'
+                        if ($first.StartsWith('GET /api/health ')) { $code = 200; $body = $health }
+                        elseif ($first.StartsWith('POST /api/shutdown ')) { $code = $status; $body = '{"stopping": true}' }
+                        $content = [System.Text.Encoding]::UTF8.GetBytes($body)
+                        $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 $code X`r`nContent-Type: application/json`r`nContent-Length: $($content.Length)`r`nConnection: close`r`n`r`n")
+                        $stream.Write($head, 0, $head.Length)
+                        $stream.Write($content, 0, $content.Length)
+                        $stream.Flush()
+                        if ($obey -and $code -eq 202 -and -not $process.HasExited) { $process.Kill() }
+                    }
+                    catch { }
+                    finally { $client.Close() }
+                }
+            }).AddArgument($listener).AddArgument($Health).AddArgument($Status).AddArgument($Process).AddArgument([bool]$Obey).AddArgument($seen)
+        return [pscustomobject]@{
+            Listener = $listener
+            Shell    = $shell
+            Pending  = $shell.BeginInvoke()
+            Port     = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+            Seen     = $seen
+        }
+    }
+
+    # A vault folder whose name is not ASCII, with a token in it (built from code points, as above).
+    $stopVault = Join-Path $work ('vault-Jos' + [char]0x00E9 + '-' + [char]0x4E2D)
+    New-Item -ItemType Directory -Path $stopVault | Out-Null
+    $stopToken = New-LaunchId   # any value of the token's shape
+    [System.IO.File]::WriteAllText((Join-Path $stopVault 'local-token'), $stopToken + "`n", (New-Object System.Text.UTF8Encoding($false)))
+
+    function Invoke-StopCase {
+        <# Record $Process as the server on $Port with $Launch, run Stop-Server with a short wait and
+           return whether it was clean, what it printed and the message it threw. #>
+        param([object]$Process, [int]$Port, [string]$Launch, [string]$Vault = $stopVault, [double]$Seconds = 5)
+        Write-Record $Process ([pscustomobject]@{ host = '127.0.0.1'; port = $Port; vault = $Vault }) $Launch
+        $running = Get-RunningServer
+        $clean = $null
+        $thrown = $null
+        $printed = @()
+        try {
+            $printed = @(& { Stop-Server $running -Seconds $Seconds } 6>&1)
+        }
+        catch {
+            $thrown = $_.Exception.Message
+        }
+        $results = @($printed | Where-Object { $_ -is [bool] })
+        if ($results.Count -eq 1) { $clean = $results[0] }
+        $text = (@($printed | Where-Object { $_ -isnot [bool] } | ForEach-Object { [string]$_ }) -join "`n")
+        return [pscustomobject]@{ Clean = $clean; Text = $text; Thrown = $thrown }
+    }
+
+    # A server that shuts down when asked: a clean stop, and the token went with the request.
+    $server = New-Sleeper
+    $launchOk = New-LaunchId
+    $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}') -Process $server -Obey
+    try {
+        $case = Invoke-StopCase $server $fake.Port $launchOk
+        $requests = @($fake.Seen)
+    }
+    finally {
+        Stop-FakeServer $fake
+        if (-not $server.HasExited) { $server.Kill() }
+    }
+    Assert-That 'a server that shuts down when asked is a clean stop' ($case.Clean -eq $true)
+    Assert-That 'and nothing about a forced end is printed' ($case.Text -notmatch 'did not stop cleanly')
+    Assert-That 'and its record is removed once it has exited' (-not (Test-Path -LiteralPath $script:RecordFile))
+    Assert-That 'the identity is checked before the shutdown is asked' `
+        (($requests.Count -eq 2) -and ($requests[0] -match '\AGET /api/health ') -and ($requests[1] -match '\APOST /api/shutdown '))
+    Assert-That 'the shutdown request carries the token from a vault folder with non-ASCII letters' `
+        ($requests[1] -cmatch ('(?m)^Authorization: Bearer ' + [regex]::Escape($stopToken) + '\r?$'))
+    Assert-That "and the Origin of the server's own address" `
+        ($requests[1] -cmatch ('(?m)^Origin: http://127\.0\.0\.1:' + $fake.Port + '\r?$'))
+    Assert-That 'the health check does not carry the token' ($requests[0] -notmatch [regex]::Escape($stopToken))
+
+    # The server takes the request but does not exit: the forced end, said so.
+    $server = New-Sleeper
+    $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}') -Process $server
+    try {
+        $case = Invoke-StopCase $server $fake.Port $launchOk -Seconds 1
+    }
+    finally {
+        Stop-FakeServer $fake
+    }
+    Assert-That 'a server that ignores the request is ended' ($server.HasExited -and ($case.Clean -eq $false))
+    Assert-That 'and stop says it did not stop cleanly, and why' `
+        (($case.Text -match 'did not stop cleanly') -and ($case.Text -match 'did not exit within 1 seconds'))
+    Assert-That 'and its record is removed once it has been ended' (-not (Test-Path -LiteralPath $script:RecordFile))
+    Assert-That 'and nothing printed holds the token or the vault folder' `
+        ((-not $case.Text.Contains($stopToken)) -and (-not $case.Text.Contains($stopVault)))
+    if (-not $server.HasExited) { $server.Kill() }
+
+    # The request fails: refused by the server, or nothing answers on the address at all.
+    foreach ($status in 401, 403, 500, 503) {
+        $server = New-Sleeper
+        $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}') -Status $status -Process $server -Obey
+        try {
+            $case = Invoke-StopCase $server $fake.Port $launchOk
+        }
+        finally {
+            Stop-FakeServer $fake
+        }
+        Assert-That "a refused shutdown request (HTTP $status) falls back to ending the server" `
+            ($server.HasExited -and ($case.Clean -eq $false) -and ($case.Text -match "refused \(HTTP $status\)"))
+        Assert-That "and its record is removed (HTTP $status)" (-not (Test-Path -LiteralPath $script:RecordFile))
+        if (-not $server.HasExited) { $server.Kill() }
+    }
+    $server = New-Sleeper
+    $case = Invoke-StopCase $server $taken $launchOk   # nothing listens on $taken any more
+    Assert-That 'a server that does not answer on its address is ended' `
+        ($server.HasExited -and ($case.Clean -eq $false) -and ($case.Text -match 'does not answer'))
+    Assert-That 'and its record is removed' (-not (Test-Path -LiteralPath $script:RecordFile))
+    if (-not $server.HasExited) { $server.Kill() }
+
+    # Another program on the address: it never receives the token, and the recorded process is ended.
+    foreach ($health in @(
+            @{ name = 'another launch id'; body = '{"status": "ok", "launch": "' + (New-LaunchId) + '"}' },
+            @{ name = 'the id in another case'; body = '{"status": "ok", "launch": "' + $launchOk.ToUpperInvariant() + '"}' },
+            @{ name = 'no launch id'; body = '{"status": "ok", "launch": null}' },
+            @{ name = 'no launch field'; body = '{"status": "ok"}' },
+            @{ name = 'text that is not JSON'; body = 'hello' }
+        )) {
+        $server = New-Sleeper
+        $fake = Start-StopServer -Health $health.body -Process $server -Obey
+        try {
+            $case = Invoke-StopCase $server $fake.Port $launchOk
+            $requests = @($fake.Seen)
+        }
+        finally {
+            Stop-FakeServer $fake
+        }
+        Assert-That "an answer with $($health.name) is not asked to shut down" `
+            ((@($requests | Where-Object { $_ -match '\APOST ' }).Count -eq 0) -and (@($requests | Where-Object { $_.Contains($stopToken) }).Count -eq 0))
+        Assert-That "and the recorded server is ended instead ($($health.name))" `
+            ($server.HasExited -and ($case.Clean -eq $false) -and ($case.Text -match 'another program answers'))
+        if (-not $server.HasExited) { $server.Kill() }
+    }
+
+    # A record from an older launcher (no launch id) or a vault folder without its token: no
+    # request is made, and the server is ended.
+    $server = New-Sleeper
+    $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}') -Process $server -Obey
+    try {
+        $case = Invoke-StopCase $server $fake.Port ''
+        $requests = @($fake.Seen)
+    }
+    finally {
+        Stop-FakeServer $fake
+    }
+    Assert-That 'a record without a launch id makes no request' ($requests.Count -eq 0)
+    Assert-That 'and ends the server, saying why' `
+        ($server.HasExited -and ($case.Clean -eq $false) -and ($case.Text -match 'older launcher'))
+    if (-not $server.HasExited) { $server.Kill() }
+    $server = New-Sleeper
+    $emptyVault = Join-Path $work ('no-token-' + [char]0x00DF)
+    New-Item -ItemType Directory -Path $emptyVault | Out-Null
+    $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}') -Process $server -Obey
+    try {
+        $case = Invoke-StopCase $server $fake.Port $launchOk -Vault $emptyVault
+        $requests = @($fake.Seen)
+    }
+    finally {
+        Stop-FakeServer $fake
+    }
+    Assert-That 'a vault folder without its token makes no shutdown request' `
+        (@($requests | Where-Object { $_ -match '\APOST ' }).Count -eq 0)
+    Assert-That 'and ends the server, saying why without the folder' `
+        ($server.HasExited -and ($case.Clean -eq $false) -and ($case.Text -match 'token could not be read') -and (-not $case.Text.Contains($emptyVault)))
+    if (-not $server.HasExited) { $server.Kill() }
+
+    # Neither way works: the request fails and the process refuses to end. The record is kept.
+    $stubbornServer = [pscustomobject]@{ Id = 2147480000; HasExited = $false; StartTime = (Get-Date) }
+    $stubbornServer | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+    Write-Record $self $facts
+    $running = [pscustomobject]@{ Process = $stubbornServer; Host = '127.0.0.1'; Port = $taken; Vault = $stopVault; Launch = $launchOk }
+    $message = Get-ThrownMessage { Stop-Server $running -Seconds 1 6>$null }
+    Assert-That 'a server that cannot be asked or ended is reported' (($null -ne $message) -and ($message -match 'could not be stopped'))
+    Assert-That 'and the record is kept, so stop can be tried again' (Test-Path -LiteralPath $script:RecordFile)
+    # It takes the request, says it exited, but still runs: the record is not removed on its word.
+    $liar = [pscustomobject]@{ Id = 2147480000; HasExited = $false; StartTime = (Get-Date) }
+    $liar | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+    $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}')
+    try {
+        $running = [pscustomobject]@{ Process = $liar; Host = '127.0.0.1'; Port = $fake.Port; Vault = $stopVault; Launch = $launchOk }
+        $message = Get-ThrownMessage { Stop-Server $running -Seconds 1 6>$null }
+    }
+    finally {
+        Stop-FakeServer $fake
+    }
+    Assert-That 'a process that has not exited is not taken for stopped' (($null -ne $message) -and ($message -match 'could not be stopped'))
+    Assert-That 'and its record is kept' (Test-Path -LiteralPath $script:RecordFile)
+    Remove-Record
+
+    # A stale record: stop says the server is not running and removes it, sending nothing.
+    Write-Record $self ([pscustomobject]@{ host = '127.0.0.1'; port = $taken; vault = $stopVault }) $launchOk
+    $record = Read-TextFile $script:RecordFile | ConvertFrom-Json
+    $record.pid = 2147480000
+    Write-TextFile $script:RecordFile ($record | ConvertTo-Json)
+    $said = (@(Invoke-Stop 6>&1 | ForEach-Object { [string]$_ }) -join "`n")
+    Assert-That 'stop with a stale record says the server is not running' ($said -match 'not running')
+    Assert-That 'and removes the stale record' (-not (Test-Path -LiteralPath $script:RecordFile))
+
+    # The whole command: stop asks, the server exits, stop says it stopped cleanly.
+    $server = New-Sleeper
+    $fake = Start-StopServer -Health ('{"status": "ok", "launch": "' + $launchOk + '"}') -Process $server -Obey
+    try {
+        Write-Record $server ([pscustomobject]@{ host = '127.0.0.1'; port = $fake.Port; vault = $stopVault }) $launchOk
+        $said = (@(Invoke-Stop 6>&1 | ForEach-Object { [string]$_ }) -join "`n")
+    }
+    finally {
+        Stop-FakeServer $fake
+        if (-not $server.HasExited) { $server.Kill() }
+    }
+    Assert-That 'stop says the server stopped cleanly' ($said -match 'stopped cleanly')
+    Assert-That 'and has removed its record' (-not (Test-Path -LiteralPath $script:RecordFile))
+
     # --- the lock around check-and-start -------------------------------------------------------
     $name = Get-LockName
     $probe = {

@@ -225,7 +225,8 @@ def test_an_exception_outside_exception_is_recorded_and_the_thread_goes_on(
             raise error
 
     pool = start(pools, WorkerPool(queue, {"extract": handler}, {"extract": 1}, idle_seconds=0.05))
-    until(lambda: statuses(engine)[second] == "done")
+    # The two jobs may be claimed in either order, so wait for both outcomes.
+    until(lambda: statuses(engine)[second] == "done" and last_error(engine, first) is not None)
     assert last_error(engine, first) == type(error).__name__
     assert all(thread.is_alive() for thread in pool.threads)
     output = capsys.readouterr()
