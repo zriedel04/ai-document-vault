@@ -31,6 +31,7 @@ import {
 } from "../api/search";
 import { useSessionState } from "../api/session-context";
 import { useSearchResults } from "../api/useSearch";
+import { resultPlace } from "./documents-search";
 
 /**
  * Text with the words the query matched marked. Every segment is a React text child, never HTML:
@@ -195,9 +196,9 @@ function Results({
 }
 
 /**
- * One matching document: its name (linking to its page), type, section and the best passage. The
- * text view cannot open at a page yet, so the link goes to the document and the page number is
- * shown beside it for a PDF, the one type whose pages are the file's own.
+ * One matching document: its name (linking to its page, at the result's page for a PDF), type,
+ * section and the best passage. The page number is shown for a PDF, the one type whose pages are
+ * the file's own.
  */
 function Hit({ hit }: { hit: SearchHit }) {
   const name = fileName({ id: hit.document_id, name: hit.name, extension: hit.extension });
@@ -206,8 +207,14 @@ function Hit({ hit }: { hit: SearchHit }) {
     <Card withBorder component="li">
       <Group gap="xs" wrap="nowrap" align="baseline">
         <Anchor
-          component={Link}
-          to={`/documents/${encodeURIComponent(hit.document_id)}`}
+          renderRoot={(props) => (
+            <Link
+              {...props}
+              to="/documents/$documentId"
+              params={{ documentId: hit.document_id }}
+              search={resultPlace(hit)}
+            />
+          )}
           fw={500}
           style={{ overflowWrap: "anywhere" }}
         >
