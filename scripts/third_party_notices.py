@@ -6,6 +6,16 @@ The notices cover the runtime packages only: the npm packages the built frontend
 installed in a runtime-only backend environment (`uv sync --no-dev`). Build, test and lint tools
 are not shipped and are covered by the licence audit (`docs/licence-audit.md`) instead.
 
+An npm package that the lockfile marks `optional` and limits to some platforms (`os`, `cpu` or
+`libc`) is a prebuilt native binary for Node, such as `@napi-rs/canvas-win32-x64-msvc` under
+pdfjs-dist. npm installs only the one for the machine it runs on, and a browser build cannot
+include a native binary, so these are left out: listing them would make the file depend on the
+platform that wrote it. The package that loads such a binary (`@napi-rs/canvas`) has no platform
+limit and is listed like any other. A platform-limited package that is not `optional` is read
+like any other package, so it fails the run where it is not installed. Where such a binary is
+installed, the run fails if it holds any file a bundler can take in (JavaScript, TypeScript, CSS,
+WebAssembly), since then it is not only a binary.
+
 Each package gets its name, licence and the licence text it ships with. An npm package installed
 at more than one place gets an entry per place (`parent/node_modules/name`), since each copy is
 code that may be bundled. A package that ships no licence file must have a reviewed text in
@@ -70,6 +80,9 @@ LICENCE_FOLDER = re.compile(
 # image extension is not (license.svg, license-url.test.ts). Anything else stops the run, so a new
 # kind of file is classified by a person instead of being dropped from the notices unseen.
 TEXT_SUFFIXES = frozenset({"txt", "text", "md", "markdown", "rst", "html", "htm"})
+# A lower-case part that names the component the text belongs to, reviewed one by one: markdown-it-py
+# ships the licence of the JavaScript markdown-it it ports as `licenses/LICENSE.markdown-it`.
+COMPONENT_SUFFIXES = frozenset({"markdown-it"})
 OTHER_SUFFIXES = frozenset(
     {
         *("js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "map", "css", "scss"),
@@ -114,7 +127,9 @@ def is_licence_file(path: str) -> bool:
     if not (in_folder or LICENCE_NAME.fullmatch(name)):
         return False
     suffix = name.rpartition(".")[2] if "." in name.lstrip(".") else ""
-    if not suffix or suffix.lower() in TEXT_SUFFIXES or not any(c.islower() for c in suffix):
+    if not suffix or not any(c.islower() for c in suffix):
+        return True
+    if suffix.lower() in TEXT_SUFFIXES or suffix in COMPONENT_SUFFIXES:
         return True
     if suffix.lower() in OTHER_SUFFIXES:
         return False
@@ -157,11 +172,49 @@ def licence_files(folder: Path) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(found))
 
 
+PLATFORM_FIELDS = ("os", "cpu", "libc")
+
+
+def is_platform_binary(info: dict[str, object]) -> bool:
+    """Is this lockfile entry an optional package for some platforms only (see the module notes)?
+
+    Both conditions are read as exactly their kind: ``optional`` must be ``true`` and a platform
+    field a list, so a hand-edited ``"optional": "false"`` or ``"os": ""`` leaves the package in.
+    """
+    return info.get("optional") is True and any(
+        isinstance(info.get(field), list) and info.get(field) for field in PLATFORM_FIELDS
+    )
+
+
+# Files a bundler can take into a browser build. A platform binary that ships one is refused.
+BUNDLED_SUFFIXES = frozenset(
+    {"js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "css", "scss", "wasm"}
+)
+
+
+def check_binary_only(location: str, folder: Path) -> None:
+    """Fail if an installed platform binary holds a file a browser build could include."""
+    for path in folder.rglob("*"):
+        inside = path.relative_to(folder)
+        if "node_modules" in inside.parts[:-1] or not path.is_file():
+            continue
+        if path.name.rpartition(".")[2].lower() in BUNDLED_SUFFIXES and "." in path.name:
+            msg = (
+                f"{location} is an optional platform package but ships {inside.as_posix()}, "
+                "which a build could include: decide whether it belongs in the notices"
+            )
+            raise NoticeError(msg)
+
+
 def npm_notices(lockfile: Path = LOCKFILE, base: Path = NODE_MODULES) -> list[Notice]:
     lock = json.loads(lockfile.read_text(encoding="utf-8"))
     notices = []
     for location, info in lock.get("packages", {}).items():
         if not location or info.get("dev") is True:
+            continue
+        if is_platform_binary(info):
+            if (base / location).is_dir():
+                check_binary_only(location, base / location)
             continue
         folder = base / location
         if not folder.is_dir():
@@ -281,8 +334,18 @@ def render(notices: Iterable[Notice]) -> str:
             lines += ["", notice.source]
         for file_name, text in notice.texts:
             fence = fence_for(text)
-            lines += ["", f"`{file_name}`:", "", f"{fence}text", text.rstrip(), fence]
+            lines += ["", f"`{file_name}`:", "", f"{fence}text", tidy(text), fence]
     return "\n".join(lines) + "\n"
+
+
+def tidy(text: str) -> str:
+    """The text without white space at the end of its lines or of the whole.
+
+    The repository's trailing-whitespace hook strips it from every committed file, so a text
+    written with it (pdfjs-dist's OpenJPEG licence has such lines) would never match the check
+    after a commit. White space at the end of a line carries no terms.
+    """
+    return "\n".join(line.rstrip() for line in text.rstrip().split("\n"))
 
 
 def fence_for(text: str) -> str:

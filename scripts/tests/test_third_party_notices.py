@@ -49,6 +49,18 @@ class RenderTest(unittest.TestCase):
         self.assertIn("````text\na\n```\nb\n````", text)
 
 
+    def test_white_space_at_line_ends_is_left_out_so_the_hygiene_hook_changes_nothing(self) -> None:
+        """pre-commit's trailing-whitespace hook strips it from the committed file."""
+        notice = Notice("npm", "spaced", "MIT", (("LICENSE", "subject to other third \nparties\t\n\n"),))
+        text = notices.render([notice])
+        self.assertIn("```text\nsubject to other third\nparties\n```", text)
+        hooked = "\n".join(line.rstrip(" \t") for line in text.split("\n"))
+        self.assertEqual(hooked, text)
+        self.assertEqual(notices.drift(hooked, [notice], "npm"), [])
+        changed = Notice("npm", "spaced", "MIT", (("LICENSE", "subject to other fourth \nparties"),))
+        self.assertEqual(notices.drift(hooked, [changed], "npm"), ["~ spaced: licence text differs"])
+
+
 class SplitTest(unittest.TestCase):
     def test_a_heading_inside_a_licence_text_is_not_a_section(self) -> None:
         notice = Notice("npm", "headed", "MIT", (("LICENSE", "terms\n## Warranty\nold"),))
@@ -216,6 +228,60 @@ class NpmTest(unittest.TestCase):
             (folder / "node_modules" / "@scope" / "pkg" / "node_modules" / "shipped").rmdir()
             with self.assertRaises(FileNotFoundError):
                 notices.npm_notices(lockfile, folder)
+
+    def with_entries(self, folder: Path, entries: dict[str, dict[str, object]]) -> Path:
+        lockfile = self.build(folder)
+        lock = json.loads(lockfile.read_text(encoding="utf-8"))
+        lock["packages"].update(entries)
+        lockfile.write_text(json.dumps(lock), encoding="utf-8")
+        return lockfile
+
+    def test_optional_platform_binaries_are_left_out_installed_or_not(self) -> None:
+        """npm installs only this machine's binary, so listing any would tie the file to it."""
+        binaries: dict[str, dict[str, object]] = {
+            "node_modules/canvas-win32-x64": {"license": "MIT", "optional": True, "os": ["win32"]},
+            "node_modules/canvas-linux-x64": {"license": "MIT", "optional": True, "cpu": ["x64"]},
+            "node_modules/canvas-musl": {"license": "MIT", "optional": True, "libc": ["musl"]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            lockfile = self.with_entries(folder, binaries)
+            installed = folder / "node_modules" / "canvas-linux-x64"
+            installed.mkdir()
+            (installed / "LICENSE").write_text("binary licence", encoding="utf-8")
+            found = {n.name for n in notices.npm_notices(lockfile, folder)}
+        self.assertEqual(found, {"shipped", "@scope/pkg", "@scope/pkg/node_modules/shipped"})
+
+    def test_an_installed_platform_binary_that_ships_code_stops_the_run(self) -> None:
+        """Left out only while it holds nothing a bundler could take in."""
+        entry = {"node_modules/native-x64": {"license": "MIT", "optional": True, "os": ["linux"]}}
+        for name in ("index.js", "lib/loader.mjs", "types.d.ts", "style.css", "decoder.wasm"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                folder = Path(tmp)
+                lockfile = self.with_entries(folder, entry)
+                installed = folder / "node_modules" / "native-x64"
+                (installed / name).parent.mkdir(parents=True, exist_ok=True)
+                for harmless in ("package.json", "README.md", "skia.linux-x64-gnu.node"):
+                    (installed / harmless).write_text("{}", encoding="utf-8")
+                self.assertEqual(len(notices.npm_notices(lockfile, folder)), 3)
+                (installed / name).write_text("", encoding="utf-8")
+                with self.assertRaisesRegex(notices.NoticeError, "optional platform package"):
+                    notices.npm_notices(lockfile, folder)
+
+    def test_only_an_optional_package_with_a_platform_list_is_left_out(self) -> None:
+        """Each condition alone, or either one in the wrong kind, keeps the package in the run."""
+        for info in (
+            {"license": "MIT", "os": ["win32"]},  # platform limit, but required
+            {"license": "MIT", "optional": True},  # optional, but for every platform
+            {"license": "MIT", "optional": "true", "os": ["win32"]},
+            {"license": "MIT", "optional": True, "os": "win32"},
+            {"license": "MIT", "optional": True, "os": []},
+        ):
+            with self.subTest(info=info), tempfile.TemporaryDirectory() as tmp:
+                folder = Path(tmp)
+                lockfile = self.with_entries(folder, {"node_modules/native": info})
+                with self.assertRaises(FileNotFoundError):
+                    notices.npm_notices(lockfile, folder)
 
 
 class PythonTest(unittest.TestCase):
@@ -401,9 +467,16 @@ class LicenceFileTest(unittest.TestCase):
                 self.assertFalse(notices.is_licence_file(path))
 
     def test_a_licence_like_file_of_an_unknown_kind_stops_the_run(self) -> None:
-        for path in ("license.mit", "LICENSES/GPL.unknownext", "NOTICE.docx"):
+        for path in ("license.mit", "LICENSES/GPL.unknownext", "NOTICE.docx", "LICENSE.markdown-js"):
             with self.subTest(path=path), self.assertRaisesRegex(notices.NoticeError, "classify"):
                 notices.is_licence_file(path)
+
+
+    def test_a_reviewed_component_name_is_a_licence_text(self) -> None:
+        """markdown-it-py ships the JavaScript markdown-it licence as LICENSE.markdown-it."""
+        for path in ("LICENSE.markdown-it", "markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it"):
+            with self.subTest(path=path):
+                self.assertTrue(notices.is_licence_file(path))
 
 
 class CommittedFileTest(unittest.TestCase):
@@ -413,7 +486,11 @@ class CommittedFileTest(unittest.TestCase):
         runtime = {
             (location.removeprefix("node_modules/"), info.get("license"))
             for location, info in lock["packages"].items()
-            if location and info.get("dev") is not True
+            if location
+            and info.get("dev") is not True
+            # Written out again here rather than calling is_platform_binary: an optional package
+            # limited to some platforms is a native Node binary (see the script's notes).
+            and not (info.get("optional") is True and any(info.get(f) for f in ("os", "cpu", "libc")))
         }
         committed = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
         self.assertEqual(notices.table(committed, "npm"), runtime)
