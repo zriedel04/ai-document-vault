@@ -25,6 +25,8 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "ruff>=0.8",
+    # The eval format and the retrieval scores, shared with the spike scripts (python -m vault.eval).
+    "vault-spikes",
 ]
 
 [build-system]
@@ -33,6 +35,9 @@ build-backend = "uv_build"
 
 [tool.uv]
 default-groups = ["dev"]
+
+[tool.uv.sources]
+vault-spikes = { path = "../scripts/spikes", editable = true }
 
 [tool.ruff]
 line-length = 100

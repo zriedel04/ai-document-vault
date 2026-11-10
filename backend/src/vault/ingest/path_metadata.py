@@ -49,6 +49,8 @@ from vault.db.schema import MAX_LABEL_CHARS, app_meta, import_sources
 MAX_DEPTH: Final = 64
 # The marker migration 0006 leaves for sources recorded before folder labels existed.
 PENDING_KEY: Final = "pending.folder_labels"
+# The source of a title worked out from a file name (the lowest tier of the resolution order).
+FILENAME: Final = "filename"
 
 # Characters a label never keeps: the bidirectional controls, which reorder how the text around
 # them is shown, and the invisible ones that would make two names that look the same differ (soft
@@ -112,6 +114,17 @@ def title_from_filename(filename: str) -> str | None:
         stem = filename
     title = clean(stem.replace("_", " "))[:MAX_LABEL_CHARS].strip()
     return title or None
+
+
+def resolved_title(first_filename: object) -> tuple[str, str] | None:
+    """The title a document shows and where it came from (``FILENAME``, the only tier written so
+    far), from the file name of its first import, or None. The detail panel and the export both
+    read it here, so they never disagree. A name that is not text (only a hand edit writes one)
+    gives no title."""
+    if not isinstance(first_filename, str):
+        return None
+    value = title_from_filename(first_filename)
+    return None if value is None else (value, FILENAME)
 
 
 def record_import_labels(
