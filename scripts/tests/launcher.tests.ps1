@@ -790,6 +790,57 @@ finally {
     Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- export: the folder in the environment as for backup, the trash only when asked for ---------
+$message = Get-ThrownMessage { Invoke-Export '' }
+Assert-That 'export without a folder says how to name one' (($null -ne $message) -and ($message -match '-To'))
+$exportDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vault-export-tests-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $exportDir
+$script:BackendDir = $exportDir
+$script:exportArguments = $null
+$script:exportTarget = $null
+$script:exportFolder = $null
+$script:exportCode = 0
+$exportStandIn = {
+    $script:exportArguments = $args -join ' '
+    $script:exportTarget = [Environment]::GetEnvironmentVariable('VAULT_EXPORT_TO', 'Process')
+    $script:exportFolder = (Get-Location).Path
+    Write-Output 'line from the stand-in'
+    $global:LASTEXITCODE = $script:exportCode
+}
+try {
+    $startedIn = (Get-Location).Path
+    $spaced = Join-Path $exportDir ('My Export Jos' + [char]0x00E9)
+    $lines = $null
+    try {
+        $lines = @(Invoke-Export ($spaced + '\') -Python $exportStandIn 6>&1 | ForEach-Object { [string]$_ })
+    }
+    catch {
+        Write-Host "     (export said: $($_.Exception.Message))"
+    }
+    Assert-That 'export passes when the backend succeeds' ($null -ne $lines)
+    Assert-That "the export backend's lines are passed on" (($null -ne $lines) -and ($lines -contains 'line from the stand-in'))
+    $shape = '\A' + [regex]::Escape($spaced) + '\\?\z'
+    Assert-That 'an export folder with a space, an accent and a trailing backslash arrives intact' `
+        (($script:exportTarget -is [string]) -and ($script:exportTarget -match $shape))
+    Assert-That 'the export folder is not on the backend command line' ($script:exportArguments -ceq '-m vault.export')
+    Assert-That 'export runs in the backend folder' ($script:exportFolder -eq $exportDir)
+    Assert-That 'the export folder is taken out of the environment afterwards' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_EXPORT_TO', 'Process'))
+    Assert-That 'export returns to the folder it was called from' ((Get-Location).Path -eq $startedIn)
+    $null = Invoke-Export (Join-Path $exportDir 'with-trash') -IncludeTrash -Python $exportStandIn 6>&1
+    Assert-That '-IncludeTrash reaches the backend as --include-trash' `
+        ($script:exportArguments -ceq '-m vault.export --include-trash')
+    $script:exportCode = 1
+    $message = Get-ThrownMessage { Invoke-Export (Join-Path $exportDir 'VaultExport') -Python $exportStandIn 6>&1 }
+    Assert-That 'an export that fails stops with its exit code' (($null -ne $message) -and ($message -match 'exit code 1'))
+    Assert-That 'and does not repeat the export folder' (($null -ne $message) -and (-not $message.Contains('VaultExport')))
+    Assert-That 'and takes the export folder out of the environment too' `
+        ($null -eq [Environment]::GetEnvironmentVariable('VAULT_EXPORT_TO', 'Process'))
+}
+finally {
+    Remove-Item -LiteralPath $exportDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- restore: both folders reach the backend in the environment, never on its command line -----
 $message = Get-ThrownMessage { Invoke-Restore '' 'D:\AIVault' }
 Assert-That 'restore without a snapshot says how to name one' (($null -ne $message) -and ($message -match '-From'))
@@ -888,6 +939,11 @@ $null = & $shell -NoProfile -File $launcher 'backup' 2>&1
 $backupExit = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 Assert-That 'backup without -To is refused' ($backupExit -eq 1)
+$ErrorActionPreference = 'Continue'
+$null = & $shell -NoProfile -File $launcher 'export' 2>&1
+$exportExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Assert-That 'export without -To is refused' ($exportExit -eq 1)
 $ErrorActionPreference = 'Continue'
 $null = & $shell -NoProfile -File $launcher 'restore' -To 'D:\AIVault' 2>&1
 $restoreExit = $LASTEXITCODE
