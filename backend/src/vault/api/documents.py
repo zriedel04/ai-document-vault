@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -37,12 +37,18 @@ from vault.db.pages import (
     read_current_pages,
 )
 from vault.ingest.path_metadata import title_from_filename
+from vault.ingest.validate import MIME_TYPES
 from vault.jobs.queue import JobQueue, RetryRefusal, utc_now
 from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobIntegrityError, BlobStore
 from vault.storage.purge import purge_document
 
 logger = logging.getLogger(__name__)
+
+# The media types the download may send: the ones the importer gives (PDF, DOCX, PNG, JPEG, text).
+# A stored type outside them (a database edited by hand: text/html, image/svg+xml) goes out as
+# application/octet-stream, so the browser never renders the bytes as a page or a script.
+SERVED_TYPES: Final = frozenset(MIME_TYPES.values())
 router = APIRouter(tags=["documents"])
 
 # Beyond any library; it keeps the number inside SQLite's integer range.
@@ -331,7 +337,9 @@ async def download_document(
     _user: Annotated[LocalUser, Depends(current_user)],
 ) -> FileResponse:
     """The document's current bytes, exactly as imported, saved under the name of its first import.
-    Always an attachment, so the browser saves it and never shows it as a page of this origin."""
+    Always an attachment, so the browser saves it and never shows it as a page of this origin, and
+    only ever with a type from :data:`SERVED_TYPES` (``nosniff`` comes from the security headers).
+    The image viewer fetches its images here; the bytes are never decoded on the server."""
     engine: Engine | None = request.app.state.engine
     store: BlobStore | None = request.app.state.blobs
     if engine is None or store is None:
@@ -357,7 +365,11 @@ async def download_document(
         content_disposition_type="attachment",
         # A header, not media_type: Starlette adds "; charset=utf-8" to a text/ media type, and a
         # text file may be UTF-16 or UTF-32 with a byte order mark (vault.ingest.validate).
-        headers={"Content-Type": original.mime},
+        headers={
+            "Content-Type": (
+                original.mime if original.mime in SERVED_TYPES else "application/octet-stream"
+            )
+        },
     )
 
 
