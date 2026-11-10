@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -130,10 +130,16 @@ class SlowQueue(JobQueue):
         self.claiming = threading.Event()
         self.go = threading.Event()
 
-    def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
+    def claim(
+        self,
+        worker_id: str,
+        stages: Iterable[str],
+        *,
+        extensions: Collection[str] | None = None,
+    ) -> Job | None:
         self.claiming.set()
         self.go.wait(30)
-        return super().claim(worker_id, stages)
+        return super().claim(worker_id, stages, extensions=extensions)
 
 
 def test_a_pause_waiting_for_a_claim_does_not_hold_up_other_requests(
