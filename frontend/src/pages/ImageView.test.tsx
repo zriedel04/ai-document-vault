@@ -29,6 +29,8 @@ function detail(id: string, overrides: Partial<DocumentDetail> = {}): DocumentDe
     version_origin: "import",
     import_sources: [],
     jobs: [],
+    labels: [],
+    title: { value: "Scan", source: "filename" },
     ...overrides,
   };
 }
