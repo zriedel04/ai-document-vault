@@ -13,7 +13,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, event, func, select, update
 
-from vault.api.documents import SERVED_TYPES, JobStatus, Method, Origin, Stage, State
+from vault.api.documents import (
+    SERVED_TYPES,
+    JobStatus,
+    LabelKind,
+    LabelSource,
+    LabelStatus,
+    Method,
+    Origin,
+    Stage,
+    State,
+)
 from vault.core.config import Settings
 from vault.db import ids
 from vault.db.documents import ListQuery, _utc, get_document, list_documents
@@ -23,6 +33,9 @@ from vault.db.schema import (
     IMPORT_METHODS,
     JOB_STAGES,
     JOB_STATUSES,
+    LABEL_KINDS,
+    LABEL_SOURCES,
+    LABEL_STATUSES,
     TRASHED,
     VERSION_ORIGINS,
     blobs,
@@ -396,6 +409,9 @@ def test_the_api_lists_every_origin_method_stage_and_job_status() -> None:
     assert typing.get_args(Method) == IMPORT_METHODS
     assert typing.get_args(Stage) == JOB_STAGES
     assert typing.get_args(JobStatus) == JOB_STATUSES
+    assert typing.get_args(LabelKind) == LABEL_KINDS
+    assert typing.get_args(LabelSource) == LABEL_SOURCES
+    assert typing.get_args(LabelStatus) == LABEL_STATUSES
 
 
 def test_a_snapshot_does_not_see_a_commit_made_during_it(library: Library) -> None:

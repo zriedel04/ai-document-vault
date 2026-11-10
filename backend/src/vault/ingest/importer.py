@@ -8,7 +8,8 @@ section 7).
    that counts. A blob this import created for bytes that fail it is removed again.
 4. In one transaction: the blob row, then either a new document with its first version, its
    import source and its first job (``extract``), or, when a document already holds these bytes,
-   only a new import source for that document. Importing the same file twice gives one document
+   only a new import source for that document; either way the source's folders become labels of
+   the document (``vault.ingest.path_metadata``). Importing the same file twice gives one document
    with two sources. A document in the trash that is imported again comes out of the trash, with
    the state it had before: the import is the owner saying they want it.
 
@@ -22,7 +23,7 @@ transaction's first statement writes (the blob row), which takes SQLite's write 
 second import waits and then finds the first one's document.
 
 Nothing here logs: the caller logs the outcome with ids and counts. The file's name, path and
-folders go into ``import_sources`` and nowhere else.
+folders go into ``import_sources`` and, as folder labels, into ``labels``, and nowhere else.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from vault.db.schema import (
     documents,
     import_sources,
 )
+from vault.ingest.path_metadata import record_import_labels
 from vault.ingest.validate import DEFAULT_LIMITS, Limits, Reason, validate_file
 from vault.jobs.queue import JobQueue, utc_now
 from vault.storage.blobs import (
@@ -307,4 +309,7 @@ class Importer:
                     imported_at=now,
                 )
             )
+            # Its folders become labels with it, so a label never names an import that is not
+            # recorded and a crash cannot keep one without the other.
+            record_import_labels(connection, document_id, request.folder_segments, now)
         return ImportResult(outcome, document_id=document_id)

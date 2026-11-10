@@ -36,6 +36,7 @@ from vault.db.pages import (
     PageDataError,
     read_current_pages,
 )
+from vault.ingest.path_metadata import title_from_filename
 from vault.ingest.validate import MIME_TYPES
 from vault.jobs.queue import JobQueue, RetryRefusal, utc_now
 from vault.jobs.worker import WorkerPool
@@ -61,6 +62,15 @@ Origin = Literal["import", "user", "ai_copy"]
 Method = Literal["upload", "folder", "watch"]
 Stage = Literal["extract", "ocr", "metadata", "chunk", "embed", "enrich"]
 JobStatus = Literal["queued", "running", "done", "failed"]
+# And of LABEL_KINDS, LABEL_SOURCES and LABEL_STATUSES.
+LabelKind = Literal[
+    "collection", "category", "course", "project", "tag", "topic", "person", "org", "folder"
+]
+LabelSource = Literal["user", "ai", "import_path", "rule"]
+LabelStatus = Literal["suggested", "accepted", "rejected"]
+# Where a shown value came from, in the plan's resolution order (section 6); only the last tier is
+# written so far.
+FieldSource = Literal["filename"]
 
 
 class DocumentItem(BaseModel):
@@ -130,6 +140,21 @@ class Job(BaseModel):
     retryable: bool
 
 
+class Label(BaseModel):
+    id: str
+    kind: LabelKind
+    name: str
+    # The names from the outermost label down to this one (for a folder, the folders above it).
+    path: list[str]
+    source: LabelSource
+    status: LabelStatus
+
+
+class Title(BaseModel):
+    value: str
+    source: FieldSource
+
+
 class DocumentDetail(DocumentItem):
     sha256: str
     local_only: bool
@@ -138,6 +163,10 @@ class DocumentDetail(DocumentItem):
     version_origin: Origin
     import_sources: list[Source]
     jobs: list[Job]
+    labels: list[Label]
+    # The title as the plan's resolution order gives it, or None when nothing gives one. Only the
+    # file name of the first import gives one so far (vault.ingest.path_metadata).
+    title: Title | None
 
 
 @router.get("/documents/{document_id}", responses={404: {"description": "No such document"}})
@@ -147,8 +176,9 @@ async def read_document(
     _user: Annotated[LocalUser, Depends(current_user)],
 ) -> DocumentDetail:
     """One document, in use or in the trash: what the list shows, plus its hash, current version,
-    every import (oldest first; the first names the document) and its processing jobs (in the
-    order of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message
+    every import (oldest first; the first names the document), its processing jobs (in the
+    order of the pipeline), its labels (each import's folders, by kind and path) and its title
+    with where it came from. An unknown id, or one that is not an id at all, is a 404 whose message
     does not repeat it."""
     return await _detail(_engine(request), document_id)
 
@@ -173,7 +203,15 @@ async def _detail(engine: Engine, document_id: str) -> DocumentDetail:
         version_origin=detail.version_origin,
         import_sources=[Source.model_validate(s, from_attributes=True) for s in detail.sources],
         jobs=[Job.model_validate(job, from_attributes=True) for job in detail.jobs],
+        labels=[Label.model_validate(label, from_attributes=True) for label in detail.labels],
+        title=_title(detail.summary.name),
     )
+
+
+def _title(name: str | None) -> Title | None:
+    """The lowest tier of the resolution order: a title from the name of the first import."""
+    value = None if name is None else title_from_filename(name)
+    return None if value is None else Title(value=value, source="filename")
 
 
 @router.post("/documents/{document_id}/trash", responses={404: {"description": "No such document"}})
