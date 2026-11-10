@@ -131,3 +131,13 @@ def _after_front_matter(lines: list[str]) -> int:
         if lines[index].rstrip() in _FRONT_MATTER_CLOSE:
             return index + 1
     return 0
+
+
+def extract_plain(data: bytes, fallback: str) -> Extraction:
+    """The sandbox's entry point for a TXT file (``vault.jobs.sandbox.ENTRY_POINTS``)."""
+    return extract(data, markdown=False, fallback=fallback)
+
+
+def extract_markdown(data: bytes, fallback: str) -> Extraction:
+    """The sandbox's entry point for a Markdown file (``vault.jobs.sandbox.ENTRY_POINTS``)."""
+    return extract(data, markdown=True, fallback=fallback)
