@@ -43,6 +43,7 @@ Docs, ADRs, tests, `AGENTS.md` and `CLAUDE.md` are updated in the same PR as the
 | Backend tests, lint and types (in `backend/`) | `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` |
 | Frontend checks (in `frontend/`) | `npm test`, `npm run lint`, `npm run format:check`, `npm run build` |
 | Python and npm licence checks | `uv run python ../scripts/check_python_licenses.py --ignore vault` (in `backend/`), `python scripts/check_npm_licenses.py` |
+| Retrieval evaluation on the public eval set (in `backend/`) | `uv run python -m vault.eval` |
 | Third-party notices, npm (after `npm ci` in `frontend/`) | `python scripts/third_party_notices.py check npm` (the Python check and `write` need a runtime-only environment: see the script's docstring) |
 | Demo corpus tests (in `demo/generate/`) | `uv run python -m unittest discover -s tests -v` |
 | Rebuild the corpus and eval set (in `demo/generate/`) | `uv run python build.py` (`--check` fails if the committed files differ) |

@@ -87,13 +87,17 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest
+      - name: Retrieval evaluation on the demo corpus (fails only if it cannot run; no score threshold yet)
+        run: uv run python -m vault.eval --json "$RUNNER_TEMP/retrieval-eval.json"
       - name: Licence check (development tools included, reviewed exceptions allowed)
         run: uv run python ../scripts/check_python_licenses.py --ignore vault
       - name: Dependency audit
         run: |
           python -m pip install "pip-audit==${PIP_AUDIT_VERSION}"
           uv export --locked --no-dev --no-emit-project --no-hashes --output-file ../runtime.txt
-          uv export --locked --only-dev --no-hashes --output-file ../dev.txt
+          # vault-spikes is this repository's own scripts/spikes, installed from its folder; a
+          # local path has no version on PyPI for pip-audit to look up. Its dependencies are listed.
+          uv export --locked --only-dev --no-hashes --no-emit-package vault-spikes --output-file ../dev.txt
           pip-audit --requirement ../runtime.txt --no-deps --disable-pip --strict
           pip-audit --requirement ../dev.txt --no-deps --disable-pip --strict
       - name: Licence check (runtime only, no exceptions)
@@ -122,6 +126,9 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
+      - name: Retrieval evaluation on the demo corpus (fails only if it cannot run)
+        run: uv run python -m vault.eval --json "$env:RUNNER_TEMP\retrieval-eval.json"
+
       # The app runs on Windows, so its runtime packages are checked there too: a dependency
       # can pull in a package only on win32, or ship different licence files in its Windows wheel.
       - name: Licence check and third-party notices (Windows runtime only)
