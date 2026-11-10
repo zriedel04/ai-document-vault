@@ -4,6 +4,8 @@ Measurement scripts for the hardware-dependent decisions in [ADR 0004](../../doc
 
 The numbers come from runs on the owner's PC. The sqlite-vec spike has been run and recorded in [docs/spikes/01-sqlite-vec.md](../../docs/spikes/01-sqlite-vec.md); the embedding, OCR and PDF spikes have not been measured yet.
 
+**Shared with the backend.** The product's retrieval evaluation (`python -m vault.eval`, see `backend/README.md`) reads the eval file and the manifest with `vault_spikes.corpus` and scores with `vault_spikes.retrieval`, so the eval format and Recall@10, MRR and Hit@1 have one definition. The backend's development dependencies install this folder as the package `vault-spikes` (hence its build system and licence in `pyproject.toml`), and a change to either module changes both; the backend's CI runs on every push.
+
 ## Set up (Windows PowerShell)
 
 Install [uv](https://docs.astral.sh/uv/) if `uv --version` is not found (`winget install --id astral-sh.uv`), then open a new terminal. The scripts need Python 3.12; uv downloads it by itself, so a newer Python on the PC (3.13 or 3.14) is not used and does not need to be removed.
