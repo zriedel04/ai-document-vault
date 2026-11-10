@@ -32,7 +32,14 @@ from vault.db.documents import (
 )
 from vault.db.engine import create_vault_engine, write_transaction
 from vault.db.pages import PageText, replace_pages
-from vault.db.schema import blobs, document_versions, documents, import_sources, metadata
+from vault.db.schema import (
+    blobs,
+    document_versions,
+    documents,
+    import_sources,
+    labels,
+    metadata,
+)
 from vault.ingest import importer as importer_module
 from vault.ingest.chunking.structural_v1 import CHUNKER_VERSION, chunk_pages
 from vault.ingest.importer import Importer, ImportRequest, Outcome
@@ -71,7 +78,11 @@ class Vault:
         path = self.folder / f"incoming-{ids.new_ulid()}{Path(name).suffix}"
         path.write_bytes(body)
         return ImportRequest(
-            path=path, original_filename=name, method="upload", batch_id=ids.new_ulid()
+            path=path,
+            original_filename=name,
+            method="folder",
+            batch_id=ids.new_ulid(),
+            folder_segments=("Clients", "Patient-Name"),
         )
 
     def trash(self, document_id: str) -> None:
@@ -165,7 +176,8 @@ def vault(app: FastAPI, tmp_path: Path) -> Vault:
 
 
 def trashed_with_everything(vault: Vault) -> str:
-    """A trashed document with a version, an import source, a job, pages and chunks."""
+    """A trashed document with a version, an import source, a job, folder labels, pages and
+    chunks."""
     document_id = vault.add()
     vault.add_chunks(document_id, f"Rent and the {MARKER} clause.\n\nPaid monthly.")
     vault.trash(document_id)
@@ -190,6 +202,8 @@ def test_a_trashed_document_is_deleted_with_every_row_and_its_file(
     assert response.content == b""
     for table in DOCUMENT_ROWS:
         assert vault.count(table, document_id) == 0, table
+    with vault.engine.connect() as connection:  # its folder names went with it
+        assert connection.execute(select(func.count()).select_from(labels)).scalar_one() == 0
     assert not vault.blob_row()
     assert vault.store.find(SHA) is None
     assert not path.exists()
