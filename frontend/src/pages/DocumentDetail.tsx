@@ -35,6 +35,7 @@ import {
   fileName,
   formatDate,
   formatSize,
+  isPdf,
   moveDocument,
   retryDocument,
   retryableJobs,
@@ -45,6 +46,7 @@ import { loadDocument, useDocument } from "../api/useDocuments";
 import { DEFAULT_SEARCH } from "./documents-search";
 import { isImageType } from "./image-limits";
 import { ImageView } from "./ImageView";
+import { PdfViewer } from "./PdfViewer";
 import { TextView } from "./TextView";
 
 const METHOD_LABEL: Record<Detail["import_sources"][number]["method"], string> = {
@@ -77,8 +79,17 @@ function BackLink() {
   );
 }
 
-/** One document: what the list shows, plus its hash, version, every import and its jobs. */
-export function DocumentDetail({ documentId }: { documentId: string }) {
+/** Where the PDF viewer opens, from the address, and how it moves to another page. */
+interface PdfPlace {
+  page: number | undefined;
+  onPageChange: (page: number) => void;
+}
+
+/**
+ * One document: what the list shows, plus its hash, version, every import and its jobs, then the
+ * original in the PDF viewer for a PDF, or the extracted text for any other document.
+ */
+export function DocumentDetail({ documentId, ...place }: { documentId: string } & PdfPlace) {
   const { state: session } = useSessionState();
   if (session.status === "loading") return <Loader aria-label="Checking access" />;
   if (session.status !== "signed-in") {
@@ -89,10 +100,10 @@ export function DocumentDetail({ documentId }: { documentId: string }) {
       </Stack>
     );
   }
-  return <Loaded documentId={documentId} />;
+  return <Loaded documentId={documentId} place={place} />;
 }
 
-function Loaded({ documentId }: { documentId: string }) {
+function Loaded({ documentId, place }: { documentId: string; place: PdfPlace }) {
   const { state, reload } = useDocument(documentId);
   if (state.status === "loading") return <Loader aria-label="Loading the document" />;
   if (state.status === "error") {
@@ -112,7 +123,7 @@ function Loaded({ documentId }: { documentId: string }) {
       </Stack>
     );
   }
-  return <Details document={state.data} reload={reload} />;
+  return <Details document={state.data} reload={reload} place={place} />;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -151,7 +162,15 @@ const MOVE_FAILED_TITLE: Record<MoveAction, string> = {
   restore: "Not restored",
 };
 
-function Details({ document: loaded, reload }: { document: Detail; reload: () => void }) {
+function Details({
+  document: loaded,
+  reload,
+  place,
+}: {
+  document: Detail;
+  reload: () => void;
+  place: PdfPlace;
+}) {
   const api = useApi();
   const { recheck } = useSessionState();
   const [saving, setSaving] = useState(false);
@@ -505,16 +524,27 @@ function Details({ document: loaded, reload }: { document: Detail; reload: () =>
         </Table.ScrollContainer>
       )}
 
-      {isImageType(document.mime) && (
-        <ImageView
-          key={document.version_id}
+      {isPdf(document) ? (
+        <PdfViewer
           documentId={document.id}
-          versionId={document.version_id}
-          mime={document.mime}
-          size={document.size}
+          sha256={document.sha256}
+          page={place.page}
+          onPageChange={place.onPageChange}
         />
+      ) : (
+        <>
+          {isImageType(document.mime) && (
+            <ImageView
+              key={document.version_id}
+              documentId={document.id}
+              versionId={document.version_id}
+              mime={document.mime}
+              size={document.size}
+            />
+          )}
+          <TextView documentId={document.id} />
+        </>
       )}
-      <TextView documentId={document.id} />
     </Stack>
   );
 }

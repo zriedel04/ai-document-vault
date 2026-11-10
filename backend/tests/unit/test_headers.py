@@ -47,6 +47,25 @@ def test_the_policy_denies_by_default_and_allows_scripts_only_from_this_origin()
     assert directives["img-src"] == "'self' blob:"
 
 
+def test_workers_load_only_from_this_origin() -> None:
+    # The PDF viewer runs PDF.js in a worker. A worker's source is worker-src, else child-src,
+    # else script-src (CSP Level 3), so it is this origin's own files and nothing else.
+    directives = dict(part.split(" ", 1) for part in CONTENT_SECURITY_POLICY.split("; "))
+    effective = directives.get("worker-src", directives.get("child-src", directives["script-src"]))
+    assert effective == "'self'"
+    # No eval, WebAssembly, data: or wildcard source anywhere, blob: only for images (the image
+    # viewer's, see the module docstring), and inline code only for styles (Mantine's).
+    assert directives["img-src"].split() == ["'self'", "blob:"]
+    for name, value in directives.items():
+        sources = value.split()
+        for loosening in ("'unsafe-eval'", "'wasm-unsafe-eval'", "blob:", "data:", "*"):
+            if name == "img-src" and loosening == "blob:":
+                continue
+            assert loosening not in sources, name
+        if name != "style-src":
+            assert "'unsafe-inline'" not in sources, name
+
+
 @pytest.mark.parametrize(
     ("method", "path", "headers", "status"),
     [

@@ -9,7 +9,10 @@ frontend and its files, and the refusals of ``LocalSecurityMiddleware`` and the 
 
 ``Content-Security-Policy`` (:data:`CONTENT_SECURITY_POLICY`)
     Everything is denied unless listed. Scripts come only from this origin, as files: no inline
-    script, no ``eval``, no other host. Requests (``fetch``), images and fonts go only to this
+    script, no ``eval``, no WebAssembly, no other host. Workers follow the same rule: with no
+    ``worker-src`` or ``child-src`` the browser applies ``script-src`` to them, so the PDF viewer's
+    PDF.js worker, which Vite builds into the app's own files, may start and nothing else may; a
+    ``blob:`` or CDN worker is refused. Requests (``fetch``), images and fonts go only to this
     origin, which also means that injected markup or CSS has nowhere outside to send what it reads.
     Images may also be ``blob:`` addresses: the image viewer fetches a document's image with the
     token header and shows it through one, since an ``<img>`` cannot send the header. Only a script

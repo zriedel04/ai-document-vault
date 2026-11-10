@@ -50,7 +50,7 @@ export function ImageView({
     let url: string | null = null;
     void fetchOriginal(api, documentId).then((result) => {
       if (cancelled) return;
-      if ("error" in result) {
+      if (result.status === "error") {
         setAnswer({ key, fetched: { status: "error", error: result.error } });
         if (result.error === "needs-token") recheck(); // bring the token notice back
         return;

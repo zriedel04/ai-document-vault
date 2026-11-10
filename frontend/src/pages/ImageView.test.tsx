@@ -148,7 +148,7 @@ describe("image view", () => {
 
   it.each([
     ["text/markdown", "md"],
-    ["application/pdf", "pdf"],
+    ["text/plain", "txt"],
     ["image/svg+xml", "svg"],
   ])("shows no viewer for a %s document and fetches no file", async (mime, extension) => {
     const spy = backend({ [ID]: detail(ID, { mime, extension }) });
