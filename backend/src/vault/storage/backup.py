@@ -46,7 +46,7 @@ import re
 import sqlite3
 import stat
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -140,48 +140,59 @@ def _within(path: Path, folder: Path) -> bool:
     return Path(os.path.normcase(path)).is_relative_to(Path(os.path.normcase(folder)))
 
 
-def check_target(target: Path, vault_root: Path) -> Path:
-    """The target as an absolute path, or ``BackupError``. Creates nothing.
+def check_place(
+    path: Path, *, noun: str, apart: Sequence[tuple[Path, str]] = (), git: bool = True
+) -> Path:
+    """The path as an absolute path, or ``BackupError``. Creates nothing. Shared by the backup's
+    target and the restore's source and target; ``noun`` names the path in the messages, which
+    stay fixed text (it is always a phrase this package wrote).
 
     Every level of the path that exists, from the drive down, must be a real folder: a link or a
-    junction could send the backup somewhere else than the folder the owner named, or into the
-    vault itself. A target inside the vault or holding it (by the path given or the one it
-    resolves to, as the vault folder may be a link the owner set up) or inside a Git working tree
-    is refused.
+    junction could send the copy somewhere else than the folder the owner named. A path inside one
+    of the ``apart`` folders or holding it (by the path given or the one it resolves to, as the
+    vault folder may be a link the owner set up) is refused, and with ``git`` one inside a Git
+    working tree too.
     """
-    if not target.is_absolute():
-        msg = "the backup target must be an absolute path"
+    if not path.is_absolute():
+        msg = f"the {noun} must be an absolute path"
         raise BackupError(msg)
-    target = Path(os.path.abspath(target))
-    for level in (*reversed(target.parents), target):
+    path = Path(os.path.abspath(path))
+    for level in (*reversed(path.parents), path):
         status = _lstat(level)
         if status is None:
             break  # this level and the ones below it are created later
         if _is_link(status):
-            msg = "the backup target path goes through a link or a junction; name the real folder"
+            msg = f"the {noun} path goes through a link or a junction; name the real folder"
             raise BackupError(msg)
         if not stat.S_ISDIR(status.st_mode):
-            msg = "the backup target path goes through something that is not a folder"
+            msg = f"the {noun} path goes through something that is not a folder"
             raise BackupError(msg)
     # Both spellings of each: the path as given, and the one the system gives back for it (a
     # short 8.3 name or a subst drive can name the same folder another way).
-    targets = {target, target.resolve()}
-    roots = {Path(os.path.abspath(vault_root)), vault_root.resolve()}
-    for spelling in targets:
-        for root in roots:
-            if _within(spelling, root):
-                msg = "the backup target is inside the vault folder; choose a folder outside it"
-                raise BackupError(msg)
-            if _within(root, spelling):
-                # The backup's blobs/ and snapshots/ would sit among the vault's own files.
-                msg = "the vault folder is inside the backup target; choose a folder beside it"
-                raise BackupError(msg)
+    spellings = {path, path.resolve()}
+    for folder, label in apart:
+        roots = {Path(os.path.abspath(folder)), folder.resolve()}
+        for spelling in spellings:
+            for root in roots:
+                if _within(spelling, root):
+                    msg = f"the {noun} is inside the {label}; choose a folder outside it"
+                    raise BackupError(msg)
+                if _within(root, spelling):
+                    # The copy's files would sit among the other folder's own files.
+                    msg = f"the {label} is inside the {noun}; choose a folder beside it"
+                    raise BackupError(msg)
     # Every spelling, as for the vault: a subst drive mapped into a working tree names a folder
     # inside the repository by a path that is outside it.
-    if any(git_root_containing(spelling) is not None for spelling in targets):
-        msg = "the backup target is inside a Git repository; choose a folder outside every one"
+    if git and any(git_root_containing(spelling) is not None for spelling in spellings):
+        msg = f"the {noun} is inside a Git repository; choose a folder outside every one"
         raise BackupError(msg)
-    return target
+    return path
+
+
+def check_target(target: Path, vault_root: Path) -> Path:
+    """The backup target as an absolute path, or ``BackupError`` (:func:`check_place`): no link
+    or junction on the way, not inside the vault or holding it, not inside a Git working tree."""
+    return check_place(target, noun="backup target", apart=[(vault_root, "vault folder")])
 
 
 def _ensure_folder(folder: Path, *, parents: bool = False) -> bool:
@@ -251,21 +262,31 @@ def _snapshot(db: Path, out: Path) -> list[tuple[object, object, object]]:
         finally:
             source.close()
         _fsync(out)
-        # A plain path, not a URI: SQLite refuses a URI that names a network share
-        # (file://nas/backups/...), and a backup folder on one is a fair choice. The copy is in
-        # rollback-journal mode, so reading it creates no side file.
-        copy = sqlite3.connect(str(out))
-        try:
-            check = copy.execute("PRAGMA quick_check").fetchall()
-            if check != [("ok",)]:
-                msg = "the database snapshot did not pass SQLite's check; nothing was published"
-                raise BackupError(msg)
-            rows = copy.execute("SELECT sha256, ext, size FROM blobs ORDER BY sha256").fetchall()
-        finally:
-            copy.close()
+        rows = checked_blob_rows(out, full=False)
     except sqlite3.Error:
         msg = "SQLite could not take or read the database snapshot; nothing was published"
         raise BackupError(msg) from None
+    if rows is None:
+        msg = "the database snapshot did not pass SQLite's check; nothing was published"
+        raise BackupError(msg)
+    return rows
+
+
+def checked_blob_rows(db: Path, *, full: bool) -> list[tuple[object, object, object]] | None:
+    """The ``blobs`` rows of a database copy, or None if SQLite's check finds it damaged:
+    ``integrity_check`` with ``full``, else the faster ``quick_check``. ``sqlite3.Error`` is the
+    caller's to turn into a message."""
+    # A plain path, not a URI: SQLite refuses a URI that names a network share
+    # (file://nas/backups/...), and a backup folder on one is a fair choice. A snapshot is in
+    # rollback-journal mode, so reading it creates no side file.
+    copy = sqlite3.connect(str(db))
+    try:
+        pragma = "PRAGMA integrity_check" if full else "PRAGMA quick_check"
+        if copy.execute(pragma).fetchall() != [("ok",)]:
+            return None
+        rows = copy.execute("SELECT sha256, ext, size FROM blobs ORDER BY sha256").fetchall()
+    finally:
+        copy.close()
     return [(row[0], row[1], row[2]) for row in rows]
 
 
@@ -292,27 +313,38 @@ def _publish(temp: Path, final: Path, created: list[Path], *, mode: int = READ_O
     final.chmod(mode)
 
 
-def _read_token(path: Path) -> bytes | None:
-    """The vault's token file, or None if the vault has none yet (the server makes it at its first
-    start). Anything but a real file in its place (a link, a junction, a folder) is refused, as the
-    blob store refuses one where a blob belongs: a link could hand the backup another file. The file
-    is opened without following a link and must still be the entry that was checked."""
+def open_real_file(path: Path, noun: str) -> BinaryIO | None:
+    """The file opened for reading, or None if nothing is there. Anything but a real file in its
+    place (a link, a junction, a folder) is refused, as the blob store refuses one where a blob
+    belongs: a link could hand the copy another file. The file is opened without following a link
+    and must still be the entry that was checked. ``noun`` names it in the fixed messages."""
     status = _lstat(path)
     if status is None:
         return None
     if not _is_real_file(status):
-        msg = "something that is not a file (or a link) is where the vault's token file belongs"
+        msg = f"something that is not a file (or a link) is where {noun} belongs"
         raise BackupError(msg)
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     except OSError:
-        msg = "the vault's token file could not be read"
+        msg = f"{noun} could not be read"
         raise BackupError(msg) from None
-    with os.fdopen(fd, "rb") as handle:
-        opened = os.fstat(handle.fileno())
-        if (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino):
-            msg = "the vault's token file changed while it was being read"
-            raise BackupError(msg)
+    handle = os.fdopen(fd, "rb")
+    opened = os.fstat(handle.fileno())
+    if (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino):
+        handle.close()
+        msg = f"{noun} changed while it was being read"
+        raise BackupError(msg)
+    return handle
+
+
+def _read_token(path: Path) -> bytes | None:
+    """The vault's token file, or None if the vault has none yet (the server makes it at its first
+    start). Read through :func:`open_real_file`."""
+    handle = open_real_file(path, "the vault's token file")
+    if handle is None:
+        return None
+    with handle:
         data = handle.read(TOKEN_MAX_BYTES + 1)
     if len(data) > TOKEN_MAX_BYTES:
         msg = "the vault's token file is far larger than a token; it was not copied"
