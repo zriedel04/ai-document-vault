@@ -318,9 +318,14 @@ jobs:
             $changed = & $edition -NoProfile -File .\vault.ps1 run -NoBrowser | Out-String
             $env:AIVAULT_CONFIG = $kept
             if (($changed -notmatch 'settings have changed') -or ($changed -notmatch ':18766/') -or ($changed -match '18767')) { throw "a second run with other settings did not keep to the running server: $changed" }
-            & $edition -NoProfile -File .\vault.ps1 stop
-            if ($LASTEXITCODE -ne 0) { throw "stop failed in $edition" }
+            # stop asks the server to shut down (POST /api/shutdown with the token) and ends it only
+            # as a fallback, which it would say; the server's own log shows the pool was stopped.
+            $said = & $edition -NoProfile -File .\vault.ps1 stop | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "stop failed in ${edition}: $said" }
+            if (($said -notmatch 'stopped cleanly') -or ($said -match 'did not stop cleanly')) { throw "stop did not shut the server down cleanly in ${edition}: $said" }
             if (Test-Path .run\server.json) { throw 'stop left its record behind' }
+            $log = Get-Content -Raw -LiteralPath .run\server.err.log
+            if (($log -notmatch 'server\.shutdown_requested') -or ($log -notmatch 'workers\.stopped')) { throw "the server did not shut down through its lifespan in ${edition}: $log" }
             $up = $true
             try { Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:18766/api/health -TimeoutSec 2 | Out-Null } catch { $up = $false }
             if ($up) { throw 'the server still answers after stop' }
