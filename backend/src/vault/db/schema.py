@@ -20,6 +20,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -55,6 +56,23 @@ IMPORT_METHODS: Final = ("upload", "folder", "watch")
 # The processing stages of section 7 (Tier B and C), each a job of its own (ADR 0005).
 JOB_STAGES: Final = ("extract", "ocr", "metadata", "chunk", "embed", "enrich")
 JOB_STATUSES: Final = ("queued", "running", "done", "failed")
+# The kinds of label of section 6, plus ``folder``: a folder an import came from (see ``labels``).
+LABEL_KINDS: Final = (
+    "collection",
+    "category",
+    "course",
+    "project",
+    "tag",
+    "topic",
+    "person",
+    "org",
+    "folder",
+)
+# Who assigned a label to a document, and what the owner made of it (section 6).
+LABEL_SOURCES: Final = ("user", "ai", "import_path", "rule")
+LABEL_STATUSES: Final = ("suggested", "accepted", "rejected")
+# The longest label name: what Windows allows for one file or folder name.
+MAX_LABEL_CHARS: Final = 255
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:
@@ -349,6 +367,84 @@ chunks = Table(
     UniqueConstraint("version_id", "chunk_index", name="uq_chunks_version_index"),
     Index("ix_chunks_document_id", "document_id"),
     sqlite_autoincrement=True,
+)
+
+# Labels (section 6): collections, categories, courses, projects, tags, topics, people and
+# organisations in one table, nested through ``parent_id``. The plan's kinds get one more,
+# ``folder``: a folder an import came from, nested as it was on disk (``School`` > ``CSE485``), so
+# the owner's hierarchy is kept apart from the collections they make themselves later. ``name`` is
+# the label as shown; ``name_key`` is the name as Windows compares folder names (each letter in its
+# simple upper case, ``vault.db.labels.name_key``), so ``School`` and ``school`` under the same
+# parent are one label, and the database keeps one label per kind, parent and key. The parent's
+# kind is the writer's rule, not the table's: a course may later sit under a category. Folder and
+# label names are the owner's own words: they live in vault.db and are never logged.
+labels = Table(
+    "labels",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("kind", String, nullable=False),
+    Column("name", String, nullable=False),
+    Column("name_key", String, nullable=False),
+    # Deleting a parent that still has children fails at the end of the statement (NO ACTION), so
+    # one statement may remove a parent with its children.
+    Column("parent_id", String, ForeignKey("labels.id"), nullable=True),
+    Column("color", String, nullable=True),
+    Column("local_only", Boolean, nullable=False),
+    CheckConstraint(ulid_check("id"), name="id_is_a_ulid"),
+    CheckConstraint(_one_of("kind", LABEL_KINDS), name="kind_known"),
+    CheckConstraint(
+        f"length(name) BETWEEN 1 AND {MAX_LABEL_CHARS} AND length(name_key) = length(name)",
+        name="name_shape",
+    ),
+    CheckConstraint("parent_id IS NULL OR parent_id <> id", name="not_its_own_parent"),
+    CheckConstraint(
+        "color IS NULL OR (length(color) = 7 AND color GLOB '#[0-9a-f][0-9a-f][0-9a-f]"
+        "[0-9a-f][0-9a-f][0-9a-f]')",
+        name="color_shape",
+    ),
+    CheckConstraint("local_only IN (0, 1)", name="local_only_flag"),
+    Index(
+        "uq_labels_top_name",
+        "kind",
+        "name_key",
+        unique=True,
+        sqlite_where=text("parent_id IS NULL"),
+    ),
+    Index(
+        "uq_labels_child_name",
+        "parent_id",
+        "kind",
+        "name_key",
+        unique=True,
+        sqlite_where=text("parent_id IS NOT NULL"),
+    ),
+)
+
+# Which documents carry which labels, and where each assignment came from (section 6). The same
+# label may come from more than one source (the owner and an import path), once from each.
+# ``import_path`` rows are facts about where a file was, so they are accepted as written and carry
+# no model or confidence; only an AI suggestion names a model and a confidence.
+document_labels = Table(
+    "document_labels",
+    metadata,
+    Column("document_id", String, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
+    Column("label_id", String, ForeignKey("labels.id", ondelete="CASCADE"), primary_key=True),
+    Column("source", String, primary_key=True),
+    Column("status", String, nullable=False),
+    Column("confidence", Float, nullable=True),
+    Column("model", String, nullable=True),
+    Column("created_at", DateTime, nullable=False),
+    CheckConstraint(_one_of("source", LABEL_SOURCES), name="source_known"),
+    CheckConstraint(_one_of("status", LABEL_STATUSES), name="status_known"),
+    CheckConstraint(
+        "source = 'ai' OR (confidence IS NULL AND model IS NULL)", name="only_ai_names_a_model"
+    ),
+    CheckConstraint(
+        "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)", name="confidence_range"
+    ),
+    CheckConstraint("model IS NULL OR length(model) BETWEEN 1 AND 100", name="model_shape"),
+    CheckConstraint("source <> 'import_path' OR status = 'accepted'", name="import_path_accepted"),
+    Index("ix_document_labels_label_id", "label_id"),
 )
 
 # The FTS5 table over chunks and the shadow tables FTS5 keeps for it. The migration ``0005`` creates

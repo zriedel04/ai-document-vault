@@ -32,6 +32,8 @@ const PDF: DocumentDetail = {
   version_origin: "import",
   import_sources: [],
   jobs: [],
+  labels: [],
+  title: { value: "Course reader", source: "filename" },
 };
 
 type FileHandler = () => Response | Promise<Response>;
