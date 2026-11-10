@@ -36,6 +36,7 @@ from vault.main import create_app
 START = datetime(2026, 10, 15, 12, 0, 0)
 HASH = "ab" * 32
 OTHER_HASH = "cd" * 32
+SECRET = "Patient diagnosis confidential: Jane Roe"  # noqa: S105 - not a password
 
 
 class Clock:
@@ -331,6 +332,77 @@ def test_only_the_worker_that_holds_a_job_can_end_it(engine: Engine, queue: JobQ
     with pytest.raises(JobLostError):
         queue.complete(job_id, WORKER)  # twice
     assert status_of(engine, job_id) == "done"
+
+
+def test_claim_with_extensions_leaves_the_current_work_of_another_type_queued(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)  # its current version's blob is a .txt
+    job_id = queue.enqueue(document_id, "extract", HASH)
+    assert queue.claim(WORKER, ["extract"], extensions={"pdf", "docx"}) is None
+    assert row_of(engine, job_id).attempts == 0  # not even an attempt is counted
+    job = queue.claim(WORKER, ["extract"], extensions={"txt"})
+    assert job is not None
+    assert job.id == job_id
+
+
+@pytest.mark.parametrize("extensions", ["txt", [b"txt"]])
+def test_claim_refuses_extensions_that_are_not_a_collection_of_names(
+    queue: JobQueue, extensions: Any
+) -> None:
+    with pytest.raises(TypeError):
+        queue.claim(WORKER, ["extract"], extensions=extensions)
+
+
+def test_claim_with_extensions_takes_work_the_document_no_longer_needs_whatever_its_type(
+    engine: Engine, queue: JobQueue
+) -> None:
+    document_id = add_document(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(blobs).values(
+                sha256=OTHER_HASH, size=1, ext="pdf", mime="application/pdf", created_at=START
+            )
+        )
+    stale = queue.enqueue(document_id, "extract", OTHER_HASH)  # not the current version's bytes
+    job = queue.claim(WORKER, ["extract"], extensions={"txt"})
+    assert job is not None
+    assert job.id == stale  # so its handler ends it as stale
+
+
+def test_defer_gives_the_job_back_later_without_its_attempt_or_failing_the_document(
+    engine: Engine, queue: JobQueue, clock: Clock
+) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "extract", HASH, max_attempts=1)
+    for _ in range(3):  # more often than it has attempts
+        job = queue.claim(WORKER, ["extract"])
+        assert job is not None
+        queue.defer(job_id, WORKER, OSError(SECRET), timedelta(minutes=10))
+        row = row_of(engine, job_id)
+        assert (row.status, row.attempts, row.locked_by, row.last_error) == (
+            "queued",
+            0,
+            None,
+            "OSError",
+        )
+        assert row.run_after == clock.now + timedelta(minutes=10)
+        assert queue.claim(WORKER, ["extract"]) is None  # not before its time
+        clock.advance(timedelta(minutes=10))
+    assert state_of(engine, document_id) == "processing"
+
+
+def test_only_the_worker_that_holds_a_job_can_defer_it(engine: Engine, queue: JobQueue) -> None:
+    document_id = add_document(engine)
+    job_id = queue.enqueue(document_id, "extract", HASH)
+    with pytest.raises(JobLostError):
+        queue.defer(job_id, WORKER, OSError(), timedelta(minutes=1))  # queued, not held
+    assert queue.claim(WORKER, ["extract"]) is not None
+    with pytest.raises(JobLostError):
+        queue.defer(job_id, OTHER_WORKER, OSError(), timedelta(minutes=1))
+    with pytest.raises(ValueError, match="positive"):
+        queue.defer(job_id, WORKER, OSError(), timedelta(0))
+    assert status_of(engine, job_id) == "running"
 
 
 def test_release_gives_an_unstarted_job_back_with_its_attempt(

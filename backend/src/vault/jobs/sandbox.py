@@ -21,8 +21,12 @@ Every message is fixed text, so a job's error (the class name, ``JobQueue.fail``
 say what happened without quoting anything.
 
 **Allowlist.** Only entry points in :data:`ENTRY_POINTS` (or a mapping the caller passes) run,
-each a top-level function of a ``vault.`` module, ``vault.ingest.extractors.pdf:extract`` say. The
-child checks again that the name is a plain function defined in that module.
+each a top-level function of a ``vault.`` module, ``vault.ingest.extractors.docx:extract`` say. The
+child checks again that the name is a plain function defined in that module. An entry point may
+declare options (:attr:`EntryPoint.options`, the Windows code pages a text extractor falls back
+to): a call to it must pass one of them, which goes to the child on its command line and to the
+function as its second argument; a call to any other entry point must pass none. Anything else is
+refused before a child starts.
 
 **Input and answer.** The input goes to the child's standard input through a pipe and never
 appears on its command line; no temporary file is written, so there is no file a link could
@@ -88,8 +92,8 @@ the group's id stays reserved until the group has been killed, also after a norm
 Linux the target cannot start a process that could leave the group; on Windows the job allows
 no breakaway.
 
-Nothing calls this yet: the extraction stage's handler will be the first caller. The runner logs
-nothing; the worker logs the job's outcome.
+The extraction stage (:mod:`vault.ingest.extract_stage`) is the caller. The runner logs nothing;
+the worker logs the job's outcome.
 """
 
 from __future__ import annotations
@@ -113,6 +117,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING, Final
 
+from vault.ingest.extractors import Extraction
+from vault.ingest.extractors.text import FALLBACK_ENCODINGS
 from vault.jobs import sandbox_child as child
 
 if TYPE_CHECKING:
@@ -433,21 +439,41 @@ class EntryPoint:
     ``result_type`` is the type the function returns, as a type object (``str``, ``list[Page]``,
     a dataclass): checked here, when the entry point is defined, against ``_RESULT_TYPE_RULE``.
     The server builds only that type from the child's answer.
+
+    ``options`` are the values a call may pass as the function's second argument, each of the
+    shape ``sandbox_child.OPTION``; with none, the function takes the input only.
     """
 
     target: str
     result_type: object
+    options: frozenset[str] = frozenset()
     _decoder: _Node = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not child.TARGET.fullmatch(self.target):
             msg = "an entry point is a top-level function of a vault module (vault.x:function)"
             raise ValueError(msg)
+        if not isinstance(self.options, frozenset) or not all(
+            isinstance(option, str) and child.OPTION.fullmatch(option) for option in self.options
+        ):
+            msg = "an entry point's options are a frozenset of short lower-case names"
+            raise ValueError(msg)
         object.__setattr__(self, "_decoder", _compile_result_type(self.result_type))
 
 
-# The extractors register their entry points here when the extraction stage is wired in.
-ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType({})
+# The extractors the extraction stage runs (vault.ingest.extract_stage). The text extractors take
+# the configured fallback code page as their option.
+ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
+    {
+        "text": EntryPoint(
+            "vault.ingest.extractors.text:extract_plain", Extraction, FALLBACK_ENCODINGS
+        ),
+        "markdown": EntryPoint(
+            "vault.ingest.extractors.text:extract_markdown", Extraction, FALLBACK_ENCODINGS
+        ),
+        "docx": EntryPoint("vault.ingest.extractors.docx:extract", Extraction),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -578,15 +604,23 @@ def run(
     data: bytes | bytearray | memoryview,
     limits: SandboxLimits,
     *,
+    option: str | None = None,
     entry_points: Mapping[str, EntryPoint] = ENTRY_POINTS,
 ) -> object:
-    """Run the entry point named ``entry`` on ``data`` in a child process and return its result.
+    """Run the entry point named ``entry`` on ``data`` (with ``option``, one of the entry point's
+    ``options``, when it declares any) in a child process and return its result.
 
-    Raises a :class:`SandboxError` subclass when there is no result. Safe to call from several
-    threads at once: each call has its own child (and on Windows its own job).
+    Raises a :class:`SandboxError` subclass when there is no result: :class:`SandboxRefusedError`
+    for an entry point not in ``entry_points``, or an option it does not declare (or none where
+    it needs one). Safe to call from several threads at once: each call has its own child (and on
+    Windows its own job).
     """
     point = entry_points.get(entry) if isinstance(entry, str) else None
     if not isinstance(point, EntryPoint):
+        raise SandboxRefusedError
+    if (option is None) != (not point.options) or (
+        option is not None and (type(option) is not str or option not in point.options)
+    ):
         raise SandboxRefusedError
     if not isinstance(data, bytes | bytearray | memoryview):
         msg = "the sandbox input is bytes"
@@ -598,7 +632,7 @@ def run(
         raise SandboxUnavailableError
     # A view, not a copy: the input can be hundreds of MiB.
     view = memoryview(data).cast("B")
-    answer, exit_code, timed_out, overflow = _Child(point.target, limits).run(view)
+    answer, exit_code, timed_out, overflow = _Child(point.target, limits, option).run(view)
     if timed_out:
         raise SandboxTimeoutError
     if overflow:
@@ -644,9 +678,10 @@ def _interpret(
 class _Child:
     """One child process: start, limit, feed, wait, read, and always kill and reap."""
 
-    def __init__(self, target: str, limits: SandboxLimits) -> None:
+    def __init__(self, target: str, limits: SandboxLimits, option: str | None = None) -> None:
         self._target = target
         self._limits = limits
+        self._option = option
         self._answer = bytearray()
         self._overflow = threading.Event()
         self._input_bytes = 0
@@ -707,6 +742,7 @@ class _Child:
             str(self._limits.memory_bytes),
             str(os.getpid()),
             str(self._input_bytes),
+            *(() if self._option is None else (self._option,)),
         ]
         if sys.platform == "win32":  # pragma: no cover - Windows only
             # Suspended until it is in the job: in a virtual environment ``sys.executable`` is a
