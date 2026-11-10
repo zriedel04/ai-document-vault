@@ -1,8 +1,9 @@
 """The child side of the sandbox runner (:mod:`vault.jobs.sandbox`).
 
 The parent starts ``python -I -m vault.jobs.sandbox_child TARGET MEMORY_BYTES PARENT_PID
-INPUT_BYTES``: the command line holds only the target's name (fixed in code), the memory cap, the
-parent's process id and the input's length, never document content. The child then
+INPUT_BYTES [OPTION]``: the command line holds only the target's name (fixed in code), the memory
+cap, the parent's process id, the input's length and, for an entry point that declares options,
+one of them (fixed in code too: a code page name, say), never document content. The child then
 
 1. keeps its standard output for the answer and points file descriptors 1 and 2 at the null
    device, so nothing a library prints or logs reaches the server's console (the parent starts it
@@ -13,7 +14,8 @@ parent's process id and the input's length, never document content. The child th
    is the total of every process in it, before sending input);
 3. reads the input bytes from standard input into one ``bytes`` object of the announced length
    (one allocation, no second copy: the input may be close to the memory cap);
-4. calls the target and writes one answer: a status byte followed by the result as ASCII JSON
+4. calls the target (``target(data)``, or ``target(data, option)`` with an option) and writes one
+   answer: a status byte followed by the result as ASCII JSON
    (:func:`encode`), or by the exception's class name, and nothing else.
 
 Running out of memory at any step that grows with the input or the result (reading the input,
@@ -51,6 +53,8 @@ SETUP: Final = b"S"  # the child could not limit itself
 # Always ``fullmatch``: ``$`` would also match before a trailing newline.
 TARGET: Final = re.compile(r"vault(?:\.[a-z_][a-z0-9_]*)+:[a-z_][a-z0-9_]*")
 ERROR_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
+# An entry point's option, as the parent checks it against the entry point's own list first.
+OPTION: Final = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 UNNAMED_ERROR: Final = "Error"
 # How bytes are written: an object whose only key is this (not a field name: it is not an
 # identifier).
@@ -178,8 +182,9 @@ def encode(result: object) -> bytes:
     return text.encode("ascii")
 
 
-def respond(target: str, data: bytes) -> tuple[bytes, bytes]:
-    """Run ``target`` on ``data`` and return the answer: a status byte and its payload.
+def respond(target: str, data: bytes, option: str | None = None) -> tuple[bytes, bytes]:
+    """Run ``target`` on ``data`` (and ``option``, when there is one) and return the answer: a
+    status byte and its payload. An option of another shape than ``OPTION`` is refused.
 
     They are kept apart so that the payload, as large as the result, is never copied again to put
     the status byte in front of it.
@@ -188,10 +193,13 @@ def respond(target: str, data: bytes) -> tuple[bytes, bytes]:
         function = resolve(target)
     except MemoryError:
         return MEMORY, b""
-    if function is None:
+    if function is None or (
+        option is not None and (not isinstance(option, str) or not OPTION.fullmatch(option))
+    ):
         return REFUSED, b""
     try:
-        result = function(data)  # type: ignore[operator]
+        arguments = (data,) if option is None else (data, option)
+        result = function(*arguments)  # type: ignore[operator]
     except MemoryError:
         return MEMORY, b""
     except BaseException as error:  # everything, SystemExit too: report it, never its message
@@ -392,8 +400,10 @@ def main(argv: list[str]) -> None:  # pragma: no cover - runs in the child proce
     answer_fd = _silence_output()
     _prepare_windows(answer_fd)
     try:
-        target, memory, parent, size = argv
+        target, memory, parent, size, *rest = argv
         memory_bytes, parent_pid, length = int(memory), int(parent), int(size)
+        if len(rest) > 1:
+            raise ValueError
     except ValueError:
         write_answer(answer_fd, SETUP, b"")
         os._exit(2)
@@ -404,7 +414,7 @@ def main(argv: list[str]) -> None:  # pragma: no cover - runs in the child proce
         data = read_input(io.FileIO(0, closefd=False), length)
         if data is None:  # the parent stopped sending: no answer, so the parent sees a crash
             os._exit(3)
-        status, payload = respond(target, data)
+        status, payload = respond(target, data, rest[0] if rest else None)
         del data
         write_answer(answer_fd, status, payload)
     except MemoryError:
