@@ -36,8 +36,9 @@ export interface paths {
         /**
          * Read Document
          * @description One document, in use or in the trash: what the list shows, plus its hash, current version,
-         *     every import (oldest first; the first names the document) and its processing jobs (in the
-         *     order of the pipeline). An unknown id, or one that is not an id at all, is a 404 whose message
+         *     every import (oldest first; the first names the document), its processing jobs (in the
+         *     order of the pipeline), its labels (each import's folders, by kind and path) and its title
+         *     with where it came from. An unknown id, or one that is not an id at all, is a 404 whose message
          *     does not repeat it.
          */
         get: operations["read_document_api_documents__document_id__get"];
@@ -359,6 +360,8 @@ export interface components {
             import_sources: components["schemas"]["Source"][];
             /** Jobs */
             jobs: components["schemas"]["Job"][];
+            /** Labels */
+            labels: components["schemas"]["Label"][];
             /** Local Only */
             local_only: boolean;
             /** Mime */
@@ -376,6 +379,7 @@ export interface components {
              * @enum {string}
              */
             state: "processing" | "searchable" | "ready" | "failed" | "trashed";
+            title: components["schemas"]["Title"] | null;
             /** Trashed At */
             trashed_at: string | null;
             /** Version Id */
@@ -493,6 +497,30 @@ export interface components {
              * @enum {string}
              */
             status: "queued" | "running" | "done" | "failed";
+        };
+        /** Label */
+        Label: {
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "collection" | "category" | "course" | "project" | "tag" | "topic" | "person" | "org" | "folder";
+            /** Name */
+            name: string;
+            /** Path */
+            path: string[];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "user" | "ai" | "import_path" | "rule";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "suggested" | "accepted" | "rejected";
         };
         /** Me */
         Me: {
@@ -664,6 +692,16 @@ export interface components {
              * @constant
              */
             stopping: true;
+        };
+        /** Title */
+        Title: {
+            /**
+             * Source
+             * @constant
+             */
+            source: "filename";
+            /** Value */
+            value: string;
         };
         /** UploadResult */
         UploadResult: {
