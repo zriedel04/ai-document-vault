@@ -104,6 +104,8 @@ jobs:
         run: |
           uv sync --locked --no-dev
           uv run --no-sync python ../scripts/check_python_licenses.py --strict --ignore vault
+      - name: Third-party notices list every Python runtime package
+        run: uv run --no-sync python ../scripts/third_party_notices.py check python --ignore vault
 
   backend-windows:
     name: Backend (Windows)
@@ -126,6 +128,16 @@ jobs:
       - run: uv run pytest
       - name: Retrieval evaluation on the demo corpus (fails only if it cannot run)
         run: uv run python -m vault.eval --json "$env:RUNNER_TEMP\retrieval-eval.json"
+
+      # The app runs on Windows, so its runtime packages are checked there too: a dependency
+      # can pull in a package only on win32, or ship different licence files in its Windows wheel.
+      - name: Licence check and third-party notices (Windows runtime only)
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-runtime
+        run: |
+          uv sync --locked --no-dev
+          uv run --no-sync python ../scripts/check_python_licenses.py --strict --ignore vault
+          uv run --no-sync python ../scripts/third_party_notices.py check python --ignore vault
 
   frontend:
     name: Frontend (Linux)
@@ -170,6 +182,8 @@ jobs:
         run: python scripts/check_npm_licenses.py
       - name: Licence check (runtime only, no exceptions)
         run: python scripts/check_npm_licenses.py --strict
+      - name: Third-party notices list every npm runtime package
+        run: python scripts/third_party_notices.py check npm
       - name: Dependency audit
         working-directory: frontend
         run: npm audit
