@@ -126,6 +126,12 @@ class Limits:
     max_zip_ratio: int = 200  # uncompressed bytes per byte of the file
     # The central directory (a record of at least 46 bytes per entry) is read whole by zipfile.
     max_zip_directory_bytes: int = 4 * 1024 * 1024
+    # The PDF extractor's caps (``vault.ingest.extractors.pdf``). The text cap keeps the worst case
+    # answer of a sandboxed extraction (a character that JSON writes as 12 bytes, or a comma that
+    # the sandbox counts as a value) inside the sandbox's default caps on the answer's size, cost
+    # and value count; a test checks it against them.
+    max_pdf_pages: int = 5_000
+    max_pdf_text_chars: int = 3_000_000
 
 
 @dataclass(frozen=True)

@@ -189,6 +189,56 @@ class ViolationsTest(unittest.TestCase):
         self.assertEqual(licences.violations([viral], ignore=["my-pkg"]), [])
 
 
+class TranslatedTest(unittest.TestCase):
+    FIELD = "BSD-3-Clause, Apache-2.0, dependency licenses"
+
+    def test_the_listed_field_passes_also_in_strict_mode(self) -> None:
+        pdfium = package("pypdfium2", field=self.FIELD)
+        self.assertEqual(licences.violations([pdfium]), [])
+        self.assertEqual(licences.violations([pdfium], strict=True), [])
+        self.assertEqual(licences.violations([package("PyPdfium2", field=self.FIELD)]), [])
+
+    def test_the_field_cannot_be_read_without_the_translation(self) -> None:
+        self.assertFalse(licences.name_allowed(self.FIELD))
+
+    def test_only_the_listed_package_and_exact_field(self) -> None:
+        for other in (
+            package("not-pypdfium2", field=self.FIELD),
+            package("pypdfium2", field=self.FIELD + " "),
+            package("pypdfium2", field="BSD-3-Clause, GPL-3.0, dependency licenses"),
+            package("pypdfium2", field=self.FIELD.lower()),
+            package("pypdfium2"),
+        ):
+            with self.subTest(package=other):
+                self.assertEqual(len(licences.violations([other], strict=True)), 1)
+
+    def test_an_expression_or_classifiers_win_over_the_translation(self) -> None:
+        gpl = "GNU General Public License v3 (GPLv3)"
+        for other in (
+            package("pypdfium2", "GPL-3.0-only", field=self.FIELD),
+            package("pypdfium2", classifiers=(gpl,), field=self.FIELD),
+            package("pypdfium2", classifiers=(self.FIELD,), field=self.FIELD),
+        ):
+            with self.subTest(package=other):
+                self.assertEqual(len(licences.violations([other], strict=True)), 1)
+
+    def test_every_translation_is_an_allowed_expression_from_an_accepted_adr(self) -> None:
+        decisions = SCRIPTS.parent / "docs" / "decisions"
+        for name, (field, expression, reason) in licences.TRANSLATED.items():
+            with self.subTest(package=name):
+                self.assertEqual(name, licences.normalise(name))
+                self.assertTrue(licences.expression_allowed(expression))
+                self.assertFalse(licences.name_allowed(field))
+                number = reason.split()[1]
+                self.assertTrue(reason.startswith(f"ADR {number} "))
+                (adr,) = decisions.glob(f"{number}-*.md")
+                text = adr.read_text(encoding="utf-8")
+                self.assertIn("- Status: Accepted\n", text)
+                self.assertIn(name, text)
+                for spdx in expression.split(" OR "):
+                    self.assertIn(spdx, text)
+
+
 class EnvironmentTest(unittest.TestCase):
     """The script reads real metadata: build tiny fake installations and run it."""
 

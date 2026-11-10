@@ -12,7 +12,7 @@ The audit and the notices were first written in PR #39, which was merged into a 
 
 | Area | Packages | Result |
 | --- | --- | --- |
-| Backend runtime (Python) | 24 | All on the allowed list (MIT, BSD-3-Clause, Apache-2.0, PSF-2.0). lxml's wheels bundle libiconv (LGPL-2.1), an open point below |
+| Backend runtime (Python) | 25 | All on the allowed list (MIT, BSD-3-Clause, Apache-2.0, PSF-2.0; pypdfium2's licence field read as Apache-2.0 OR BSD-3-Clause, below). lxml's wheels bundle libiconv (LGPL-2.1), an open point below |
 | Frontend runtime (npm) | 51 | All on the allowed list (MIT, Apache-2.0, 0BSD, Unlicense, MIT or CC0-1.0) |
 | Backend development tools (Python) | 41 in the environment, runtime and the backend itself included | Allowed, plus one reviewed exception (pathspec, MPL-2.0) |
 | Frontend development tools (npm) | 337 in the lockfile, runtime included | Allowed, plus reviewed exceptions (below) |
@@ -42,10 +42,11 @@ These are what a user of the app runs. The full list with licence texts is in [T
 
 The built frontend bundles npm code into its own files. MIT and the other licences above ask for their notice to be kept with copies of the code, which `THIRD_PARTY_NOTICES.md` does for anyone redistributing a build. Python packages are not bundled: `uv` installs them from PyPI with their own licence files.
 
-Two runtime packages carry more than their declared licence, and the checks, which read the declared one, cannot see it:
+Three runtime packages carry more than their declared licence, and the checks, which read the declared one, cannot see it:
 
 - **lxml** (BSD-3-Clause, through python-docx) says in its `LICENSES.txt` that its binary wheels bundle zlib, libxml2, libxslt, libexslt and libiconv, the last under LGPL-2.1. LGPL is allowed case by case (ADR 0012), and this case was not recorded when python-docx was added. The project does not redistribute lxml: `uv` installs the unchanged wheel from PyPI on the user's machine, with lxml's own licence files. The owner decides whether that is accepted; until then it is an open point of this audit.
 - **pdfjs-dist** (Apache-2.0) ships, besides its code, standard fonts (Foxit, BSD-style; Liberation, GPL-2.0 with a font exception), CMaps, colour profiles and WebAssembly decoders (OpenJPEG, BSD-2-Clause; PDFium's JBIG2, BSD-3-Clause; qcms, MIT), each with its licence file. The viewer loads none of these resources (`frontend/src/pages/pdf-view.ts`: no `standardFontDataUrl`, `cMapUrl`, `iccUrl` or `wasmUrl`, and `useWasm: false`), and the build holds only the app's script, its stylesheet and the PDF.js worker; this was checked on the build of 2026-11-10. The notices carry every licence file of the package anyway. If the viewer ever loads the standard fonts, the Liberation fonts would be GPL files in the build, which the policy does not allow, so that change needs a review first.
+- **pypdfium2** (Apache-2.0 OR BSD-3-Clause; its metadata writes `BSD-3-Clause, Apache-2.0, dependency licenses`, which `check_python_licenses.TRANSLATED` reads as that expression for this one package and exact value) bundles a PDFium build and ships the licence of each library in it under `data/<platform>/BUILD_LICENSES/`: PDFium (BSD-3-Clause), FreeType (FTL), ICU (Unicode), libjpeg-turbo (IJG and BSD-3-Clause), libpng, zlib, Little CMS (MIT), OpenJPEG (BSD-2-Clause), Abseil (Apache-2.0), LLVM libc (Apache-2.0 WITH LLVM-exception), fast_float, simdutf and AGG 2.3, all permissive; the GPL text in ICU's file covers its build scripts (with the autoconf exception), not the library. The Linux and Windows wheels of 5.14.0 ship the same files with the same texts (line endings aside), so the notices list them once with `<platform>` in the path (`third_party_notices.PLATFORM_FOLDERS`).
 
 ## Reviewed exceptions (development only)
 
