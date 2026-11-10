@@ -37,9 +37,9 @@ export interface paths {
          * Read Document
          * @description One document, in use or in the trash: what the list shows, plus its hash, current version,
          *     every import (oldest first; the first names the document), its processing jobs (in the
-         *     order of the pipeline), its labels (each import's folders, by kind and path) and its title
-         *     with where it came from. An unknown id, or one that is not an id at all, is a 404 whose message
-         *     does not repeat it.
+         *     order of the pipeline), its labels (each import's folders, by kind and path), the properties
+         *     its file states (title, author, dates) and its title with where it came from. An unknown id,
+         *     or one that is not an id at all, is a 404 whose message does not repeat it.
          */
         get: operations["read_document_api_documents__document_id__get"];
         put?: never;
@@ -356,6 +356,7 @@ export interface components {
             added_at: string;
             /** Extension */
             extension: string;
+            file_properties: components["schemas"]["FileProperties"];
             /** Id */
             id: string;
             /** Import Sources */
@@ -450,6 +451,23 @@ export interface components {
             total: number;
             /** Version Id */
             version_id: string;
+        };
+        /**
+         * FileProperties
+         * @description What the current version's bytes say about themselves (a DOCX's core properties), each
+         *     cleaned as untrusted text, or null when the file does not say it or says it in a form the
+         *     vault does not take. ``created`` and ``modified`` are W3CDTF: a year, a month, a day, or a
+         *     time in UTC to the second (``2026-03-04T05:06:07Z``).
+         */
+        FileProperties: {
+            /** Author */
+            author: string | null;
+            /** Created */
+            created: string | null;
+            /** Modified */
+            modified: string | null;
+            /** Title */
+            title: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -699,9 +717,9 @@ export interface components {
         Title: {
             /**
              * Source
-             * @constant
+             * @enum {string}
              */
-            source: "filename";
+            source: "file_properties" | "filename";
             /** Value */
             value: string;
         };

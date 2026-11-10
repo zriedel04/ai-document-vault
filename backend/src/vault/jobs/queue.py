@@ -171,9 +171,10 @@ class Recovery:
 
 def current_input(job: FromClause) -> ScalarSelect[str]:
     """The input the job's document needs now for the job's stage: the SHA-256 of its current
-    version's bytes. Every stage queues that hash as its input today (the importer's ``extract``,
-    the ``chunk`` stage); a stage whose input comes to hold more (tool or model versions) has to
-    say so here, since ``current_work`` judges every job by it. NULL for a document that is gone.
+    version's bytes. Every stage queues that hash as its input today (the importer's ``extract``
+    and ``metadata``, the ``chunk`` stage); a stage whose input comes to hold more (tool or model
+    versions) has to say so here, since ``current_work`` judges every job by it. NULL for a
+    document that is gone.
     """
     document = documents.alias("input_document")
     version = document_versions.alias("input_version")

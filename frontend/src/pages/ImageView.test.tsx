@@ -30,6 +30,7 @@ function detail(id: string, overrides: Partial<DocumentDetail> = {}): DocumentDe
     import_sources: [],
     jobs: [],
     labels: [],
+    file_properties: { title: null, author: null, created: null, modified: null },
     title: { value: "Scan", source: "filename" },
     ...overrides,
   };

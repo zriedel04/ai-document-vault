@@ -72,6 +72,7 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
       },
     ],
     labels: [],
+    file_properties: { title: null, author: null, created: null, modified: null },
     title: { value: "Lease agreement", source: "filename" },
     ...overrides,
   };
