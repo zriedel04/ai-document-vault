@@ -37,3 +37,18 @@ export function parseDocumentsSearch(search: Record<string, unknown>): Documents
     trash: search.trash === true,
   };
 }
+
+/**
+ * What a document's page keeps in the address: the PDF page to open at (`?page=4`), so a link
+ * such as a citation can open the viewer there. A page number is not private, unlike a search
+ * query. Anything but a whole number from 1 is left out and the viewer opens at the first page; a
+ * page past the end of the PDF is known only once it has loaded, and the viewer handles it there.
+ */
+export interface DocumentSearch {
+  page?: number;
+}
+
+export function parseDocumentSearch(search: Record<string, unknown>): DocumentSearch {
+  const page = search.page;
+  return typeof page === "number" && Number.isSafeInteger(page) && page >= 1 ? { page } : {};
+}
