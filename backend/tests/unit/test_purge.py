@@ -31,6 +31,7 @@ from vault.db.documents import (
     restore,
 )
 from vault.db.engine import create_vault_engine, write_transaction
+from vault.db.fields import FileProperties, replace_file_properties
 from vault.db.pages import PageText, replace_pages
 from vault.db.schema import (
     blobs,
@@ -176,10 +177,17 @@ def vault(app: FastAPI, tmp_path: Path) -> Vault:
 
 
 def trashed_with_everything(vault: Vault) -> str:
-    """A trashed document with a version, an import source, a job, folder labels, pages and
-    chunks."""
+    """A trashed document with a version, an import source, a job, folder labels, pages,
+    chunks and file properties."""
     document_id = vault.add()
     vault.add_chunks(document_id, f"Rent and the {MARKER} clause.\n\nPaid monthly.")
+    with vault.engine.begin() as connection:
+        replace_file_properties(
+            connection,
+            document_id,
+            vault.version_of(document_id),
+            FileProperties(title="Patient lease", author="Patient Name", created="2026"),
+        )
     vault.trash(document_id)
     for table in DOCUMENT_ROWS:
         assert vault.count(table, document_id) >= 1, table
