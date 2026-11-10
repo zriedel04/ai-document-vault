@@ -17,10 +17,11 @@ from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
-from vault.ingest import chunk_stage
+from vault.ingest import chunk_stage, extract_stage
 from vault.ingest.importer import Importer
 from vault.ingest.orphans import sweep_orphans
 from vault.jobs.queue import JobQueue
+from vault.jobs.sandbox import SandboxLimits
 from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
@@ -85,11 +86,23 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             strays=metric(orphans.strays),
         )
         importer = Importer(engine, blobs)
-        # Only the chunk stage has a handler so far; jobs of the others wait in the queue.
+        # Only extraction (of the types with an extractor) and chunking have handlers so far;
+        # jobs of the other stages and types wait in the queue.
+        options = settings.processing
         workers = WorkerPool(
             queue,
-            handlers={chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine, queue)},
+            handlers={
+                extract_stage.EXTRACT_STAGE: extract_stage.handler(
+                    engine,
+                    queue,
+                    blobs,
+                    SandboxLimits.from_settings(options),
+                    options.text_fallback_encoding,
+                ),
+                chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine, queue),
+            },
             limits=settings.workers.limits(),
+            extensions={extract_stage.EXTRACT_STAGE: extract_stage.EXTENSIONS},
         )
     else:
         token = new_token()

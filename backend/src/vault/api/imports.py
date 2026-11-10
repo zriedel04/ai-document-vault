@@ -38,6 +38,7 @@ from vault.core.security import LocalUser, current_user
 from vault.db import ids
 from vault.ingest.importer import Importer, ImportRequest, Outcome
 from vault.ingest.validate import EXTENSIONS, Reason
+from vault.jobs.worker import WorkerPool
 from vault.storage.blobs import BlobStore
 
 router = APIRouter(tags=["imports"])
@@ -231,6 +232,9 @@ async def upload(
             )
         finally:
             await run_in_threadpool(staged.unlink, missing_ok=True)
+    workers: WorkerPool | None = request.app.state.workers
+    if result.outcome is Outcome.IMPORTED and workers is not None:
+        workers.wake()  # its extract job is queued: no need to wait for an idle thread's poll
     return UploadResult(
         outcome=result.outcome,
         batch_id=batch_id,
