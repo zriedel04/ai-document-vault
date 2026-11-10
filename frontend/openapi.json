@@ -851,6 +851,21 @@
         "title": "StageJobs",
         "type": "object"
       },
+      "Stopping": {
+        "description": "The request was taken; the server shuts down after this answer.",
+        "properties": {
+          "stopping": {
+            "const": true,
+            "title": "Stopping",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopping"
+        ],
+        "title": "Stopping",
+        "type": "object"
+      },
       "UploadResult": {
         "properties": {
           "batch_id": {
@@ -1607,6 +1622,28 @@
         "summary": "Read Session",
         "tags": [
           "session"
+        ]
+      }
+    },
+    "/api/shutdown": {
+      "post": {
+        "description": "Shut the server down cleanly: running jobs get their bounded wait, then the process exits.",
+        "operationId": "shutdown_api_shutdown_post",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stopping"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Shutdown",
+        "tags": [
+          "server"
         ]
       }
     }
