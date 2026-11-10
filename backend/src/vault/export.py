@@ -73,6 +73,11 @@ def report(result: ExportResult) -> list[str]:
             f"Folders of earlier exports that did not finish (.vault-export-...) beside this one: "
             f"{result.leftovers}; they can be deleted"
         )
+    if not result.labels_complete:
+        lines.append(
+            "Warning: the vault's folder labels are not complete yet (the app has not labelled "
+            "the imports of an older vault); start the app once and export again to list them"
+        )
     if result.private is False:
         lines.append(
             "Warning: other accounts on this PC may be able to read the export, or its drive "
