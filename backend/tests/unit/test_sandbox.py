@@ -32,7 +32,8 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 import pytest
 
 from vault.core.config import ProcessingSettings, Settings
-from vault.ingest.extractors import CoreProperties
+from vault.ingest.extractors import CoreProperties, Extraction
+from vault.ingest.extractors.text import FALLBACK_ENCODINGS
 from vault.jobs import sandbox, sandbox_child, sandbox_probes
 from vault.jobs.sandbox import (
     MIB,
@@ -1303,14 +1304,70 @@ def test_an_entry_not_on_the_allowlist_is_refused() -> None:
         sandbox.run(1, b"", LIMITS, entry_points=ENTRIES)  # type: ignore[arg-type]
 
 
-def test_the_production_allowlist_holds_only_the_stages_entry_points() -> None:
-    """Until extraction is wired, the only entry point is the metadata stage's DOCX reader, and
-    the server builds nothing from its answer but ``CoreProperties``."""
-    assert dict(sandbox.ENTRY_POINTS) == {
-        "docx_properties": sandbox.EntryPoint(
-            "vault.ingest.extractors.docx:read_properties", CoreProperties
-        )
-    }
+def test_the_production_allowlist_holds_the_stages_entry_points_and_the_child_finds_each() -> None:
+    """The extractors, and the metadata stage's DOCX reader, from whose answer the server builds
+    nothing but ``CoreProperties``."""
+    assert set(sandbox.ENTRY_POINTS) == {"text", "markdown", "docx", "docx_properties"}
+    assert sandbox.ENTRY_POINTS["docx_properties"] == sandbox.EntryPoint(
+        "vault.ingest.extractors.docx:read_properties", CoreProperties
+    )
+    for name, point in sandbox.ENTRY_POINTS.items():
+        expected = CoreProperties if name == "docx_properties" else Extraction
+        assert point.result_type is expected
+        assert sandbox_child.resolve(point.target) is not None
+    assert sandbox.ENTRY_POINTS["text"].options == FALLBACK_ENCODINGS
+    assert sandbox.ENTRY_POINTS["markdown"].options == FALLBACK_ENCODINGS
+    assert sandbox.ENTRY_POINTS["docx"].options == frozenset()
+
+
+OPTIONS = {"o": EntryPoint(f"{PROBES}:with_option", list[str], frozenset({"cp1252", "cp1251"}))}
+
+
+def test_an_option_the_entry_point_declares_reaches_the_function() -> None:
+    result = sandbox.run("o", b"abc", LIMITS, option="cp1251", entry_points=OPTIONS)
+    assert result == ["3", "cp1251"]
+
+
+@pytest.mark.parametrize(
+    ("entry", "option"),
+    [
+        ("o", None),  # it needs one
+        ("o", "cp1250"),  # not one it declares
+        ("o", "cp1252 "),
+        ("o", 1252),
+        ("echo", "cp1252"),  # it declares none
+    ],
+)
+def test_an_option_the_entry_point_does_not_declare_is_refused(entry: str, option: object) -> None:
+    entries = {**OPTIONS, "echo": ENTRIES["echo"]}
+    with pytest.raises(SandboxRefusedError):
+        sandbox.run(entry, b"", LIMITS, option=option, entry_points=entries)  # type: ignore[arg-type]
+
+
+class _Option(str):
+    __slots__ = ()
+
+
+def test_an_option_that_is_a_str_subclass_is_refused() -> None:
+    with pytest.raises(SandboxRefusedError):
+        sandbox.run("o", b"", LIMITS, option=_Option("cp1252"), entry_points=OPTIONS)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"cp1252"}, frozenset({"CP1252"}), frozenset({"cp1252\n"}), frozenset({""}), frozenset({1})],
+)
+def test_options_are_a_frozenset_of_short_lower_case_names(options: object) -> None:
+    with pytest.raises(ValueError, match="options"):
+        EntryPoint(f"{PROBES}:with_option", list[str], options)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("option", ["cp1252\n", "", "-x", "a" * 33, "CP1252"])
+def test_the_child_refuses_an_option_of_another_shape(option: str) -> None:
+    assert sandbox_child.respond(f"{PROBES}:with_option", b"", option) == (
+        sandbox_child.REFUSED,
+        b"",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1465,7 +1522,7 @@ def test_the_probes_are_named_in_the_test_allowlist() -> None:
         and name.islower()
         and not name.startswith("_")
     }
-    assert functions == set(NAMES)
+    assert functions == {*NAMES, "with_option"}  # with_option: OPTIONS, which passes one
 
 
 # --- limits and settings --------------------------------------------------------------------

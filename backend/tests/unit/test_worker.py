@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import timedelta
 from pathlib import Path
 
@@ -18,7 +18,7 @@ from vault.jobs.queue import Completion, Job, JobQueue, Recovery
 from vault.jobs.worker import DEFAULT_LIMITS, Outcome, Stage, WorkerPool
 from vault.main import create_app
 
-from .test_jobs import Clock, add_document
+from .test_jobs import HASH, Clock, add_document
 
 SECRET = "Patient diagnosis confidential"  # noqa: S105 - document text, not a password
 
@@ -256,11 +256,17 @@ def test_a_database_error_while_claiming_does_not_end_the_thread(
     class Flaky(JobQueue):
         failures = 2
 
-        def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
+        def claim(
+            self,
+            worker_id: str,
+            stages: Iterable[str],
+            *,
+            extensions: Collection[str] | None = None,
+        ) -> Job | None:
             if self.failures:
                 self.failures -= 1
                 raise OSError(SECRET)
-            return super().claim(worker_id, stages)
+            return super().claim(worker_id, stages, extensions=extensions)
 
     flaky = Flaky(engine, clock=queue._clock)
     start(pools, WorkerPool(flaky, {"extract": lambda _job: None}, idle_seconds=0.02))
@@ -312,9 +318,15 @@ class CountingQueue(JobQueue):
         super().__init__(engine)
         self.claims = 0
 
-    def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
+    def claim(
+        self,
+        worker_id: str,
+        stages: Iterable[str],
+        *,
+        extensions: Collection[str] | None = None,
+    ) -> Job | None:
         self.claims += 1
-        return super().claim(worker_id, stages)
+        return super().claim(worker_id, stages, extensions=extensions)
 
 
 def test_an_idle_thread_sleeps_instead_of_asking_the_database_again(
@@ -365,10 +377,16 @@ class HeldClaimQueue(JobQueue):
         self.entered = threading.Event()
         self.proceed = threading.Event()
 
-    def claim(self, worker_id: str, stages: Iterable[str]) -> Job | None:
+    def claim(
+        self,
+        worker_id: str,
+        stages: Iterable[str],
+        *,
+        extensions: Collection[str] | None = None,
+    ) -> Job | None:
         self.entered.set()
         assert self.proceed.wait(10)
-        return super().claim(worker_id, stages)
+        return super().claim(worker_id, stages, extensions=extensions)
 
 
 def attempts(engine: Engine, job_id: str) -> int:
@@ -484,6 +502,49 @@ def test_a_pool_refuses_unknown_stages_and_bad_limits(
         WorkerPool(queue, handlers, limits)  # type: ignore[arg-type]
 
 
+def test_extensions_are_only_for_registered_stages(queue: JobQueue) -> None:
+    with pytest.raises(ValueError, match="stage"):
+        WorkerPool(queue, {"extract": print}, extensions={"ocr": frozenset({"pdf"})})
+
+
+def test_a_stage_with_extensions_claims_only_jobs_of_those_types(
+    engine: Engine, queue: JobQueue, pools: list[WorkerPool]
+) -> None:
+    [job_id] = enqueue(engine, queue, 1)
+    with engine.begin() as connection:  # the job's input is the document's current version
+        connection.execute(update(jobs).where(jobs.c.id == job_id).values(input_hash=HASH))
+    seen: list[str] = []
+    pool = WorkerPool(
+        queue,
+        {"extract": lambda job: seen.append(job.id)},
+        extensions={"extract": frozenset({"pdf"})},  # the blob is a .txt
+        idle_seconds=0.02,
+    )
+    start(pools, pool)
+    time.sleep(0.2)
+    assert seen == []
+    assert statuses(engine)[job_id] == "queued"
+
+
+def test_a_deferred_job_waits_without_using_an_attempt(
+    engine: Engine, queue: JobQueue, pools: list[WorkerPool], caplog: pytest.LogCaptureFixture
+) -> None:
+    [job_id] = enqueue(engine, queue, 1)
+
+    def defer(job: Job) -> Completion:
+        queue.defer(job.id, job.worker_id, OSError(SECRET), timedelta(minutes=5))
+        return Completion.DEFERRED
+
+    caplog.set_level(logging.INFO)
+    start(pools, WorkerPool(queue, {"extract": defer}, idle_seconds=0.02))
+    until(lambda: last_error(engine, job_id) == "OSError")
+    assert statuses(engine)[job_id] == "queued"
+    until(lambda: "workers.job_ended" in caplog.text)
+    ended = [record for record in caplog.records if record.getMessage() == "workers.job_ended"]
+    assert [getattr(record, FIELDS_ATTR)["outcome"] for record in ended] == [Outcome.DEFERRED]
+    assert SECRET not in caplog.text
+
+
 @pytest.mark.parametrize("seconds", [0, -1])
 def test_idle_seconds_must_be_positive(queue: JobQueue, seconds: float) -> None:
     with pytest.raises(ValueError, match="idle_seconds"):
@@ -519,8 +580,9 @@ def test_the_app_starts_and_stops_its_pool_with_the_server(vault_dir: Path) -> N
     pool = app.state.workers
     assert isinstance(pool, WorkerPool)
     with TestClient(app):
-        # Only the metadata and chunk stages have handlers so far, each with a limit of one.
-        assert len(pool.threads) == 2
+        # Extraction (limit 2), DOCX file properties (limit 1) and chunking (limit 1) have
+        # handlers so far.
+        assert len(pool.threads) == 4
         assert all(thread.is_alive() for thread in pool.threads)
     assert not any(thread.is_alive() for thread in pool.threads)
     with pytest.raises(RuntimeError):

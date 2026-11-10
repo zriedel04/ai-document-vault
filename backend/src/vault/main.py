@@ -17,7 +17,7 @@ from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
-from vault.ingest import chunk_stage, metadata_stage
+from vault.ingest import chunk_stage, extract_stage, metadata_stage
 from vault.ingest.importer import Importer
 from vault.ingest.orphans import sweep_orphans
 from vault.ingest.path_metadata import label_pending_sources
@@ -101,17 +101,26 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         pending = metadata_stage.queue_pending(engine, queue)
         log_event(logger, "metadata.queued", jobs=metric(pending))
         importer = Importer(engine, blobs)
-        # Only the metadata and chunk stages have handlers so far; jobs of the others wait in
-        # the queue.
+        # Only extraction (of the types with an extractor), DOCX file properties and chunking
+        # have handlers so far; jobs of the other stages and types wait in the queue.
+        options = settings.processing
         workers = WorkerPool(
             queue,
             handlers={
+                extract_stage.EXTRACT_STAGE: extract_stage.handler(
+                    engine,
+                    queue,
+                    blobs,
+                    SandboxLimits.from_settings(options),
+                    options.text_fallback_encoding,
+                ),
                 metadata_stage.METADATA_STAGE: metadata_stage.handler(
-                    engine, queue, blobs, SandboxLimits.from_settings(settings.processing)
+                    engine, queue, blobs, SandboxLimits.from_settings(options)
                 ),
                 chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine, queue),
             },
             limits=settings.workers.limits(),
+            extensions={extract_stage.EXTRACT_STAGE: extract_stage.EXTENSIONS},
         )
     else:
         token = new_token()
