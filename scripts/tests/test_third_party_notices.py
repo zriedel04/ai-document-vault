@@ -324,6 +324,58 @@ class PythonTest(unittest.TestCase):
         )
 
 
+    def test_a_platform_folder_gets_the_same_label_on_every_platform(self) -> None:
+        """pypdfium2's Linux and Windows wheels ship the same texts under data/<platform>/."""
+        from importlib.metadata import PathDistribution
+
+        found = []
+        for platform in ("linux_x64", "windows_x64"):
+            with tempfile.TemporaryDirectory() as tmp:
+                site = Path(tmp)
+                meta = site / "pypdfium2-5.14.0.dist-info"
+                licences = meta / "licenses" / "data" / platform / "BUILD_LICENSES"
+                licences.mkdir(parents=True)
+                (meta / "METADATA").write_text(
+                    "Metadata-Version: 2.4\nName: pypdfium2\nVersion: 5.14.0\n"
+                    "License: BSD-3-Clause, Apache-2.0, dependency licenses\n",
+                    encoding="utf-8",
+                )
+                files = {
+                    f"licenses/data/{platform}/BUILD_LICENSES/zlib.txt": "zlib licence",
+                    f"licenses/data/{platform}/BUILD_LICENSES/libjpeg_turbo.ijg": "IJG licence",
+                }
+                for path, text in files.items():
+                    (meta / path).write_text(text, encoding="utf-8")
+                record = [f"pypdfium2-5.14.0.dist-info/{p}" for p in files]
+                (meta / "RECORD").write_text("".join(f"{p},,\n" for p in record), encoding="utf-8")
+                [notice] = notices.python_notices(installed=[PathDistribution(meta)])
+                found.append(notice)
+        self.assertEqual(found[0], found[1])
+        # The licence the check judges: TRANSLATED's expression, not the free-text field.
+        self.assertEqual(found[0].licence, "Apache-2.0 OR BSD-3-Clause")
+        self.assertEqual(
+            [label for label, _ in found[0].texts],
+            [
+                "licenses/data/<platform>/BUILD_LICENSES/libjpeg_turbo.ijg",
+                "licenses/data/<platform>/BUILD_LICENSES/zlib.txt",
+            ],
+        )
+
+    def test_only_a_listed_package_has_its_platform_folder_renamed(self) -> None:
+        path = "x-1.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/zlib.txt"
+        self.assertEqual(notices.python_label(path, "x"), "licenses/data/linux_x64/BUILD_LICENSES/zlib.txt")
+        self.assertEqual(
+            notices.python_label(path, "PyPDFium2"), "licenses/data/<platform>/BUILD_LICENSES/zlib.txt"
+        )
+        # Only the folder right under data/ and above BUILD_LICENSES/, and only in the metadata folder.
+        for other in (
+            "pypdfium2-5.14.0.dist-info/licenses/LICENSES/Apache-2.0.txt",
+            "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/OTHER/zlib.txt",
+            "pypdfium2/data/linux_x64/BUILD_LICENSES/zlib.txt",
+        ):
+            with self.subTest(path=other):
+                self.assertNotIn("<platform>", notices.python_label(other, "pypdfium2"))
+
 class OverrideTest(unittest.TestCase):
     """Codex #39: a runtime package that ships no licence file still needs its text in the notices."""
 
@@ -474,7 +526,12 @@ class LicenceFileTest(unittest.TestCase):
 
     def test_a_reviewed_component_name_is_a_licence_text(self) -> None:
         """markdown-it-py ships the JavaScript markdown-it licence as LICENSE.markdown-it."""
-        for path in ("LICENSE.markdown-it", "markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it"):
+        for path in (
+            "LICENSE.markdown-it",
+            "markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it",
+            # pypdfium2 ships libjpeg-turbo's IJG licence (README.ijg) as libjpeg_turbo.ijg.
+            "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/libjpeg_turbo.ijg",
+        ):
             with self.subTest(path=path):
                 self.assertTrue(notices.is_licence_file(path))
 
