@@ -1,4 +1,5 @@
 import { MAX_PAGE, ORDERS, type Order, SORT_KEYS, type SortKey } from "../api/documents";
+import type { SearchHit } from "../api/search";
 
 /** What the document list shows, kept in the address so a page can be bookmarked or shared. */
 export interface DocumentsSearch {
@@ -51,4 +52,16 @@ export interface DocumentSearch {
 export function parseDocumentSearch(search: Record<string, unknown>): DocumentSearch {
   const page = search.page;
   return typeof page === "number" && Number.isSafeInteger(page) && page >= 1 ? { page } : {};
+}
+
+/**
+ * Where a result opens its document: a PDF at the result's page, read by the same parser as the
+ * address of the document's page (`parseDocumentSearch`), so a page the viewer would refuse is left
+ * out and the viewer opens at its first page; a page past the end is the viewer's to handle once
+ * the PDF has loaded. Every other type opens at its start: DOCX, TXT and Markdown are stored as one
+ * page, which the text view's first window always holds whole. Only the page number goes in the
+ * address, never the query or anything else of the result.
+ */
+export function resultPlace(hit: Pick<SearchHit, "extension" | "page">): DocumentSearch {
+  return hit.extension === "pdf" ? parseDocumentSearch({ page: hit.page }) : {};
 }

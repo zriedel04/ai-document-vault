@@ -15,6 +15,7 @@ import {
   type SearchResults,
 } from "../api/search";
 import { type FetchFn, TEST_TOKEN, healthyBackend, jsonResponse, renderApp } from "../test/render";
+import { resultPlace } from "./documents-search";
 
 const ID = "01J9Z8Y7X6W5V4T3S2R1Q0P9N8";
 // A query as private as a file name: it must not reach the address, the history or the console.
@@ -107,7 +108,7 @@ describe("search page", () => {
 
     const list = await resultList();
     const link = within(list).getByRole("link", { name: "Clinic letter.pdf" });
-    expect(link).toHaveAttribute("href", `/documents/${ID}`);
+    expect(link).toHaveAttribute("href", `/documents/${ID}?page=3`);
     const marks = [...list.querySelectorAll("mark")].map((mark) => mark.textContent);
     expect(marks).toEqual(["Jane", "Doe", "diagnosis"]);
     expect(
@@ -123,6 +124,79 @@ describe("search page", () => {
     expect(within(list).getByText("4 matching passages")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Showing 1 to 1 of 1 matching documents");
     expect(sent).toEqual([{ query: QUERY, limit: SEARCH_PAGE_SIZE, offset: 0, types: [] }]);
+  });
+
+  it("links a PDF result to its page and every other result to its document", async () => {
+    const { spy } = backend(() =>
+      jsonResponse(
+        results([
+          hit({ document_id: `${ID}1`, name: "Late page.pdf", name_highlight: [], page: 12 }),
+          // Pages the document's address refuses: the link opens the viewer at its first page.
+          hit({ document_id: `${ID}2`, name: "Zero.pdf", name_highlight: [], page: 0 }),
+          hit({ document_id: `${ID}3`, name: "Negative.pdf", name_highlight: [], page: -4 }),
+          hit({ document_id: `${ID}4`, name: "Half.pdf", name_highlight: [], page: 2.5 }),
+          hit({
+            document_id: `${ID}5`,
+            name: "Huge.pdf",
+            name_highlight: [],
+            page: Number.MAX_SAFE_INTEGER + 1,
+          }),
+          // An answer without a page (the schema requires one) is read as no page, not as NaN.
+          hit({
+            document_id: `${ID}6`,
+            name: "No page.pdf",
+            name_highlight: [],
+            page: undefined as unknown as number,
+          }),
+          // Every other type is stored as one page and opens at its start, whatever the page says.
+          hit({ document_id: `${ID}7`, name: "Notes.md", extension: "md", name_highlight: [] }),
+          hit({ document_id: `${ID}8`, name: "Plan.docx", extension: "docx", name_highlight: [] }),
+          hit({
+            document_id: `${ID}9`,
+            name: "Log.txt",
+            extension: "txt",
+            name_highlight: [],
+            page: 1,
+          }),
+        ]),
+      ),
+    );
+    await openSearch(spy);
+    await search(QUERY);
+
+    const list = await resultList();
+    const href = (name: string) => within(list).getByRole("link", { name }).getAttribute("href");
+    expect(href("Late page.pdf")).toBe(`/documents/${ID}1?page=12`);
+    expect(href("Zero.pdf")).toBe(`/documents/${ID}2`);
+    expect(href("Negative.pdf")).toBe(`/documents/${ID}3`);
+    expect(href("Half.pdf")).toBe(`/documents/${ID}4`);
+    expect(href("Huge.pdf")).toBe(`/documents/${ID}5`);
+    expect(href("No page.pdf")).toBe(`/documents/${ID}6`);
+    expect(href("Notes.md")).toBe(`/documents/${ID}7`);
+    expect(href("Plan.docx")).toBe(`/documents/${ID}8`);
+    expect(href("Log.txt")).toBe(`/documents/${ID}9`);
+  });
+
+  it("opens a PDF result at its page with only the page number in the address", async () => {
+    const { spy } = backend(() => jsonResponse(results([hit({ page: 7 })])));
+    const { router } = await openSearch(spy);
+    await search(QUERY);
+    await userEvent.click(
+      within(await resultList()).getByRole("link", { name: "Clinic letter.pdf" }),
+    );
+
+    await waitFor(() => {
+      expect(router.history.location.pathname).toBe(`/documents/${ID}`);
+    });
+    expect(router.history.location.href).toBe(`/documents/${ID}?page=7`);
+    expect(router.state.location.search).toEqual({ page: 7 });
+    expect(JSON.stringify(router.history.location)).not.toMatch(/Jane|Doe|diagnos|Clinic|Findings/);
+    // Back returns to the search page, which has forgotten the query.
+    router.history.back();
+    await waitFor(() => {
+      expect(router.history.location.href).toBe("/search");
+    });
+    expect(JSON.stringify(router.history.location)).not.toMatch(/Jane|Doe|diagnos/);
   });
 
   it("keeps the query out of the address, the history and the request URL", async () => {
@@ -441,6 +515,27 @@ describe("search page", () => {
     for (const call of calls) {
       expect(JSON.stringify(call.mock.calls)).not.toMatch(/Jane|Doe|diagnosis|Clinic/);
     }
+  });
+});
+
+describe("where a result opens", () => {
+  it("reads a PDF's page with the document address's own parser", () => {
+    expect(resultPlace({ extension: "pdf", page: 4 })).toEqual({ page: 4 });
+    expect(resultPlace({ extension: "pdf", page: 1 })).toEqual({ page: 1 });
+    for (const page of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+      expect(resultPlace({ extension: "pdf", page })).toEqual({});
+    }
+    // A number written as text is not a number (an answer that does not fit the schema).
+    expect(resultPlace({ extension: "pdf", page: "4" as unknown as number })).toEqual({});
+  });
+
+  it("opens every other type at its start", () => {
+    for (const extension of SEARCH_TYPES.filter((type) => type !== "pdf")) {
+      expect(resultPlace({ extension, page: 1 })).toEqual({});
+      expect(resultPlace({ extension, page: 3 })).toEqual({});
+    }
+    // A type is matched exactly, as the backend spells it.
+    expect(resultPlace({ extension: "PDF", page: 3 })).toEqual({});
   });
 });
 
