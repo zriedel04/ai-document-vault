@@ -7,11 +7,12 @@ section 7).
    copy, but the blob cannot (it is read-only and named by its hash), so this check is the one
    that counts. A blob this import created for bytes that fail it is removed again.
 4. In one transaction: the blob row, then either a new document with its first version, its
-   import source and its first job (``extract``), or, when a document already holds these bytes,
-   only a new import source for that document; either way the source's folders become labels of
-   the document (``vault.ingest.path_metadata``). Importing the same file twice gives one document
-   with two sources. A document in the trash that is imported again comes out of the trash, with
-   the state it had before: the import is the owner saying they want it.
+   import source and its first jobs (``extract``, and ``metadata`` for a type whose file
+   properties are read: ``vault.ingest.metadata_stage``), or, when a document already holds
+   these bytes, only a new import source for that document; either way the source's folders
+   become labels of the document (``vault.ingest.path_metadata``). Importing the same file twice
+   gives one document with two sources. A document in the trash that is imported again comes out
+   of the trash, with the state it had before: the import is the owner saying they want it.
 
 A permanent delete of a document with the same bytes can remove the blob's file after step 2
 found it in the store. The transaction of step 4 checks, under the write lock, that the file is
@@ -48,6 +49,7 @@ from vault.db.schema import (
     documents,
     import_sources,
 )
+from vault.ingest import metadata_stage
 from vault.ingest.path_metadata import record_import_labels
 from vault.ingest.validate import DEFAULT_LIMITS, Limits, Reason, validate_file
 from vault.jobs.queue import JobQueue, utc_now
@@ -295,6 +297,12 @@ class Importer:
                     .values(current_version_id=version_id)
                 )
                 self._queue.enqueue(document_id, FIRST_STAGE, sha256, connection=connection)
+                # A type whose properties can be read gets its metadata job beside extraction:
+                # it reads only the bytes, so it needs nothing extraction writes.
+                if extension in metadata_stage.EXTENSIONS:
+                    self._queue.enqueue(
+                        document_id, metadata_stage.METADATA_STAGE, sha256, connection=connection
+                    )
                 outcome = Outcome.IMPORTED
             connection.execute(
                 import_sources.insert().values(

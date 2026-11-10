@@ -29,6 +29,7 @@ from vault.db.documents import (
     move_to_trash,
     restore,
 )
+from vault.db.fields import FILE_PROPERTIES
 from vault.db.pages import (
     DEFAULT_WINDOW,
     MAX_WINDOW,
@@ -68,9 +69,10 @@ LabelKind = Literal[
 ]
 LabelSource = Literal["user", "ai", "import_path", "rule"]
 LabelStatus = Literal["suggested", "accepted", "rejected"]
-# Where a shown value came from, in the plan's resolution order (section 6); only the last tier is
-# written so far.
-FieldSource = Literal["filename"]
+# Where a shown value came from, in the plan's resolution order (section 6: your value > accepted
+# AI > pending AI > file properties / import path > file name); only the last two tiers exist so
+# far.
+FieldSource = Literal["file_properties", "filename"]
 
 
 class DocumentItem(BaseModel):
@@ -155,6 +157,18 @@ class Title(BaseModel):
     source: FieldSource
 
 
+class FileProperties(BaseModel):
+    """What the current version's bytes say about themselves (a DOCX's core properties), each
+    cleaned as untrusted text, or null when the file does not say it or says it in a form the
+    vault does not take. ``created`` and ``modified`` are W3CDTF: a year, a month, a day, or a
+    time in UTC to the second (``2026-03-04T05:06:07Z``)."""
+
+    title: str | None
+    author: str | None
+    created: str | None
+    modified: str | None
+
+
 class DocumentDetail(DocumentItem):
     sha256: str
     local_only: bool
@@ -164,8 +178,10 @@ class DocumentDetail(DocumentItem):
     import_sources: list[Source]
     jobs: list[Job]
     labels: list[Label]
-    # The title as the plan's resolution order gives it, or None when nothing gives one. Only the
-    # file name of the first import gives one so far (vault.ingest.path_metadata).
+    file_properties: FileProperties
+    # The title as the plan's resolution order gives it, or None when nothing gives one: the
+    # file's own title when it has one, else the file name of the first import
+    # (vault.ingest.path_metadata).
     title: Title | None
 
 
@@ -177,9 +193,9 @@ async def read_document(
 ) -> DocumentDetail:
     """One document, in use or in the trash: what the list shows, plus its hash, current version,
     every import (oldest first; the first names the document), its processing jobs (in the
-    order of the pipeline), its labels (each import's folders, by kind and path) and its title
-    with where it came from. An unknown id, or one that is not an id at all, is a 404 whose message
-    does not repeat it."""
+    order of the pipeline), its labels (each import's folders, by kind and path), the properties
+    its file states (title, author, dates) and its title with where it came from. An unknown id,
+    or one that is not an id at all, is a 404 whose message does not repeat it."""
     return await _detail(_engine(request), document_id)
 
 
@@ -204,14 +220,19 @@ async def _detail(engine: Engine, document_id: str) -> DocumentDetail:
         import_sources=[Source.model_validate(s, from_attributes=True) for s in detail.sources],
         jobs=[Job.model_validate(job, from_attributes=True) for job in detail.jobs],
         labels=[Label.model_validate(label, from_attributes=True) for label in detail.labels],
-        title=_title(detail.summary.name),
+        file_properties=FileProperties.model_validate(detail.file_properties, from_attributes=True),
+        title=_title(detail.file_properties.title, detail.summary.name),
     )
 
 
-def _title(name: str | None) -> Title | None:
-    """The lowest tier of the resolution order: a title from the name of the first import."""
-    resolved = resolved_title(name)
-    return None if resolved is None else Title(value=resolved[0], source="filename")
+def _title(from_file: str | None, name: str | None) -> Title | None:
+    """The title by the resolution order's tiers that exist (``resolved_title``, which the
+    export reads too): the file's own title, then a title from the name of the first import."""
+    resolved = resolved_title(name, from_file)
+    if resolved is None:
+        return None
+    value, source = resolved
+    return Title(value=value, source="file_properties" if source == FILE_PROPERTIES else "filename")
 
 
 @router.post("/documents/{document_id}/trash", responses={404: {"description": "No such document"}})

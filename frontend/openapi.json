@@ -12,6 +12,9 @@
             "title": "Extension",
             "type": "string"
           },
+          "file_properties": {
+            "$ref": "#/components/schemas/FileProperties"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -137,6 +140,7 @@
           "import_sources",
           "jobs",
           "labels",
+          "file_properties",
           "title"
         ],
         "title": "DocumentDetail",
@@ -312,6 +316,63 @@
           "next_offset"
         ],
         "title": "DocumentPages",
+        "type": "object"
+      },
+      "FileProperties": {
+        "description": "What the current version's bytes say about themselves (a DOCX's core properties), each\ncleaned as untrusted text, or null when the file does not say it or says it in a form the\nvault does not take. ``created`` and ``modified`` are W3CDTF: a year, a month, a day, or a\ntime in UTC to the second (``2026-03-04T05:06:07Z``).",
+        "properties": {
+          "author": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "created": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created"
+          },
+          "modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "title",
+          "author",
+          "created",
+          "modified"
+        ],
+        "title": "FileProperties",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -951,7 +1012,10 @@
       "Title": {
         "properties": {
           "source": {
-            "const": "filename",
+            "enum": [
+              "file_properties",
+              "filename"
+            ],
             "title": "Source",
             "type": "string"
           },
@@ -1181,7 +1245,7 @@
         ]
       },
       "get": {
-        "description": "One document, in use or in the trash: what the list shows, plus its hash, current version,\nevery import (oldest first; the first names the document), its processing jobs (in the\norder of the pipeline), its labels (each import's folders, by kind and path) and its title\nwith where it came from. An unknown id, or one that is not an id at all, is a 404 whose message\ndoes not repeat it.",
+        "description": "One document, in use or in the trash: what the list shows, plus its hash, current version,\nevery import (oldest first; the first names the document), its processing jobs (in the\norder of the pipeline), its labels (each import's folders, by kind and path), the properties\nits file states (title, author, dates) and its title with where it came from. An unknown id,\nor one that is not an id at all, is a 404 whose message does not repeat it.",
         "operationId": "read_document_api_documents__document_id__get",
         "parameters": [
           {

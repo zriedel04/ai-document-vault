@@ -32,7 +32,7 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 import pytest
 
 from vault.core.config import ProcessingSettings, Settings
-from vault.ingest.extractors import Extraction
+from vault.ingest.extractors import CoreProperties, Extraction
 from vault.ingest.extractors.text import FALLBACK_ENCODINGS
 from vault.jobs import sandbox, sandbox_child, sandbox_probes
 from vault.jobs.sandbox import (
@@ -1304,10 +1304,16 @@ def test_an_entry_not_on_the_allowlist_is_refused() -> None:
         sandbox.run(1, b"", LIMITS, entry_points=ENTRIES)  # type: ignore[arg-type]
 
 
-def test_the_production_allowlist_holds_the_extractors_and_the_child_finds_each() -> None:
-    assert set(sandbox.ENTRY_POINTS) == {"text", "markdown", "docx"}
-    for point in sandbox.ENTRY_POINTS.values():
-        assert point.result_type is Extraction
+def test_the_production_allowlist_holds_the_stages_entry_points_and_the_child_finds_each() -> None:
+    """The extractors, and the metadata stage's DOCX reader, from whose answer the server builds
+    nothing but ``CoreProperties``."""
+    assert set(sandbox.ENTRY_POINTS) == {"text", "markdown", "docx", "docx_properties"}
+    assert sandbox.ENTRY_POINTS["docx_properties"] == sandbox.EntryPoint(
+        "vault.ingest.extractors.docx:read_properties", CoreProperties
+    )
+    for name, point in sandbox.ENTRY_POINTS.items():
+        expected = CoreProperties if name == "docx_properties" else Extraction
+        assert point.result_type is expected
         assert sandbox_child.resolve(point.target) is not None
     assert sandbox.ENTRY_POINTS["text"].options == FALLBACK_ENCODINGS
     assert sandbox.ENTRY_POINTS["markdown"].options == FALLBACK_ENCODINGS

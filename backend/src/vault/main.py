@@ -17,7 +17,7 @@ from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
-from vault.ingest import chunk_stage, extract_stage
+from vault.ingest import chunk_stage, extract_stage, metadata_stage
 from vault.ingest.importer import Importer
 from vault.ingest.orphans import sweep_orphans
 from vault.ingest.path_metadata import label_pending_sources
@@ -42,10 +42,11 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     With ``vault.path`` set, the vault folder is validated and created, the install's token is read
     (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
     every blob is made read-only again), the database is migrated, blobs that no database row uses
-    are moved to ``blobs/orphans/``, jobs that a killed process left running are queued again and
-    import sources recorded before folder labels existed get their labels (once), all before the
-    first request. The worker pool (``vault.jobs.worker``) starts with the server
-    and is stopped when it shuts down. A bad vault folder (inside a Git repository, say) or a
+    are moved to ``blobs/orphans/``, jobs that a killed process left running are queued again,
+    import sources recorded before folder labels existed get their labels (once) and documents
+    whose file properties were never read get a ``metadata`` job, all before the first request.
+    The worker pool (``vault.jobs.worker``) starts with the server and is stopped when it shuts
+    down. A bad vault folder (inside a Git repository, say) or a
     damaged blob store (the temporary folder is a link) stops the start-up.
     Without a vault (demo mode, tests) there is no database and the token is random for this
     process only, so only the open endpoints work.
@@ -96,9 +97,12 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
                 added=metric(backfill.added),
                 skipped=metric(backfill.skipped),
             )
+        # Before any import can run: documents whose file properties were never read get a job.
+        pending = metadata_stage.queue_pending(engine, queue)
+        log_event(logger, "metadata.queued", jobs=metric(pending))
         importer = Importer(engine, blobs)
-        # Only extraction (of the types with an extractor) and chunking have handlers so far;
-        # jobs of the other stages and types wait in the queue.
+        # Only extraction (of the types with an extractor), DOCX file properties and chunking
+        # have handlers so far; jobs of the other stages and types wait in the queue.
         options = settings.processing
         workers = WorkerPool(
             queue,
@@ -109,6 +113,9 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
                     blobs,
                     SandboxLimits.from_settings(options),
                     options.text_fallback_encoding,
+                ),
+                metadata_stage.METADATA_STAGE: metadata_stage.handler(
+                    engine, queue, blobs, SandboxLimits.from_settings(options)
                 ),
                 chunk_stage.CHUNK_STAGE: chunk_stage.handler(engine, queue),
             },

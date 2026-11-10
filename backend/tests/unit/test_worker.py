@@ -580,8 +580,9 @@ def test_the_app_starts_and_stops_its_pool_with_the_server(vault_dir: Path) -> N
     pool = app.state.workers
     assert isinstance(pool, WorkerPool)
     with TestClient(app):
-        # Extraction (limit 2) and chunking (limit 1) have handlers so far.
-        assert len(pool.threads) == 3
+        # Extraction (limit 2), DOCX file properties (limit 1) and chunking (limit 1) have
+        # handlers so far.
+        assert len(pool.threads) == 4
         assert all(thread.is_alive() for thread in pool.threads)
     assert not any(thread.is_alive() for thread in pool.threads)
     with pytest.raises(RuntimeError):

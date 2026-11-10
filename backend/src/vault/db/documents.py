@@ -35,12 +35,14 @@ from sqlalchemy import ColumnElement, Connection, Engine, Row, delete, exists, f
 
 from vault.db import ids
 from vault.db.engine import read_snapshot, write_transaction
+from vault.db.fields import FileProperties, file_properties_of
 from vault.db.labels import LabelDetail, delete_unused_folder_labels, labels_of
 from vault.db.schema import (
     JOB_STAGES,
     TRASHED,
     blobs,
     chunks,
+    document_fields,
     document_labels,
     document_versions,
     documents,
@@ -230,6 +232,8 @@ class DocumentDetail:
     sources: tuple[SourceDetail, ...]  # oldest first; the first one names the document
     jobs: tuple[JobDetail, ...]  # by the pipeline's stages, each oldest first by queue time
     labels: tuple[LabelDetail, ...]  # by kind, then path (vault.db.labels.labels_of)
+    # What the current version's bytes say about themselves (vault.db.fields), or nothing yet.
+    file_properties: FileProperties
 
 
 def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
@@ -275,6 +279,7 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
             )
         ).all()
         label_details = labels_of(connection, document_id)
+        properties = file_properties_of(connection, document_id, row.version_id)
 
     source_details = tuple(_source(source) for source in sources)
     summary = DocumentSummary(
@@ -316,6 +321,7 @@ def get_document(engine: Engine, document_id: str) -> DocumentDetail | None:
         sources=source_details,
         jobs=job_details,
         labels=label_details,
+        file_properties=properties,
     )
 
 
@@ -451,6 +457,7 @@ DOCUMENT_ROWS: Final = (
     "chunks",
     "pages",
     "jobs",
+    "document_fields",
     "document_labels",
     "import_sources",
     "document_versions",
@@ -460,8 +467,8 @@ DOCUMENT_ROWS: Final = (
 
 def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | DeleteRefusal:
     """Remove a document in the trash and every row that belongs to it, in one transaction: its
-    chunks (and with them their keyword index rows), pages, jobs, labels, import sources and
-    versions, the folder labels no other document carries (a folder name is the owner's, and a
+    chunks (and with them their keyword index rows), pages, jobs, fields, labels, import sources
+    and versions, the folder labels no other document carries (a folder name is the owner's, and a
     label no document uses would only keep it), then the ``blobs`` row of each of its blobs that
     no remaining version uses (another document can hold the same bytes only through its own
     version, so a shared blob keeps its row).
@@ -494,6 +501,9 @@ def delete_permanently(engine: Engine, document_id: str) -> DeletedRows | Delete
         connection.execute(delete(chunks).where(chunks.c.document_id == document_id))
         connection.execute(delete(pages).where(pages.c.version_id.in_(versions)))
         connection.execute(delete(jobs).where(jobs.c.document_id == document_id))
+        connection.execute(
+            delete(document_fields).where(document_fields.c.document_id == document_id)
+        )
         connection.execute(
             delete(document_labels).where(document_labels.c.document_id == document_id)
         )

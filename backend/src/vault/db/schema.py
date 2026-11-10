@@ -73,6 +73,14 @@ LABEL_SOURCES: Final = ("user", "ai", "import_path", "rule")
 LABEL_STATUSES: Final = ("suggested", "accepted", "rejected")
 # The longest label name: what Windows allows for one file or folder name.
 MAX_LABEL_CHARS: Final = 255
+# The single-valued fields of section 6 written so far, and where each value came from. Only the
+# file's own properties are stored: the file-name title is worked out when a document is read
+# (vault.ingest.path_metadata), and the owner's values and AI suggestions arrive later.
+FIELD_NAMES: Final = ("title", "author", "created", "modified")
+FIELD_SOURCES: Final = ("file_properties",)
+DATE_FIELDS: Final = ("created", "modified")
+# The longest stored value: the same bound as a label's name.
+MAX_FIELD_CHARS: Final = MAX_LABEL_CHARS
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:
@@ -445,6 +453,44 @@ document_labels = Table(
     CheckConstraint("model IS NULL OR length(model) BETWEEN 1 AND 100", name="model_shape"),
     CheckConstraint("source <> 'import_path' OR status = 'accepted'", name="import_path_accepted"),
     Index("ix_document_labels_label_id", "label_id"),
+)
+
+# Single-valued metadata of a document with where each value came from (section 6). One value per
+# document, field and source; the resolution order picks the one shown (vault.api.documents).
+# A ``file_properties`` value was read from the bytes of one version and names it (the pair must
+# be a version of this document), so a document whose current version changes does not show the
+# properties of bytes it no longer holds; the metadata stage replaces the rows when it reads the
+# new version. Values are the file's own text, cleaned (vault.ingest.metadata_stage), and are as
+# private as the document: never logged. A date is W3CDTF as the stage writes it: a year, a
+# month, a day, or a time in UTC to the second (``2026-03-04T05:06:07Z``).
+document_fields = Table(
+    "document_fields",
+    metadata,
+    Column("document_id", String, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
+    Column("field", String, primary_key=True),
+    Column("source", String, primary_key=True),
+    Column("version_id", String, nullable=True),
+    Column("value", String, nullable=False),
+    CheckConstraint(_one_of("field", FIELD_NAMES), name="field_known"),
+    CheckConstraint(_one_of("source", FIELD_SOURCES), name="source_known"),
+    CheckConstraint(f"length(value) BETWEEN 1 AND {MAX_FIELD_CHARS}", name="value_shape"),
+    CheckConstraint(
+        "source <> 'file_properties' OR version_id IS NOT NULL", name="file_properties_version"
+    ),
+    # A looser net than the stage's parser, which is the rule the application applies.
+    CheckConstraint(
+        f"field NOT IN ({', '.join(repr(f) for f in DATE_FIELDS)})"
+        " OR (length(value) IN (4, 7, 10, 20)"
+        " AND value GLOB '[0-9][0-9][0-9][0-9]*' AND value NOT GLOB '*[^0-9TZ:-]*')",
+        name="date_shape",
+    ),
+    ForeignKeyConstraint(
+        ["version_id", "document_id"],
+        ["document_versions.id", "document_versions.document_id"],
+        name="fk_document_fields_version_document_versions",
+        ondelete="CASCADE",
+    ),
+    Index("ix_document_fields_version_id", "version_id"),
 )
 
 # The FTS5 table over chunks and the shadow tables FTS5 keeps for it. The migration ``0005`` creates

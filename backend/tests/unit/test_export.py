@@ -18,16 +18,18 @@ from typing import Any, get_args
 from unittest import mock
 
 import pytest
+from sqlalchemy import text
 
 from vault import export as cli
 from vault.api.documents import FieldSource
 from vault.db import ids
 from vault.db.documents import get_document, move_to_trash
 from vault.db.engine import create_vault_engine, write_transaction
+from vault.db.fields import FILE_PROPERTIES, FileProperties, replace_file_properties
 from vault.db.labels import MAX_PATH_LEVELS, add_folder_labels
 from vault.db.migrate import upgrade_to_latest
 from vault.ingest.importer import Importer, ImportRequest
-from vault.ingest.path_metadata import FILENAME, PENDING_KEY, label_pending_sources
+from vault.ingest.path_metadata import FILENAME, PENDING_KEY, label_pending_sources, resolved_title
 from vault.storage import export as export_module
 from vault.storage.blobs import BlobStore
 from vault.storage.export import (
@@ -546,6 +548,21 @@ def csv_rows(target: Path) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(text, newline="")))
 
 
+def give_file_title(vault: Vault, document_id: str, title: str) -> None:
+    """A DOCX title for the document's current version, stored as the metadata stage stores it."""
+    engine = create_vault_engine(vault.root / "vault.db")
+    try:
+        with write_transaction(engine) as connection:
+            version_id: str = connection.execute(
+                text("SELECT current_version_id FROM documents WHERE id = :id"), {"id": document_id}
+            ).scalar_one()
+            replace_file_properties(
+                connection, document_id, version_id, FileProperties(title=title)
+            )
+    finally:
+        engine.dispose()
+
+
 def give_labels(vault: Vault, document_id: str, names: Sequence[str]) -> None:
     """Folder labels written as the importer writes them, with names no import path could give
     (a line break), as a later label kind or a hand edit may."""
@@ -620,7 +637,50 @@ class TestTitlesAndLabels:
             ["Alpha"], ["Alpha", "zeta"], ["beta"], ["beta", "Inner"],
         ]  # fmt: skip
         assert exported["title"]["value"] == "b notes"  # the first import names it
-        assert get_args(FieldSource) == (FILENAME,)
+        # Every source the library can show a title from is one the export writes.
+        assert set(get_args(FieldSource)) == {FILENAME, FILE_PROPERTIES}
+
+    def test_a_docx_title_comes_before_the_file_name_as_in_the_library(
+        self, vault: Vault, target: Path
+    ) -> None:
+        document = vault.add("b_notes.txt", ["beta"])
+        plain = vault.add("plain.txt", ["beta"], b"another document\n")
+        give_file_title(vault, document, HOSTILE[4])
+        export(vault, target)
+        by_id = {d["id"]: d for d in manifest(target)["documents"]}
+        assert by_id[document]["title"] == {"value": HOSTILE[4], "source": FILE_PROPERTIES}
+        assert by_id[plain]["title"] == {"value": "plain", "source": FILENAME}
+        engine = create_vault_engine(vault.root / "vault.db")
+        try:
+            for document_id in (document, plain):
+                detail = get_document(engine, document_id)
+                assert detail is not None
+                resolved = resolved_title(detail.summary.name, detail.file_properties.title)
+                assert resolved is not None
+                assert by_id[document_id]["title"] == {"value": resolved[0], "source": resolved[1]}
+        finally:
+            engine.dispose()
+        rows = {row["document_id"]: row for row in csv_rows(target)}
+        assert rows[document]["title_source"] == FILE_PROPERTIES
+        assert rows[document]["title"] == "'" + HOSTILE[4]  # neutralised like any title
+
+    def test_a_title_of_another_version_or_a_database_without_fields_falls_back(
+        self, vault: Vault, target: Path, tmp_path: Path
+    ) -> None:
+        document = vault.add("b_notes.txt")
+        give_file_title(vault, document, "Stated title")
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("UPDATE document_fields SET version_id = 'not-the-current-one'")
+        connection.close()
+        export(vault, target)
+        assert manifest(target)["documents"][0]["title"] == {"value": "b notes", "source": FILENAME}
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("DROP TABLE document_fields")
+        connection.close()
+        again = tmp_path / "again"
+        assert export(vault, again).exported == 1
+        assert manifest(again)["documents"][0]["title"]["source"] == FILENAME
 
     def test_the_order_does_not_depend_on_how_the_rows_were_written(
         self, vault: Vault, tmp_path: Path

@@ -92,8 +92,9 @@ the group's id stays reserved until the group has been killed, also after a norm
 Linux the target cannot start a process that could leave the group; on Windows the job allows
 no breakaway.
 
-The extraction stage (:mod:`vault.ingest.extract_stage`) is the caller. The runner logs nothing;
-the worker logs the job's outcome.
+The extraction stage (:mod:`vault.ingest.extract_stage`) and the metadata stage
+(:mod:`vault.ingest.metadata_stage`) are the callers. The runner logs nothing; the worker logs the
+job's outcome.
 """
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING, Final
 
-from vault.ingest.extractors import Extraction
+from vault.ingest.extractors import CoreProperties, Extraction
 from vault.ingest.extractors.text import FALLBACK_ENCODINGS
 from vault.jobs import sandbox_child as child
 
@@ -461,8 +462,9 @@ class EntryPoint:
         object.__setattr__(self, "_decoder", _compile_result_type(self.result_type))
 
 
-# The extractors the extraction stage runs (vault.ingest.extract_stage). The text extractors take
-# the configured fallback code page as their option.
+# The functions the stages run: the extractors of the extraction stage (vault.ingest.extract_stage),
+# whose text extractors take the configured fallback code page as their option, and the metadata
+# stage's reader of a DOCX's core properties (vault.ingest.metadata_stage).
 ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
     {
         "text": EntryPoint(
@@ -472,6 +474,9 @@ ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
             "vault.ingest.extractors.text:extract_markdown", Extraction, FALLBACK_ENCODINGS
         ),
         "docx": EntryPoint("vault.ingest.extractors.docx:extract", Extraction),
+        "docx_properties": EntryPoint(
+            "vault.ingest.extractors.docx:read_properties", CoreProperties
+        ),
     }
 )
 

@@ -8,7 +8,8 @@
 
 The layout follows the first import (earliest, ties broken by id: the rule that names a document
 in the library); collections do not exist yet. Each document's title is the one the library
-shows, with its source (``vault.ingest.path_metadata.resolved_title``), and its labels are listed
+shows, with its source (``vault.ingest.path_metadata.resolved_title``: a DOCX's own title, else
+the first import's file name), and its labels are listed
 in the library's order (``vault.db.labels.label_order``) with their full path. Documents in the
 trash are left out unless ``include_trash`` is set. Names are untrusted text and are made safe as
 Windows path components (:func:`safe_name`), every path stays within ``MAX_PATH``, and names that
@@ -42,6 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
+from vault.db.fields import FILE_PROPERTIES
 from vault.db.labels import label_order, label_path
 from vault.ingest.path_metadata import PENDING_KEY, resolved_title
 from vault.storage.backup import (
@@ -330,6 +332,7 @@ class _Rows:
     labels: list[sqlite3.Row]  # every label: id, kind, name, parent_id
     assignments: list[sqlite3.Row]  # document_id, label_id, source, status
     labels_complete: bool
+    file_titles: dict[tuple[str, str], object]  # (document_id, version_id): the file's own title
 
 
 def _read_labels(connection: sqlite3.Connection) -> tuple[list[Any], list[Any], bool]:
@@ -347,6 +350,23 @@ def _read_labels(connection: sqlite3.Connection) -> tuple[list[Any], list[Any], 
     ).fetchall()
     pending = connection.execute("SELECT 1 FROM app_meta WHERE key = ?", (PENDING_KEY,)).fetchone()
     return labels, assignments, pending is None
+
+
+def _read_file_titles(connection: sqlite3.Connection) -> dict[tuple[str, str], object]:
+    """The title each version's file states about itself (``document_fields``, source
+    ``file_properties``, written by the metadata stage), by document and version. A database the
+    app has not migrated to fields yet has none."""
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "document_fields" not in tables:
+        return {}
+    rows = connection.execute(
+        "SELECT document_id, version_id, value FROM document_fields "
+        "WHERE field = 'title' AND source = ?",
+        (FILE_PROPERTIES,),
+    ).fetchall()
+    return {(row["document_id"], row["version_id"]): row["value"] for row in rows}
 
 
 def _read_database(db: Path) -> _Rows:
@@ -375,13 +395,14 @@ def _read_database(db: Path) -> _Rows:
                 "ORDER BY document_id, imported_at, id"
             ).fetchall()
             labels, assignments, complete = _read_labels(connection)
+            file_titles = _read_file_titles(connection)
             connection.execute("COMMIT")
         finally:
             connection.close()
     except sqlite3.Error:
         msg = "SQLite could not read the vault database; nothing was exported"
         raise ExportError(msg) from None
-    return _Rows(documents, versions, sources, labels, assignments, complete)
+    return _Rows(documents, versions, sources, labels, assignments, complete, file_titles)
 
 
 def _version_entry(row: sqlite3.Row) -> dict[str, Any]:
@@ -435,8 +456,10 @@ def _label_entries(rows: _Rows) -> dict[str, list[dict[str, Any]]]:
     return of
 
 
-def _title_entry(sources: list[sqlite3.Row]) -> dict[str, str] | None:
-    resolved = resolved_title(sources[0]["original_filename"]) if sources else None
+def _title_entry(sources: list[sqlite3.Row], from_file: object) -> dict[str, str] | None:
+    """The title the library shows: the current version's own title, else the first import's
+    file name (``resolved_title``)."""
+    resolved = resolved_title(sources[0]["original_filename"] if sources else None, from_file)
     return None if resolved is None else {"value": resolved[0], "source": resolved[1]}
 
 
@@ -535,6 +558,7 @@ def _export_documents(
     layout: _Layout, store: BlobStore, rows: _Rows, *, trash: bool
 ) -> tuple[list[dict[str, Any]], _Counts]:
     documents, versions, sources = rows.documents, rows.versions, rows.sources
+    file_titles = rows.file_titles
     labels_of = _label_entries(rows)
     by_document: dict[str, list[sqlite3.Row]] = {}
     for version in versions:
@@ -596,7 +620,10 @@ def _export_documents(
                 "local_only": bool(document["local_only"]),
                 "created_at": _time(document["created_at"]),
                 "trashed_at": _time(document["trashed_at"]),
-                "title": _title_entry(own_sources),
+                "title": _title_entry(
+                    own_sources,
+                    file_titles.get((document["id"], document["current_version_id"])),
+                ),
                 "labels": labels_of.get(document["id"], []),
                 "current_version_id": document["current_version_id"],
                 "versions": [_version_entry(v) for v in own_versions],
