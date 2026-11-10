@@ -18,6 +18,11 @@
     .\vault.ps1 backup -To <folder>
                           Snapshot the database and copy the original files that are not yet
                           in the backup folder. Safe while the app runs.
+    .\vault.ps1 restore -From <snapshot> -To <folder>
+                          Restore a snapshot (<backup folder>\snapshots\<time>, or the backup
+                          folder for its latest one) into a new, empty vault folder: the
+                          database, every original file checked against its hash, the token and
+                          the settings. It never writes over a vault.
     .\vault.ps1 export -To <folder> [-IncludeTrash]
                           Write every document's original into a new or empty folder, in the
                           folders it was imported from, with manifest.json and manifest.csv.
@@ -25,7 +30,8 @@
 
     -NoBrowser            Do not open the browser (run and dev).
     -To <folder>          The backup folder (backup) or export folder (export), outside the
-                          vault folder.
+                          vault folder; the new vault folder (restore).
+    -From <folder>        The snapshot, or the backup folder, to restore from (restore).
     -IncludeTrash         Also export the documents in the trash (export).
 
     The settings come from backend\config.toml (copy config.example.toml there and set the vault
@@ -42,12 +48,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'run', 'stop', 'dev', 'check', 'backup', 'export')]
+    [ValidateSet('install', 'run', 'stop', 'dev', 'check', 'backup', 'restore', 'export')]
     [string]$Command,
 
     [switch]$NoBrowser,
 
     [string]$To,
+
+    [string]$From,
 
     [switch]$IncludeTrash
 )
@@ -83,6 +91,10 @@ $script:LaunchVariable = 'VAULT_LAUNCH_ID'
 # The environment variable that carries the backup folder to the backend; see
 # backend/src/vault/backup.py.
 $script:BackupVariable = 'VAULT_BACKUP_TO'
+# The environment variables that carry the snapshot and the new vault folder to the backend; see
+# backend/src/vault/restore.py.
+$script:RestoreFromVariable = 'VAULT_RESTORE_FROM'
+$script:RestoreToVariable = 'VAULT_RESTORE_TO'
 # The environment variable that carries the export folder; see backend/src/vault/export.py.
 $script:ExportVariable = 'VAULT_EXPORT_TO'
 
@@ -800,42 +812,87 @@ function Invoke-Check {
     if ($null -ne $verdict) { throw $verdict }
 }
 
+function Invoke-WithFolders {
+    <# Run python -m <Module> in the backend folder and return its exit code. Each folder goes to
+       it in an environment variable, not on its command line: Windows PowerShell 5.1 quotes an
+       argument that has a space but does not escape a trailing backslash, so "E:\My Backups\"
+       would reach Python with a stray quote. A relative folder is taken from this window's
+       location, not from the backend folder Python runs in. The variables are put back as they
+       were afterwards, whatever happens. The backend's lines are passed on as they are.
+       -Python replaces the backend's interpreter, for the tests. #>
+    param(
+        [Parameter(Mandatory)][string]$Module,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Folders,
+        [object]$Python
+    )
+    if ($null -eq $Python) { $Python = Get-BackendPython }
+    $names = @($Folders.Keys)
+    $previous = @{}
+    foreach ($name in $names) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    try {
+        foreach ($name in $names) {
+            $folder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath([string]$Folders[$name])
+            [Environment]::SetEnvironmentVariable($name, $folder, 'Process')
+        }
+        Push-Location -LiteralPath $script:BackendDir
+        try {
+            # Windows PowerShell 5.1 turns a native program's error output into an exception
+            # while the preference is Stop, so the backend's messages are passed on as plain lines.
+            $ErrorActionPreference = 'Continue'
+            & $Python -m $Module 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+            $code = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = 'Stop'
+            Pop-Location
+        }
+    }
+    finally {
+        foreach ($name in $names) {
+            # [NullString]: see Start-WithLaunchId.
+            if ($null -eq $previous[$name]) {
+                [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+            }
+            else {
+                [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
+            }
+        }
+    }
+    return $code
+}
+
 function Invoke-Backup {
     <# Back up the vault into a folder (docs/launcher.md). The backend does the work and prints
-       only counts and the snapshot's name. The folder goes to it in an environment variable,
-       not on its command line: Windows PowerShell 5.1 quotes an argument that has a space but
-       does not escape a trailing backslash, so "E:\My Backups\" would reach Python with a stray
-       quote. A relative folder is taken from this window's location, not from the backend
-       folder Python runs in. -Python replaces the backend's interpreter, for the tests. #>
+       only counts and the snapshot's name; the folder reaches it as Invoke-WithFolders says.
+       -Python replaces the backend's interpreter, for the tests. #>
     param([string]$Target, [object]$Python)
     if (-not $Target) {
         throw 'name the backup folder, for example: .\vault.ps1 backup -To E:\VaultBackups'
     }
-    if ($null -eq $Python) { $Python = Get-BackendPython }
-    $folder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Target)
-    $previous = [Environment]::GetEnvironmentVariable($script:BackupVariable, 'Process')
-    [Environment]::SetEnvironmentVariable($script:BackupVariable, $folder, 'Process')
-    Push-Location -LiteralPath $script:BackendDir
-    try {
-        # Windows PowerShell 5.1 turns a native program's error output into an exception while
-        # the preference is Stop, so the backend's messages are passed on as plain lines.
-        $ErrorActionPreference = 'Continue'
-        & $Python -m vault.backup 2>&1 | ForEach-Object { Write-Host ([string]$_) }
-        $code = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = 'Stop'
-        Pop-Location
-        # [NullString]: see Start-WithLaunchId.
-        if ($null -eq $previous) {
-            [Environment]::SetEnvironmentVariable($script:BackupVariable, [NullString]::Value, 'Process')
-        }
-        else {
-            [Environment]::SetEnvironmentVariable($script:BackupVariable, $previous, 'Process')
-        }
-    }
+    $code = Invoke-WithFolders -Module 'vault.backup' -Folders @{ $script:BackupVariable = $Target } -Python $Python
     if ($code -ne 0) {
         throw "the backup did not complete (exit code $code); see the messages above"
+    }
+}
+
+function Invoke-Restore {
+    <# Restore a backup snapshot into a new, empty vault folder (docs/launcher.md). The backend
+       does the work and prints only counts and the snapshot's name; both folders reach it as
+       Invoke-WithFolders says. It neither stops nor starts the server and never changes the
+       settings. -Python replaces the backend's interpreter, for the tests. #>
+    param([string]$Source, [string]$Target, [object]$Python)
+    if (-not $Source) {
+        throw 'name the snapshot to restore, for example: .\vault.ps1 restore -From E:\VaultBackups -To D:\AIVault'
+    }
+    if (-not $Target) {
+        throw 'name a new, empty folder for the restored vault, for example: .\vault.ps1 restore -From E:\VaultBackups -To D:\AIVault'
+    }
+    $folders = @{ $script:RestoreFromVariable = $Source; $script:RestoreToVariable = $Target }
+    $code = Invoke-WithFolders -Module 'vault.restore' -Folders $folders -Python $Python
+    if ($code -ne 0) {
+        throw "the restore did not complete (exit code $code); see the messages above"
     }
 }
 
@@ -878,7 +935,7 @@ function Invoke-Export {
 
 function Main {
     if (-not $Command) {
-        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|check|backup|export> [-NoBrowser] [-To <folder>] [-IncludeTrash]   (Get-Help .\vault.ps1 for details)'
+        Write-Host 'Usage: .\vault.ps1 <install|run|stop|dev|check|backup|restore|export> [-NoBrowser] [-To <folder>] [-From <folder>] [-IncludeTrash]   (Get-Help .\vault.ps1 for details)'
         exit 2
     }
     try {
@@ -889,6 +946,7 @@ function Main {
             'dev' { Invoke-Dev }
             'check' { Invoke-Check }
             'backup' { Invoke-Backup $To }
+            'restore' { Invoke-Restore $From $To }
             'export' { Invoke-Export $To -IncludeTrash:$IncludeTrash }
         }
     }
