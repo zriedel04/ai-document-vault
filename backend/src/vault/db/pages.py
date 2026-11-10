@@ -1,6 +1,7 @@
 """The page repository: the extracted text of each document version (plan section 6, ``pages``).
 
-An extractor reads one version's blob into pages, and ``replace_pages`` stores them: all pages of
+An extractor reads one version's blob into pages, and ``replace_pages`` (or ``write_pages``, in
+the caller's transaction) stores them: all pages of
 that version are replaced in one transaction, so a reader sees the old set or the new one, never
 a mixture, and a second extraction (a new extractor version) leaves no page of the first behind.
 ``read_pages`` gives them back in order, and ``read_current_pages`` gives the text view one window
@@ -35,7 +36,9 @@ from vault.db.schema import document_versions, documents, pages
 EXTRACTOR: Final = re.compile(r"[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*-[1-9][0-9]{0,5}")
 ENCODING: Final = re.compile(r"[a-z][a-z0-9_-]{0,39}")
 MAX_EXTRACTOR_LENGTH: Final = 40
-HEADING_LEVELS: Final = range(1, 7)
+# Heading levels a page may store: 1 to 9, the range of the built-in DOCX styles `Heading 1` to
+# `Heading 9`, which covers Markdown's 1 to 6. A test ties every extractor's levels to this range.
+HEADING_LEVELS: Final = range(1, 10)
 
 
 class VersionNotFoundError(LookupError):
@@ -151,7 +154,7 @@ def _check_headings(page: PageText) -> None:
             msg = f"{where} is not a heading."
             raise ValueError(msg)
         if not is_int(heading.level) or heading.level not in HEADING_LEVELS:
-            msg = f"{where} has a level outside 1 to 6."
+            msg = f"{where} has a level outside 1 to 9."
             raise ValueError(msg)
         if not isinstance(heading.title, str) or not is_storable(heading.title):
             msg = f"{where} has a title that is not storable text."
@@ -178,12 +181,34 @@ def replace_pages(
     anything is written, and ``VersionNotFoundError`` for an id that names no version. The
     version's chunks go with its old pages (a foreign-key cascade): they point at the old text.
     """
+    rows = _rows(version_id, pages_in, extractor, encoding)
+    with engine.begin() as connection:
+        _write(connection, version_id, rows)
+
+
+def write_pages(
+    connection: Connection,
+    version_id: str,
+    pages_in: Sequence[PageText],
+    extractor: str,
+    encoding: str | None,
+) -> None:
+    """``replace_pages`` in the caller's transaction, which must already hold the write lock (a
+    ``write_transaction``), so the pages commit with what the caller decided from the database
+    (the extraction stage stores them with its job's end)."""
+    _write(connection, version_id, _rows(version_id, pages_in, extractor, encoding))
+
+
+def _rows(
+    version_id: str, pages_in: Sequence[PageText], extractor: str, encoding: str | None
+) -> list[dict[str, object]]:
+    """The rows for ``pages_in``, once every rule is checked; nothing is written yet."""
     checked = check_pages(pages_in)
     check_extractor(extractor)
     check_encoding(encoding)
     if not ids.is_ulid(version_id):
         raise VersionNotFoundError
-    rows = [
+    return [
         {
             "version_id": version_id,
             "page_no": page.number,
@@ -197,16 +222,18 @@ def replace_pages(
         }
         for page in checked
     ]
-    with engine.begin() as connection:
-        # The first statement writes, so the transaction holds SQLite's write lock from here on
-        # and the version cannot disappear between the check and the insert.
-        connection.execute(delete(pages).where(pages.c.version_id == version_id))
-        found = connection.execute(
-            select(document_versions.c.id).where(document_versions.c.id == version_id)
-        ).first()
-        if found is None:
-            raise VersionNotFoundError
-        connection.execute(insert(pages), rows)
+
+
+def _write(connection: Connection, version_id: str, rows: list[dict[str, object]]) -> None:
+    # The first statement writes, so the transaction holds SQLite's write lock from here on
+    # and the version cannot disappear between the check and the insert.
+    connection.execute(delete(pages).where(pages.c.version_id == version_id))
+    found = connection.execute(
+        select(document_versions.c.id).where(document_versions.c.id == version_id)
+    ).first()
+    if found is None:
+        raise VersionNotFoundError
+    connection.execute(insert(pages), rows)
 
 
 def read_pages(engine: Engine, version_id: str) -> StoredPages | None:

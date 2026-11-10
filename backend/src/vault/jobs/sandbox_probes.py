@@ -3,7 +3,7 @@
 They live in the package because the child starts in isolated mode (``python -I``) and imports
 only installed modules; a function in ``tests/`` would not be found there. None of them is in
 ``sandbox.ENTRY_POINTS``, so the server never runs them: a test passes its own allowlist.
-Each takes the input bytes, as every entry point does.
+Each takes the input bytes, as every entry point does, and ``with_option`` an option too.
 """
 
 from __future__ import annotations
@@ -70,6 +70,11 @@ def every_kind(data: bytes) -> ProbeKinds:
 
 def echo(data: bytes) -> bytes:
     return data
+
+
+def with_option(data: bytes, option: str) -> list[str]:
+    """The option it was called with, after the input's length."""
+    return [str(len(data)), option]
 
 
 def length(data: bytes) -> int:

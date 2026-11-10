@@ -307,9 +307,13 @@ describe("import page", () => {
   it("keeps the browser from opening a file dropped beside the zone", async () => {
     const { spy, sent } = backend(() => imported());
     await openImport(spy);
-    const outside = new Event("drop", { cancelable: true });
-    window.dispatchEvent(outside);
-    expect(outside.defaultPrevented).toBe(true);
+    // The router can commit the page outside act(), so its effect that installs the window
+    // listener may run a moment after the zone appears: wait for it rather than race it.
+    await waitFor(() => {
+      const outside = new Event("drop", { cancelable: true });
+      window.dispatchEvent(outside);
+      expect(outside.defaultPrevented).toBe(true);
+    });
     expect(sent).toHaveLength(0);
   });
 
