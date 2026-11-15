@@ -128,7 +128,8 @@ class Vault:
 
     def index_rows(self) -> int:
         with self.engine.connect() as connection:
-            return connection.execute(text("SELECT count(*) FROM chunks_fts")).scalar_one()
+            count: int = connection.execute(text("SELECT count(*) FROM chunks_fts")).scalar_one()
+            return count
 
     def blob_row(self, sha256: str = SHA) -> bool:
         with self.engine.connect() as connection:
@@ -137,9 +138,10 @@ class Vault:
 
     def version_of(self, document_id: str) -> str:
         with self.engine.connect() as connection:
-            return connection.execute(
+            version_id: str = connection.execute(
                 select(documents.c.current_version_id).where(documents.c.id == document_id)
             ).scalar_one()
+            return version_id
 
     def share_blob(self, sha256: str = SHA) -> str:
         """Another document whose own version holds the same bytes (a later phase's user version
