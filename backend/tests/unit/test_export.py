@@ -18,23 +18,26 @@ from typing import Any, get_args
 from unittest import mock
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
 from vault import export as cli
 from vault.api.documents import FieldSource
 from vault.db import ids
 from vault.db.documents import get_document, move_to_trash
 from vault.db.engine import create_vault_engine, write_transaction
-from vault.db.fields import FILE_PROPERTIES, FileProperties, replace_file_properties
+from vault.db.fields import FILE_PROPERTIES, NAMES, FileProperties, replace_file_properties
 from vault.db.labels import MAX_PATH_LEVELS, add_folder_labels
 from vault.db.migrate import upgrade_to_latest
+from vault.db.schema import document_versions
 from vault.ingest.importer import Importer, ImportRequest
 from vault.ingest.path_metadata import FILENAME, PENDING_KEY, label_pending_sources, resolved_title
 from vault.storage import export as export_module
 from vault.storage.blobs import BlobStore
 from vault.storage.export import (
+    CSV_COLUMNS,
     MAX_FILE_PATH,
     MAX_FOLDER_PATH,
+    PROPERTY_COLUMNS,
     ExportError,
     ExportResult,
     csv_bytes,
@@ -548,19 +551,23 @@ def csv_rows(target: Path) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(text, newline="")))
 
 
-def give_file_title(vault: Vault, document_id: str, title: str) -> None:
-    """A DOCX title for the document's current version, stored as the metadata stage stores it."""
+def give_file_properties(vault: Vault, document_id: str, values: FileProperties) -> None:
+    """File properties for the document's current version, stored as the metadata stage stores
+    them."""
     engine = create_vault_engine(vault.root / "vault.db")
     try:
         with write_transaction(engine) as connection:
             version_id: str = connection.execute(
                 text("SELECT current_version_id FROM documents WHERE id = :id"), {"id": document_id}
             ).scalar_one()
-            replace_file_properties(
-                connection, document_id, version_id, FileProperties(title=title)
-            )
+            replace_file_properties(connection, document_id, version_id, values)
     finally:
         engine.dispose()
+
+
+def give_file_title(vault: Vault, document_id: str, title: str) -> None:
+    """A DOCX title for the document's current version, stored as the metadata stage stores it."""
+    give_file_properties(vault, document_id, FileProperties(title=title))
 
 
 def give_labels(vault: Vault, document_id: str, names: Sequence[str]) -> None:
@@ -598,7 +605,7 @@ class TestTitlesAndLabels:
         flat = vault.add("upload.txt")
         export(vault, target)
         documents = {d["id"]: d for d in manifest(target)["documents"]}
-        assert manifest(target)["format_version"] == 2
+        assert manifest(target)["format_version"] == 3
         assert manifest(target)["labels_complete"] is True
         assert documents[nested]["title"] == {"value": "Lab report 3", "source": "filename"}
         labels = documents[nested]["labels"]
@@ -807,6 +814,157 @@ class TestTitlesAndLabels:
         assert all(len(path) == MAX_PATH_LEVELS for path in paths)
 
 
+def new_current_version(vault: Vault, document_id: str) -> str:
+    """Give the document a second version, made current, holding another blob's bytes (as a later
+    phase's new version would); returns its id."""
+    other = vault.add("other-bytes.txt", data=b"the bytes of a later version\n")
+    engine = create_vault_engine(vault.root / "vault.db")
+    try:
+        with write_transaction(engine) as connection:
+            blob: str = connection.execute(
+                text("SELECT blob_sha256 FROM document_versions WHERE document_id = :id"),
+                {"id": other},
+            ).scalar_one()
+            version_id = ids.new_ulid()
+            connection.execute(
+                insert(document_versions).values(
+                    id=version_id,
+                    document_id=document_id,
+                    blob_sha256=blob,
+                    version_no=2,
+                    origin="user",
+                    created_at=NOW.replace(tzinfo=None),
+                )
+            )
+            connection.execute(
+                text("UPDATE documents SET current_version_id = :version WHERE id = :id"),
+                {"version": version_id, "id": document_id},
+            )
+    finally:
+        engine.dispose()
+    return version_id
+
+
+EMPTY_PROPERTIES = dict.fromkeys(NAMES)
+
+
+class TestFileProperties:
+    def test_the_columns_and_keys_come_from_the_one_list_of_names(self) -> None:
+        assert tuple(f"file_{name}" for name in NAMES) == PROPERTY_COLUMNS
+        assert set(PROPERTY_COLUMNS) <= set(CSV_COLUMNS)
+        assert len(set(CSV_COLUMNS)) == len(CSV_COLUMNS)
+        start = CSV_COLUMNS.index("labels") + 1
+        assert CSV_COLUMNS[start : start + len(NAMES)] == PROPERTY_COLUMNS
+
+    def test_stated_values_are_exact_and_absent_ones_null(self, vault: Vault, target: Path) -> None:
+        stated = vault.add("stated.txt")
+        plain = vault.add("plain.txt")
+        give_file_properties(
+            vault,
+            stated,
+            FileProperties(author="A. Author", created="2026-03-04T05:06:07Z", modified="2026"),
+        )
+        export(vault, target)
+        assert manifest(target)["format_version"] == 3
+        by_id = {d["id"]: d for d in manifest(target)["documents"]}
+        assert by_id[stated]["file_properties"] == {
+            "title": None, "author": "A. Author", "created": "2026-03-04T05:06:07Z",
+            "modified": "2026",
+        }  # fmt: skip
+        assert list(by_id[stated]["file_properties"]) == list(NAMES)
+        assert by_id[plain]["file_properties"] == EMPTY_PROPERTIES
+        assert by_id[stated]["title"] == {"value": "stated", "source": FILENAME}
+        rows = {row["document_id"]: row for row in csv_rows(target)}
+        assert [rows[stated][c] for c in PROPERTY_COLUMNS] == [
+            "", "A. Author", "2026-03-04T05:06:07Z", "2026",
+        ]  # fmt: skip
+        assert [rows[plain][c] for c in PROPERTY_COLUMNS] == ["", "", "", ""]
+
+    def test_every_import_source_row_carries_the_document_s_properties(
+        self, vault: Vault, target: Path
+    ) -> None:
+        data = b"one document, two imports\n"
+        document = vault.add("first.txt", data=data)
+        assert vault.add("second.txt", data=data) == document
+        give_file_properties(vault, document, FileProperties(title="Stated", author="Writer"))
+        export(vault, target)
+        rows = csv_rows(target)
+        assert len(rows) == 2
+        for row in rows:
+            assert [row[c] for c in PROPERTY_COLUMNS] == ["Stated", "Writer", "", ""]
+
+    def test_the_values_of_another_version_are_left_out(self, vault: Vault, target: Path) -> None:
+        document = vault.add("notes.txt")
+        give_file_properties(
+            vault, document, FileProperties(title="Old title", author="Old author")
+        )
+        current = new_current_version(vault, document)
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            # A hand edit: one field moved to the current version, the others left on the first.
+            connection.execute(
+                "UPDATE document_fields SET version_id = ? WHERE field = 'author'", (current,)
+            )
+        connection.close()
+        export(vault, target)
+        exported = next(d for d in manifest(target)["documents"] if d["id"] == document)
+        assert exported["current_version_id"] == current
+        assert exported["file_properties"] == {**EMPTY_PROPERTIES, "author": "Old author"}
+        assert exported["title"] == {"value": "notes", "source": FILENAME}  # not the old title
+        row = next(r for r in csv_rows(target) if r["document_id"] == document)
+        assert [row[c] for c in PROPERTY_COLUMNS] == ["", "Old author", "", ""]
+
+    def test_no_values_once_the_current_version_has_none(self, vault: Vault, target: Path) -> None:
+        document = vault.add("notes.txt")
+        give_file_properties(vault, document, FileProperties(author="Old author"))
+        new_current_version(vault, document)
+        export(vault, target)
+        exported = next(d for d in manifest(target)["documents"] if d["id"] == document)
+        assert exported["file_properties"] == EMPTY_PROPERTIES
+
+    @pytest.mark.parametrize("value", HOSTILE)
+    def test_a_value_a_spreadsheet_could_misread_is_text_in_the_csv(
+        self, vault: Vault, target: Path, value: str
+    ) -> None:
+        document = vault.add("x.txt")
+        give_file_properties(vault, document, FileProperties(title=value, author=value))
+        export(vault, target)
+        (exported,) = manifest(target)["documents"]
+        assert exported["file_properties"] == {**EMPTY_PROPERTIES, "title": value, "author": value}
+        (row,) = csv_rows(target)  # a separator, quote or line break stays inside its cell
+        assert row["file_title"] == row["file_author"] == neutralise(value)
+        assert not row["file_author"].startswith(export_module.FORMULA_STARTS)
+        assert row["file_author"].removeprefix("'") == value
+        assert list(row) == list(CSV_COLUMNS)
+
+    def test_a_value_that_is_not_text_is_null(self, vault: Vault, target: Path) -> None:
+        document = vault.add("x.txt")
+        give_file_properties(vault, document, FileProperties(title="T", author="A"))
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            # Only a hand edit writes one; length() counts a blob's bytes, so the check lets it in.
+            # (A number is stored as text, the column's affinity, and is text when read back.)
+            connection.execute("UPDATE document_fields SET value = x'414243' WHERE field = 'title'")
+        connection.close()
+        assert export(vault, target).exported == 1
+        assert manifest(target)["documents"][0]["file_properties"] == {
+            **EMPTY_PROPERTIES,
+            "author": "A",
+        }
+        assert manifest(target)["documents"][0]["title"]["source"] == FILENAME
+
+    def test_a_database_from_before_file_properties_still_exports(
+        self, vault: Vault, target: Path
+    ) -> None:
+        document = vault.add("x.txt")
+        give_file_properties(vault, document, FileProperties(author="A"))
+        with sqlite3.connect(vault.root / "vault.db") as connection:
+            connection.execute("DROP TABLE document_fields")
+        connection.close()
+        assert export(vault, target).exported == 1
+        assert manifest(target)["documents"][0]["file_properties"] == EMPTY_PROPERTIES
+        (row,) = csv_rows(target)
+        assert [row[c] for c in PROPERTY_COLUMNS] == ["", "", "", ""]
+
+
 class TestTheCommandLine:
     @pytest.fixture
     def settings(self, vault: Vault, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -822,7 +980,10 @@ class TestTheCommandLine:
     def test_it_prints_counts_and_never_a_name(
         self, settings: Path, vault: Vault, target: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        vault.add("intake.txt", ["Clinic"])
+        document = vault.add("intake.txt", ["Clinic"])
+        give_file_properties(
+            vault, document, FileProperties(title="Clinic intake", author="intake author")
+        )
         assert cli.main(["--to", str(target)]) == 0
         out, err = capsys.readouterr()
         assert "Documents exported: 1" in out
