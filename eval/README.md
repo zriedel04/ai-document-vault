@@ -49,14 +49,14 @@ the product's own importer, extractors and chunker, asks every question through 
 (the code behind `POST /api/search`), and prints Recall@10, MRR and document Hit@1 by the
 definitions above, with counts of what could not be indexed or scored. `--json <file>` also writes
 the numbers to a new file. CI runs it on every push and fails only if it cannot run; there is no
-score threshold yet. Questions whose evidence is only in a type without an extractor (PDFs and
-images, for now) or one the importer refuses (CSV) are counted apart, not scored as misses.
+score threshold yet. Questions whose evidence is only in a type without an extractor (images, for
+now), in a document with no text to index (the scanned PDFs, until OCR) or in a type the importer
+refuses (CSV) are counted apart, not scored as misses.
 Abstention correctness needs answers and arrives with them. The validation test in
 `demo/generate/tests/` proves every source exists.
 
 For your private set: `uv run python -m vault.eval --corpus <folder> --questions <file>`, with a
 `manifest.json` in the folder (the spikes' `make-manifest` writes one; see
 `scripts/spikes/README.md`). It prints numbers only, never a question, a path or document text.
-Until the extraction stage runs extractors in the sandbox (it is not merged yet), the evaluation
-runs them in its own process, so use it on files you would open yourself. The details are in
-`backend/README.md` (Retrieval evaluation).
+The extractors run in the sandbox, through the extraction stage, as they do in the app. The
+details are in `backend/README.md` (Retrieval evaluation).

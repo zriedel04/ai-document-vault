@@ -13,9 +13,9 @@ was deleted, ends without changing anything.
 2. The extractor for the type (``EXTRACTORS``) runs in the sandbox (``vault.jobs.sandbox``) with
    the configured limits, the text extractors with the configured fallback code page. Nothing is
    locked meanwhile. Its result is checked before it is stored: the extractor and version the
-   entry point writes, an encoding that extractor can report, and the page rules of
-   ``vault.db.pages`` (``ExtractionResultError``), because a child that a hostile file took over
-   writes its own answer.
+   entry point writes, an encoding that extractor can report, no headings from an extractor that
+   finds none (PDF), and the page rules of ``vault.db.pages`` (``ExtractionResultError``), because
+   a child that a hostile file took over writes its own answer.
 3. Under the write lock (``BEGIN IMMEDIATE``), the document's current version is read again. A
    document that no longer holds these bytes ends the job as stale. Otherwise the pages replace
    the version's pages (the pages come from the bytes alone, so they belong to whichever version
@@ -37,7 +37,16 @@ attempts are used up):
   attempt (``JobQueue.defer``) and runs again after ``SETUP_DELAY``, its error's class name showing
   why it waits; the document stays ``processing`` and is never failed by it.
 
-A type with no extractor yet (PDF and images: ADR 0015 and the OCR stage) is never claimed: the
+The types extracted are TXT, Markdown, DOCX and PDF. A PDF is read by its text layer only
+(``vault.ingest.extractors.pdf``, ``pdf-1``): a first version on ADR 0015, which stays Proposed
+until the owner's PDF spike has run, so the extractor may still change or be replaced. A PDF page
+with no text layer (a scan) is stored as an empty page and the document completes like any other:
+the chunk stage makes it searchable with no chunks for those pages. Reading such pages is the OCR
+stage's work (Phase 3, ADRs 0014 and 0015), which finds them by their empty text; nothing here
+runs OCR. A PDF that needs a password, has no pages, is over the extractor's caps or cannot be
+parsed fails the attempt as an extractor that raised (``SandboxChildError``).
+
+A type with no extractor yet (PNG and JPEG, which wait on the OCR stage) is never claimed: the
 worker pool claims ``extract`` jobs only for the types in ``EXTRACTORS`` (``EXTENSIONS``), so those
 jobs wait in the queue, as a stage with no handler does, and run when their extractor arrives.
 
@@ -107,11 +116,13 @@ _TEXT_ENCODINGS: Final = frozenset(
 @dataclass(frozen=True)
 class Extractor:
     """How a blob type is extracted: the sandbox entry point, the extractor name and version its
-    result must carry, and whether it takes the fallback code page (and may report it)."""
+    result must carry, whether it takes the fallback code page (and may report it), and whether it
+    can find headings at all."""
 
     entry: str
     version: str
     text: bool
+    headings: bool = True
 
     def encodings(self, fallback: str) -> frozenset[str | None]:
         """The encodings a result of this extractor may name."""
@@ -120,13 +131,16 @@ class Extractor:
         return frozenset({*_TEXT_ENCODINGS, codecs.lookup(fallback).name})
 
 
-# By the blob's canonical extension (``vault.ingest.validate.EXTENSIONS``). The DOCX version is
-# written out so the server never imports python-docx; a test ties it to the extractor's VERSION.
+# By the blob's canonical extension (``vault.ingest.validate.EXTENSIONS``). The DOCX and PDF
+# versions are written out so the server never imports python-docx or loads PDFium; a test ties
+# each to its extractor's VERSION. ``pdf-1`` finds no headings (pdfplumber's font sizes, in ADR
+# 0015's proposal, are not used yet), so a PDF answer that holds one is refused.
 EXTRACTORS: Final[Mapping[str, Extractor]] = MappingProxyType(
     {
         "txt": Extractor("text", text_extractor.VERSION, text=True),
         "md": Extractor("markdown", text_extractor.VERSION, text=True),
         "docx": Extractor("docx", "docx-1", text=False),
+        "pdf": Extractor("pdf", "pdf-1", text=False, headings=False),
     }
 )
 EXTENSIONS: Final = frozenset(EXTRACTORS)
@@ -264,6 +278,7 @@ def _checked(
         not isinstance(result, Extraction)
         or result.extractor != extractor.version
         or result.encoding not in extractor.encodings(fallback)
+        or (not extractor.headings and any(page.headings for page in result.pages))
     ):
         raise ExtractionResultError
     pages = tuple(
