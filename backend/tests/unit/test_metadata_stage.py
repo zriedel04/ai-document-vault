@@ -467,9 +467,10 @@ class Vault:
 
     def version_of(self, document_id: str) -> str:
         with self.engine.connect() as connection:
-            return connection.execute(
+            version_id: str = connection.execute(
                 select(documents.c.current_version_id).where(documents.c.id == document_id)
             ).scalar_one()
+            return version_id
 
 
 @pytest.fixture

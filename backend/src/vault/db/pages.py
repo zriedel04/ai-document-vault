@@ -336,7 +336,7 @@ def read_current_pages(
             select(
                 pages.c.extractor,
                 pages.c.encoding,
-                func.count().label("count"),
+                func.count().label("page_count"),
                 func.min(pages.c.page_no).label("first"),
                 func.max(pages.c.page_no).label("last"),
             )
@@ -368,7 +368,7 @@ def read_current_pages(
         msg = "The pages of one version name different extractors or encodings."
         raise PageDataError(msg)
     group = groups[0]
-    if group.first != 1 or group.last != group.count:
+    if group.first != 1 or group.last != group.page_count:
         msg = "The pages of this version are not numbered 1, 2, 3 ... without a gap."
         raise PageDataError(msg)
     try:
@@ -383,5 +383,5 @@ def read_current_pages(
     except ValueError as error:
         raise PageDataError(str(error)) from None
     return PageWindow(
-        version_id=version_id, extractor=extractor, total=int(group.count), pages=window
+        version_id=version_id, extractor=extractor, total=int(group.page_count), pages=window
     )
