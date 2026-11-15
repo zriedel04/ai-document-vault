@@ -16,6 +16,10 @@ export interface paths {
          * @description One page of documents in use (or, with ``trash``, of the trash), sorted by when they were
          *     added, their name or their size, newest first unless ``order`` says otherwise. ``total``
          *     counts every document the list holds, so the page can show how many pages there are.
+         *
+         *     ``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that
+         *     label or a label below it. An id that names no label, or is not an id at all, is a 404 whose
+         *     message does not repeat it.
          */
         get: operations["read_documents_api_documents_get"];
         put?: never;
@@ -215,6 +219,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Labels
+         * @description Every label as a tree in one list: each label names its parent and its path, and counts
+         *     the documents in use that carry it or any label below it. The list is in tree order, so a
+         *     page can show it as it comes, indented by the length of each path.
+         */
+        get: operations["read_labels_api_labels_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/processing": {
         parameters: {
             query?: never;
@@ -294,7 +320,10 @@ export interface paths {
          *     The query goes in the body, never in the address, because it says what the owner is looking
          *     for. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with
          *     no letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose
-         *     message does not repeat it. Nothing here is logged.
+         *     message does not repeat it. ``label`` keeps only the documents that carry that label or one
+         *     below it, in the same statement as the rest of the scope, so ``total`` and the pages count
+         *     the filtered documents; an id that names no label is a 404 whose message does not repeat
+         *     it. Nothing here is logged.
          */
         post: operations["search_documents_api_search_post"];
         delete?: never;
@@ -542,6 +571,29 @@ export interface components {
              */
             status: "suggested" | "accepted" | "rejected";
         };
+        /** LabelNode */
+        LabelNode: {
+            /** Documents */
+            documents: number;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "collection" | "category" | "course" | "project" | "tag" | "topic" | "person" | "org" | "folder";
+            /** Name */
+            name: string;
+            /** Parent Id */
+            parent_id: string | null;
+            /** Path */
+            path: string[];
+        };
+        /** LabelTree */
+        LabelTree: {
+            /** Items */
+            items: components["schemas"]["LabelNode"][];
+        };
         /** Me */
         Me: {
             /** Id */
@@ -617,6 +669,8 @@ export interface components {
         };
         /** SearchRequest */
         SearchRequest: {
+            /** Label */
+            label?: string | null;
             /**
              * Limit
              * @default 20
@@ -762,6 +816,7 @@ export interface operations {
                 limit?: number;
                 offset?: number;
                 trash?: boolean;
+                label?: string | null;
             };
             header?: never;
             path?: never;
@@ -777,6 +832,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DocumentList"];
                 };
+            };
+            /** @description No such label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -1155,6 +1217,26 @@ export interface operations {
             };
         };
     };
+    read_labels_api_labels_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LabelTree"];
+                };
+            };
+        };
+    };
     read_processing_api_processing_get: {
         parameters: {
             query?: never;
@@ -1236,6 +1318,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SearchResults"];
                 };
+            };
+            /** @description No such label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description The query cannot be searched */
             422: {

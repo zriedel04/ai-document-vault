@@ -7,6 +7,12 @@ from the same folder share one. A document from ``School/CSE485/Assignments`` ca
 levels, each with ``source = import_path``, so a later filter on ``School`` finds everything below
 it without walking the tree. Names come cleaned from ``vault.ingest.path_metadata``; this module
 only stores and reads them. Names are the owner's own words and are never logged.
+
+Browsing by label (``label_tree``, ``UNDER_LABEL_SQL``) still matches a label *and every label
+below it*, because a label the owner or a rule assigns later need not carry its parents, as a
+folder's levels do. An assignment the owner rejected (``status = 'rejected'``) does not count;
+a suggested one does, as the plan's resolution order shows a pending suggestion. The walk down
+the tree uses ``UNION``, so a parent loop written by hand ends instead of running for ever.
 """
 
 from __future__ import annotations
@@ -16,15 +22,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Connection, delete, exists, select
+from sqlalchemy import Connection, Engine, delete, exists, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from vault.db import ids
-from vault.db.schema import MAX_LABEL_CHARS, document_labels, labels
+from vault.db.engine import read_snapshot
+from vault.db.schema import MAX_LABEL_CHARS, TRASHED, document_labels, labels
 
 FOLDER: Final = "folder"
 IMPORT_PATH: Final = "import_path"
 ACCEPTED: Final = "accepted"
+# An assignment the owner turned down: it is kept (so it is not suggested again) but never counts.
+REJECTED: Final = "rejected"
 # A path deeper than this is damage (a parent loop written by hand): reading stops there.
 MAX_PATH_LEVELS: Final = 256
 
@@ -178,3 +187,91 @@ def label_order(
         "" if source is None else str(source),
         "" if label_id is None else str(label_id),
     )
+
+
+class UnknownLabelError(LookupError):
+    """A label filter names no label. The message is fixed text and never repeats the id."""
+
+    def __init__(self) -> None:
+        super().__init__("no such label")
+
+
+# The ids of the documents a label filter keeps: those that carry the label ``:label_id`` or a
+# label below it, by an assignment that was not rejected (see the module docstring). Fixed text
+# with one bound parameter, written once and used by the document list (``vault.db.documents``)
+# and by keyword search (``vault.retrieval.keyword``), so the two filters cannot disagree. The
+# caller adds the state of the document (the trash or not).
+UNDER_LABEL_SQL: Final = """SELECT document_labels.document_id FROM document_labels
+    WHERE document_labels.status != 'rejected' AND document_labels.label_id IN (
+        WITH RECURSIVE under_label(id) AS (
+            SELECT :label_id
+            UNION
+            SELECT labels.id FROM labels JOIN under_label ON labels.parent_id = under_label.id
+        )
+        SELECT id FROM under_label
+    )"""
+
+
+def check_label(connection: Connection, label_id: str) -> None:
+    """Raise ``UnknownLabelError`` unless ``label_id`` names a label, in the caller's snapshot, so a
+    filter on a label deleted a moment ago is a fixed error and not an empty page. A value that
+    is not an id at all is refused before it reaches the database."""
+    if not ids.is_ulid(label_id) or (
+        connection.execute(select(labels.c.id).where(labels.c.id == label_id)).first() is None
+    ):
+        raise UnknownLabelError
+
+
+@dataclass(frozen=True)
+class LabelNode:
+    id: str
+    kind: str
+    name: str
+    parent_id: str | None
+    path: tuple[str, ...]  # the names from the outermost label down to this one
+    documents: int  # documents not in the trash that carry it or a label below it
+
+
+# For every label, the documents not in the trash that carry it or a label below it (the same
+# rule as ``UNDER_LABEL_SQL``, for every label at once: a test compares the two on every label).
+_COUNTS = text(
+    """WITH RECURSIVE below(root, id) AS (
+        SELECT id, id FROM labels
+        UNION
+        SELECT below.root, labels.id FROM labels JOIN below ON labels.parent_id = below.id
+    )
+    SELECT below.root AS label_id, count(DISTINCT document_labels.document_id) AS documents
+    FROM below
+    JOIN document_labels ON document_labels.label_id = below.id
+        AND document_labels.status != 'rejected'
+    JOIN documents ON documents.id = document_labels.document_id AND documents.state != :trashed
+    GROUP BY below.root"""
+)
+
+
+def label_tree(engine: Engine) -> tuple[LabelNode, ...]:
+    """Every label with its parent, its path and how many documents in use it holds (itself and
+    every label below it), in the library's order (``label_order``): a parent comes before its
+    children, and the children of a label follow it, so the list reads as the tree. One snapshot
+    for both reads."""
+    with read_snapshot(engine) as connection:
+        rows = connection.execute(
+            select(labels.c.id, labels.c.kind, labels.c.name, labels.c.parent_id)
+        ).all()
+        counts = {
+            row.label_id: int(row.documents)
+            for row in connection.execute(_COUNTS, {"trashed": TRASHED})
+        }
+    tree_of = {row.id: (row.name, row.parent_id) for row in rows}
+    nodes = (
+        LabelNode(
+            id=row.id,
+            kind=row.kind,
+            name=row.name,
+            parent_id=row.parent_id,
+            path=label_path(tree_of, row.id),
+            documents=counts.get(row.id, 0),
+        )
+        for row in rows
+    )
+    return tuple(sorted(nodes, key=lambda node: label_order(node.kind, node.path, "", node.id)))
