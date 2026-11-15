@@ -17,6 +17,7 @@ import {
 import { Link } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { NO_LABEL_TEXT } from "../api/labels";
 import { useSessionState } from "../api/session-context";
 import {
   type DocumentItem,
@@ -30,8 +31,9 @@ import {
   formatDate,
   formatSize,
 } from "../api/documents";
-import { useDocumentList } from "../api/useDocuments";
-import type { DocumentsSearch } from "./documents-search";
+import { type ListError, useDocumentList } from "../api/useDocuments";
+import { LabelFilter } from "../components/LabelFilter";
+import { type DocumentsSearch, withLabel } from "./documents-search";
 
 const SORT_LABEL: Record<SortKey, string> = {
   added: "Date added",
@@ -41,13 +43,18 @@ const SORT_LABEL: Record<SortKey, string> = {
 
 const ORDER_LABEL: Record<Order, string> = { desc: "Descending", asc: "Ascending" };
 
+const LIST_ERROR_TEXT: Record<ListError, string> = { ...ERROR_TEXT, "no-label": NO_LABEL_TEXT };
+
 interface Props {
   search: DocumentsSearch;
   /** Show another sort, order, page or tab; the route puts it in the address. */
   onSearch: (search: DocumentsSearch) => void;
 }
 
-/** The document library: one page of documents in use, or of the trash, sorted by the backend. */
+/**
+ * The document library: one page of documents in use, or of the trash, sorted by the backend, and
+ * optionally only those under one label (the label or any label below it).
+ */
 export function Documents({ search, onSearch }: Props) {
   const { state: session } = useSessionState();
   return (
@@ -83,6 +90,15 @@ export function Documents({ search, onSearch }: Props) {
             onSearch({ ...search, order: value === "asc" ? "asc" : "desc", page: 1 });
           }}
         />
+        {session.status === "signed-in" && (
+          <LabelFilter
+            value={search.label ?? null}
+            counts={!search.trash}
+            onChange={(label) => {
+              onSearch(withLabel(search, label));
+            }}
+          />
+        )}
       </Group>
       {session.status === "signed-in" ? (
         <DocumentPage search={search} onSearch={onSearch} />
@@ -109,10 +125,28 @@ function DocumentPage({ search, onSearch }: Props) {
 
   if (state.status === "loading") return <Loader aria-label="Loading documents" />;
   if (state.status === "error") {
+    if (state.error === "no-label") {
+      return (
+        <Alert color="yellow" title="Label not found">
+          <Stack gap="xs" align="flex-start">
+            <Text size="sm">{LIST_ERROR_TEXT["no-label"]}</Text>
+            <Button
+              size="xs"
+              variant="light"
+              onClick={() => {
+                onSearch(withLabel(search, null));
+              }}
+            >
+              Show every document
+            </Button>
+          </Stack>
+        </Alert>
+      );
+    }
     return (
       <Alert color="red" title="Documents not loaded">
         <Stack gap="xs" align="flex-start">
-          <Text size="sm">{ERROR_TEXT[state.error]}</Text>
+          <Text size="sm">{LIST_ERROR_TEXT[state.error]}</Text>
           <Button size="xs" variant="light" onClick={reload}>
             Try again
           </Button>
@@ -122,6 +156,15 @@ function DocumentPage({ search, onSearch }: Props) {
   }
   const { items, total } = state.data;
   if (total === 0) {
+    if (search.label !== undefined) {
+      return (
+        <Text c="dimmed">
+          {search.trash
+            ? "No document in the trash has this label."
+            : "No document in the library has this label."}
+        </Text>
+      );
+    }
     return <Text c="dimmed">{search.trash ? "The trash is empty." : "No documents yet."}</Text>;
   }
   const first = (search.page - 1) * PAGE_SIZE + 1;
