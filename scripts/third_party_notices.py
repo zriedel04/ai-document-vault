@@ -37,11 +37,15 @@ licence text needs no regeneration.
 
 `check python` runs on Linux and on Windows, where the app runs, because a dependency can pull in
 a package on one platform only (a `sys_platform == 'win32'` marker) or ship other licence files in
-its Windows wheel. One does: pypdfium2's wheels ship the licences of the libraries built into
+its Windows wheel. One did: pypdfium2 5.14 shipped the licences of the libraries built into
 PDFium under a folder named for the platform (`data/linux_x64/BUILD_LICENSES/`,
-`data/windows_x64/BUILD_LICENSES/`), with the same files and the same texts in each (checked for
-5.14.0, apart from line endings, which `tidy` removes). PLATFORM_FOLDERS names such a folder per
-package, and its label says `<platform>` in its place, so one file passes both checks. A wheel
+`data/windows_x64/BUILD_LICENSES/`), with the same files and the same texts in each (apart from
+line endings, which `tidy` removes). From 5.15 it ships them under `.dist-info/licenses/
+BUILD_LICENSES/`, one set for every build, so the label is the same on each platform without help
+(checked for 5.15.2: the win_amd64 and manylinux x86_64 wheels hold the same 37 files with the same
+texts). PLATFORM_FOLDERS keeps the rule for 5.14's layout, which matches nothing in 5.15: a
+package's platform folder gets `<platform>` in its label, so if a wheel goes back to platform
+folders, one file still passes both checks. A wheel
 whose platform folders hold different files or texts still fails one of the two checks, as it
 should. A dependency that pulls in a package on one platform only, or ships other texts there,
 still has no single file that passes both checks, since each compares the exact set of packages it
