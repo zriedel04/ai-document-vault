@@ -416,6 +416,147 @@ describe("document details", () => {
     expect(screen.getByText("Folder import")).toBeInTheDocument();
   });
 
+  const folderLabel = (path: string[], id: string): DocumentDetail["labels"][number] => ({
+    id,
+    kind: "folder",
+    name: path.at(-1) ?? "",
+    path,
+    source: "import_path",
+    status: "accepted",
+  });
+
+  /** The text of the field the page shows under `label`, read from its caption. */
+  const field = (label: string): HTMLElement => {
+    const caption = screen.getByText(label, { selector: "p" });
+    const box = caption.parentElement;
+    if (box === null) throw new Error("a field has a box");
+    return box;
+  };
+
+  it("shows the title and where it came from, the folders and the file's properties", async () => {
+    const document = detail({
+      title: { value: "Synthetic lease", source: "file_properties" },
+      file_properties: {
+        title: "Synthetic lease",
+        author: "Jordan Example",
+        created: "2026-03-04",
+        modified: "2026-03",
+      },
+      labels: [
+        folderLabel(["School"], "01J9Z8Y7X6W5V4T3S2R1Q0P9P1"),
+        folderLabel(["School", "CSE 485"], "01J9Z8Y7X6W5V4T3S2R1Q0P9P2"),
+      ],
+    });
+    await renderApp({
+      route: `/documents/${ID}`,
+      fetch: backend(detailHandler(document)),
+      token: TEST_TOKEN,
+    });
+    await screen.findByRole("heading", { level: 2, name: "Lease agreement.pdf" });
+
+    expect(field("Title")).toHaveTextContent("Synthetic leasefrom the file's properties");
+    expect(field("Author")).toHaveTextContent("Jordan Example");
+    // Dates as days and months, in the viewer's locale and never moved by the time zone.
+    expect(field("Created (file property)")).toHaveTextContent(
+      new Date(Date.UTC(2026, 2, 4)).toLocaleDateString(undefined, {
+        dateStyle: "medium",
+        timeZone: "UTC",
+      }),
+    );
+    expect(field("Modified (file property)")).toHaveTextContent(
+      new Date(Date.UTC(2026, 2, 1)).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "long",
+        timeZone: "UTC",
+      }),
+    );
+    // The deepest folder, as its whole path; the folder above it is not listed again.
+    expect(field("Folder")).toHaveTextContent(/^FolderSchool › CSE 485$/);
+  });
+
+  it("shows nothing for properties the file does not give, and names a title from the file name", async () => {
+    await renderApp({
+      route: `/documents/${ID}`,
+      fetch: backend(detailHandler(detail())),
+      token: TEST_TOKEN,
+    });
+    await screen.findByRole("heading", { level: 2, name: "Lease agreement.pdf" });
+
+    expect(field("Title")).toHaveTextContent("Lease agreementfrom the file name");
+    for (const label of [
+      "Author",
+      "Created (file property)",
+      "Modified (file property)",
+      "Folder",
+      "Folders",
+    ]) {
+      expect(screen.queryByText(label, { selector: "p" })).not.toBeInTheDocument();
+    }
+  });
+
+  it("shows no title when the backend gives none", async () => {
+    await renderApp({
+      route: `/documents/${ID}`,
+      fetch: backend(detailHandler(detail({ title: null }))),
+      token: TEST_TOKEN,
+    });
+    await screen.findByRole("heading", { level: 2, name: "Lease agreement.pdf" });
+    expect(screen.queryByText("Title", { selector: "p" })).not.toBeInTheDocument();
+  });
+
+  it("shows hostile title, author and folder names as text that wraps and keeps its place", async () => {
+    const markup = '<img src=x onerror="alert(1)"><script>alert(2)</script><b>bold</b>';
+    const long = "W".repeat(255);
+    const rtl = "מסמך ‮الملف";
+    const emoji = "\u{1F4C4} notes \u{1F469}‍\u{1F4BB}";
+    const document = detail({
+      title: { value: markup, source: "file_properties" },
+      file_properties: {
+        title: markup,
+        author: `${rtl} ${long}`,
+        created: "<i>2026</i>",
+        modified: null,
+      },
+      labels: [
+        folderLabel([rtl, markup], "01J9Z8Y7X6W5V4T3S2R1Q0P9P3"),
+        folderLabel([long, emoji], "01J9Z8Y7X6W5V4T3S2R1Q0P9P4"),
+      ],
+    });
+    const { container } = await renderApp({
+      route: `/documents/${ID}`,
+      fetch: backend(detailHandler(document)),
+      token: TEST_TOKEN,
+    });
+    await screen.findByRole("heading", { level: 2, name: "Lease agreement.pdf" });
+
+    // Shown as written, and no element is made from it.
+    expect(field("Title")).toHaveTextContent(markup);
+    expect(field("Created (file property)")).toHaveTextContent("<i>2026</i>");
+    expect(container.querySelector("img, script, b, i")).toBeNull();
+    for (const box of [field("Title"), field("Author"), field("Folders")]) {
+      expect(box.querySelector("a")).toBeNull();
+    }
+
+    // Each folder is one line with every name isolated, so a right-to-left name or an override
+    // character cannot move the separators or the next name.
+    const paths = within(field("Folders")).getAllByText(
+      (_content, element) => element?.tagName === "DIV" && element.querySelector("div") === null,
+    );
+    expect(paths.map((path) => path.textContent)).toEqual([
+      `${rtl} › ${markup}`,
+      `${long} › ${emoji}`,
+    ]);
+    for (const path of paths) {
+      expect([...path.querySelectorAll("bdi")].map((bdi) => bdi.textContent)).toEqual(
+        path.textContent.split(" › "),
+      );
+    }
+    // Long values wrap anywhere instead of widening the page.
+    const author = within(field("Author")).getByText(`${rtl} ${long}`);
+    expect(author.closest("div")).toHaveStyle({ overflowWrap: "anywhere" });
+    for (const path of paths) expect(path).toHaveStyle({ overflowWrap: "anywhere" });
+  });
+
   it("says when there is no such document, without offering to try again", async () => {
     await renderApp({
       route: "/documents/nope",
