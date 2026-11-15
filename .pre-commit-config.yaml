@@ -14,7 +14,7 @@ repos:
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: f12be1ebaa5351c1fc76472de98db2c3446c8253 # frozen: v0.16.10 (keep equal to backend/uv.lock and demo/generate/uv.lock)
+    rev: c0f278f1254ccc8fb09676bcdb8d847e7db493e5 # frozen: v0.17.4 (keep equal to backend/uv.lock and demo/generate/uv.lock)
     hooks:
       - id: ruff-check
         files: ^(backend|demo/generate)/
