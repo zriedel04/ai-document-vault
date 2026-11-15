@@ -31,6 +31,7 @@ import {
 } from "../api/search";
 import { useSessionState } from "../api/session-context";
 import { useSearchResults } from "../api/useSearch";
+import { LabelFilter } from "../components/LabelFilter";
 import { resultPlace } from "./documents-search";
 
 /**
@@ -54,7 +55,7 @@ export function Highlighted({ segments }: { segments: readonly Segment[] }) {
 /**
  * Keyword search over the vault. The query is kept in this component's state only: it never goes
  * in the address, the browser's history or a log (plan section 8), and it is gone when the page is
- * left. The form has no action and its field no name, so even a native submission would carry no
+ * left. The type and label filters are kept the same way. The form has no action and its field no name, so even a native submission would carry no
  * query, and the browser is asked not to remember what was typed.
  */
 export function Search() {
@@ -62,6 +63,7 @@ export function Search() {
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState<string | null>(null);
   const [types, setTypes] = useState<SearchType[]>([]);
+  const [label, setLabel] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [run, setRun] = useState(0);
 
@@ -107,8 +109,18 @@ export function Search() {
           ))}
         </Group>
       </Checkbox.Group>
+      {session.status === "signed-in" && (
+        <LabelFilter
+          value={label}
+          counts
+          onChange={(value) => {
+            setLabel(value);
+            setPage(1);
+          }}
+        />
+      )}
       {query === null ? null : session.status === "signed-in" ? (
-        <Results query={{ query, types, page }} run={run} onPage={setPage} />
+        <Results query={{ query, types, label, page }} run={run} onPage={setPage} />
       ) : session.status === "loading" ? (
         <Loader aria-label="Checking access" />
       ) : (
@@ -142,10 +154,10 @@ function Results({
 
   if (state.status === "loading") return <Loader aria-label="Searching" />;
   if (state.status === "error") {
-    if (state.error === "refused") {
+    if (state.error === "refused" || state.error === "no-label") {
       return (
         <Alert color="yellow" title="Search not run">
-          <Text size="sm">{SEARCH_ERROR_TEXT.refused}</Text>
+          <Text size="sm">{SEARCH_ERROR_TEXT[state.error]}</Text>
         </Alert>
       );
     }
