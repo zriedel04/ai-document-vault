@@ -437,14 +437,14 @@ def test_calls_from_several_threads_give_each_its_own_result() -> None:
     assert results == {n: [f"Document {n}"] * 5 for n in range(8)}
 
 
-SANDBOX_ENTRIES = {"pdf": EntryPoint(ENTRY, Extraction)}
 SANDBOX_LIMITS = SandboxLimits(timeout_seconds=60, memory_bytes=512 * sandbox.MIB)
 
 
-def test_it_runs_in_the_sandbox() -> None:
+def test_it_runs_in_the_sandbox_as_the_pdf_entry_point() -> None:
+    assert sandbox.ENTRY_POINTS["pdf"] == EntryPoint(ENTRY, Extraction)
     data = build([text_stream(["In the child"]), None])
 
-    result = sandbox.run("pdf", data, SANDBOX_LIMITS, entry_points=SANDBOX_ENTRIES)
+    result = sandbox.run("pdf", data, SANDBOX_LIMITS)
 
     assert result == Extraction("pdf-1", (Page(1, "In the child"), Page(2, "")))
 
@@ -462,7 +462,7 @@ def test_a_refusal_in_the_sandbox_comes_back_as_its_class_name(
     data: bytes, error_class: str
 ) -> None:
     with pytest.raises(SandboxChildError) as caught:
-        sandbox.run("pdf", data, SANDBOX_LIMITS, entry_points=SANDBOX_ENTRIES)
+        sandbox.run("pdf", data, SANDBOX_LIMITS)
 
     assert caught.value.error_class == error_class
     assert SECRET not in str(caught.value)

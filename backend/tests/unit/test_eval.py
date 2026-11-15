@@ -6,6 +6,7 @@ The corpus here is built in a temporary folder whose names, ids and words look p
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import logging
@@ -17,12 +18,14 @@ from typing import Any
 import docx
 import pytest
 
+from tests.unit.pdf_builder import build, text_stream
 from vault import eval as cli
-from vault.ingest.extractors import NotTextError
+from vault.jobs import sandbox
+from vault.jobs.sandbox import SandboxChildError
 from vault.retrieval import evaluation
 from vault.retrieval.evaluation import Evaluation, evaluate
 
-PRIVATE = ("Jane", "Doe", "zebra", "aardvark", "pelican", "Patient")
+PRIVATE = ("Jane", "Doe", "zebra", "aardvark", "pelican", "ibis", "Patient")
 LONG = " ".join(f"zebra{n}" for n in range(20))  # more terms than search takes
 
 
@@ -39,7 +42,11 @@ FILES: dict[str, bytes] = {
     "Jane-Doe-notes/beta.md": b"# Beta\n\nThe aardvark budget is forty dollars.\n",
     "Jane-Doe-notes/beta-copy.md": b"# Beta\n\nThe aardvark budget is forty dollars.\n",
     "Jane-Doe-project/spec.docx": _docx("The pelican requirement holds for every release."),
-    "Jane-Doe-scans/scan.pdf": b"%PDF-1.4\n%%EOF\n",
+    "Jane-Doe-project/brief.pdf": build(
+        [None, text_stream(["The ibis milestone ships in March."])]
+    ),
+    "Jane-Doe-scans/scan.pdf": build([None]),  # no text layer: a scan awaiting OCR
+    "Jane-Doe-scans/photo.png": b"\x89PNG\r\n\x1a\n" + bytes(64),  # no extractor yet
     "Jane-Doe-data/table.csv": b"name,hours\nzebra,41\n",
 }
 
@@ -69,6 +76,11 @@ QUESTIONS: list[dict[str, Any]] = [
         "Patient-Jane-Doe-3",
         "pelican requirement",
         ("Jane-Doe-project/spec.docx", "The pelican requirement holds for every release."),
+    ),
+    _question(
+        "Patient-Jane-Doe-9",
+        "ibis milestone",
+        ("Jane-Doe-project/brief.pdf", "The ibis milestone ships in March."),
     ),
     _question("Patient-Jane-Doe-4", "zebra aardvark", ALPHA),  # nothing holds both: a miss
     _question("Patient-Jane-Doe-5", LONG, ALPHA),  # search refuses it: a miss
@@ -155,6 +167,7 @@ def _consistent(result: dict[str, Any]) -> None:
         + sum(documents["refused"].values())
         + sum(documents["no_extractor"].values())
         + documents["extraction_failed"]
+        + documents["no_text"]
     )
     assert questions["total"] == (
         questions["not_answerable"]
@@ -171,23 +184,24 @@ class TestScores:
     ) -> None:
         result = evaluate(*corpus)
         documents, questions, scores = result.documents, result.questions, result.scores
-        assert documents.listed == 6
-        assert documents.indexed == 3  # alpha.txt, beta.md, spec.docx
+        assert documents.listed == 8
+        assert documents.indexed == 4  # alpha.txt, beta.md, spec.docx, brief.pdf
         assert documents.duplicates == 1  # beta-copy.md is stored as beta.md
-        assert documents.no_extractor == {"pdf": 1}
+        assert documents.no_extractor == {"png": 1}
         assert documents.refused == {"unsupported_extension": 1}  # the CSV
         assert documents.extraction_failed == 0
-        assert documents.chunks == 3
-        assert questions.total == 8
+        assert documents.no_text == 1  # scan.pdf: its one page is stored empty
+        assert documents.chunks == 4
+        assert questions.total == 9
         assert questions.not_answerable == 1
-        assert questions.scored == 5
-        assert questions.none_indexed == 1  # its only source is the PDF
-        assert questions.partly_indexed == 1  # one of its two sources is the PDF
+        assert questions.scored == 6
+        assert questions.none_indexed == 1  # its only source is the scan
+        assert questions.partly_indexed == 1  # one of its two sources is the scan
         assert questions.queries_refused == 1
         assert questions.passages_missing == 0
-        # Found at rank 1: questions 1 to 3; missed: 4 and 5.
-        assert scores.recall_at_10 == pytest.approx(0.6)
-        assert scores.mrr_at_10 == pytest.approx(0.6)
+        # Found at rank 1: questions 1 to 3 and the PDF's (on its page 2); missed: 4 and 5.
+        assert scores.recall_at_10 == pytest.approx(4 / 6)
+        assert scores.mrr_at_10 == pytest.approx(4 / 6)
         assert scores.hit_at_1 == 1.0
         assert scores.hit_at_1_questions == 1
         _consistent(result.as_json())
@@ -199,27 +213,40 @@ class TestScores:
         assert result.scores.recall_at_10 == 0.0
 
     def test_without_a_scorable_question_there_are_no_scores(self, tmp_path: Path) -> None:
-        result = evaluate(*_write_corpus(tmp_path, [QUESTIONS[5], QUESTIONS[7]]))
+        result = evaluate(*_write_corpus(tmp_path, [QUESTIONS[6], QUESTIONS[8]]))
         assert result.questions.scored == 0
         assert (result.scores.recall_at_10, result.scores.mrr_at_10) == (None, None)
         assert result.scores.hit_at_1 is None
 
     def test_a_document_the_extractor_refuses_is_counted_and_not_indexed(
-        self, corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+        self, corpus: tuple[Path, Path]
     ) -> None:
-        real = evaluation.extract
+        def refuse_markdown(entry: str, *args: Any, **kwargs: Any) -> object:
+            if entry == "markdown":
+                raise SandboxChildError("NotTextError")
+            return sandbox.run(entry, *args, **kwargs)
 
-        def refuse_markdown(extension: str, data: bytes) -> Any:
-            if extension == "md":
-                raise NotTextError
-            return real(extension, data)
-
-        monkeypatch.setattr(evaluation, "extract", refuse_markdown)
-        result = evaluate(*corpus)
+        result = evaluate(*corpus, runner=refuse_markdown)
         assert result.documents.extraction_failed == 1
-        assert result.documents.indexed == 2
-        assert result.questions.none_indexed == 2  # the aardvark question joins the PDF one
+        assert result.documents.indexed == 3
+        assert result.questions.none_indexed == 2  # the aardvark question joins the scan's
         _consistent(result.as_json())
+
+    def test_a_pdf_the_extractor_refuses_in_the_sandbox_is_counted(self, tmp_path: Path) -> None:
+        corpus, questions = _write_corpus(tmp_path)
+        (corpus / "Jane-Doe-project" / "brief.pdf").write_bytes(
+            build([text_stream(["The ibis milestone ships in March."])], user_password=b"pw")
+        )
+        result = evaluate(corpus, questions)
+        assert result.documents.extraction_failed == 1
+        assert result.documents.indexed == 3
+        assert result.questions.none_indexed == 2  # the ibis question joins the scan's
+        _consistent(result.as_json())
+
+    def test_a_sandbox_that_cannot_run_stops_the_run(self, corpus: tuple[Path, Path]) -> None:
+        refused = functools.partial(sandbox.run, entry_points={})
+        with pytest.raises(evaluation.EvalError, match="sandbox cannot run"):
+            evaluate(*corpus, runner=refused)
 
     def test_a_duplicate_mark_the_bytes_do_not_support_stops_the_run(self, tmp_path: Path) -> None:
         corpus = _write_corpus(tmp_path, manifest=_manifest("Jane-Doe-notes/alpha.txt"))
@@ -264,16 +291,17 @@ class TestCommandLine:
             capsys, "--corpus", str(corpus[0]), "--questions", str(corpus[1]), "--json", str(report)
         )
         assert code == 0
-        assert "Recall@10: 0.600" in output
-        assert "MRR@10: 0.600" in output
+        assert "Recall@10: 0.667" in output
+        assert "MRR@10: 0.667" in output
         assert "Hit@1: 1.000 over 1 find-the-document questions" in output
-        assert "no extractor for the type yet: pdf 1" in output
+        assert "no extractor for the type yet: png 1" in output
+        assert "no text to index (a scan awaiting OCR, say): 1" in output
         assert "refused at import: unsupported_extension 1" in output
         assert "text fallback cp1252" in output
         _assert_private(output)
         written = json.loads(report.read_text(encoding="utf-8"))
-        assert written["scores"]["recall_at_10"] == pytest.approx(0.6)
-        assert written["questions"]["scored"] == 5
+        assert written["scores"]["recall_at_10"] == pytest.approx(4 / 6)
+        assert written["questions"]["scored"] == 6
         _consistent(written)
         _assert_private(report.read_text(encoding="utf-8"))
         assert b"\r\n" not in report.read_bytes()
@@ -281,7 +309,7 @@ class TestCommandLine:
     def test_no_scores_are_printed_as_none_scored(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        corpus, questions = _write_corpus(tmp_path, [QUESTIONS[5]])
+        corpus, questions = _write_corpus(tmp_path, [QUESTIONS[6]])
         code, output = _run(capsys, "--corpus", str(corpus), "--questions", str(questions))
         assert code == 0
         assert "Recall@10: none scored" in output
@@ -298,7 +326,9 @@ class TestCommandLine:
         assert written["questions"]["total"] == 60
         assert written["documents"]["indexed"] > 0
         assert written["documents"]["duplicates"] == 3
-        assert set(written["documents"]["no_extractor"]) <= {"pdf", "png", "jpg"}
+        assert set(written["documents"]["no_extractor"]) <= {"png", "jpg"}
+        assert written["documents"]["no_text"] == 3  # the three scanned PDFs
+        assert written["documents"]["extraction_failed"] == 0
 
     def test_an_existing_report_is_refused_before_the_run(
         self,

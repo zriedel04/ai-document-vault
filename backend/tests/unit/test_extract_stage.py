@@ -12,6 +12,8 @@ import io
 import logging
 import os
 import stat
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -27,8 +29,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Connection, Engine, insert, select, update
 
 from tests.conftest import LOCAL
+from tests.unit.pdf_builder import build, text_stream
 from tests.unit.test_documents_api import Library
-from vault.core.config import Settings
+from vault.core.config import ProcessingSettings, Settings
 from vault.db import ids
 from vault.db.engine import read_snapshot
 from vault.db.pages import HEADING_LEVELS, PageHeading, PageText, read_pages
@@ -49,12 +52,16 @@ from vault.ingest.extract_stage import (
 )
 from vault.ingest.extractors import Extraction, Heading, Page
 from vault.ingest.extractors import docx as docx_extractor
+from vault.ingest.extractors import pdf as pdf_extractor
 from vault.ingest.importer import ImportRequest
 from vault.ingest.importer import Outcome as ImportOutcome
-from vault.ingest.validate import EXTENSIONS
+from vault.ingest.validate import DEFAULT_LIMITS, EXTENSIONS
 from vault.jobs import sandbox
 from vault.jobs.queue import Completion, Job, JobQueue, utc_now
 from vault.jobs.sandbox import (
+    DEFAULT_MAX_RESULT_BYTES,
+    DEFAULT_MAX_RESULT_MEMORY_BYTES,
+    DEFAULT_MAX_RESULT_VALUES,
     MIB,
     SandboxCrashError,
     SandboxError,
@@ -222,6 +229,68 @@ def test_docx_headings_at_every_built_in_level_are_stored(
     assert [h.level for h in stored.pages[0].headings] == list(range(1, 10))
 
 
+def test_a_pdf_file_is_extracted_with_its_empty_pages_and_queues_the_chunk_job(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    data = build([text_stream(["Week 1", "Read chapter one."]), None, text_stream(["   "])])
+    document_id, sha256 = add(library, "week.pdf", data)
+    queue, job = claimed(engine, document_id)
+    assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert (stored.extractor, stored.encoding) == ("pdf-1", None)
+    # A page with no text layer, or only white space, is an empty page (the OCR stage's mark).
+    assert stored.pages == (
+        PageText(1, "Week 1\nRead chapter one."),
+        PageText(2, ""),
+        PageText(3, ""),
+    )
+    [_extract, chunk] = jobs_of(engine, document_id)
+    assert (chunk.stage, chunk.status, chunk.input_hash) == (CHUNK_STAGE, "queued", sha256)
+
+
+def test_a_pdf_with_no_text_layer_at_all_is_stored_as_empty_pages(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    document_id, _ = add(library, "scan.pdf", build([None, None]))
+    queue, job = claimed(engine, document_id)
+    assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert stored.pages == (PageText(1, ""), PageText(2, ""))
+
+
+def test_the_stage_runs_the_pdf_extractor_with_the_sandboxs_default_answer_caps() -> None:
+    # The PDF extractor's caps were chosen so that its largest answer fits these caps
+    # (test_pdf_extractor); the stage's limits come from the settings and must keep them.
+    limits = SandboxLimits.from_settings(ProcessingSettings())
+    assert limits.max_result_bytes >= DEFAULT_MAX_RESULT_BYTES
+    assert limits.max_result_memory_bytes >= DEFAULT_MAX_RESULT_MEMORY_BYTES
+    assert limits.max_result_values >= DEFAULT_MAX_RESULT_VALUES
+
+
+def test_the_largest_pdfs_the_extractor_takes_run_within_the_default_limits() -> None:
+    # The product's default timeout and memory cap must suit a PDF at the extractor's caps: every
+    # page it takes with the text cap nearly spent, and a file of the largest size it takes (text
+    # pages, then filler after the end of the file, which PDFium reads past).
+    limits = SandboxLimits.from_settings(ProcessingSettings())
+    caps = DEFAULT_LIMITS
+    line = "x" * 70
+    per_page = caps.max_pdf_text_chars // caps.max_pdf_pages // (len(line) + 1)
+    many = build([text_stream([line] * per_page)] * caps.max_pdf_pages)
+    started = time.monotonic()
+    result = sandbox.run("pdf", many, limits)
+    assert isinstance(result, Extraction)
+    assert len(result.pages) == caps.max_pdf_pages
+    assert sum(len(page.text) for page in result.pages) <= caps.max_pdf_text_chars
+    small = build([text_stream(["Week 1"])])
+    large = small + b"%" * (caps.max_bytes - len(small))
+    assert sandbox.run("pdf", large, limits) == Extraction("pdf-1", (Page(1, "Week 1"),))
+    del large
+    # A tenth of the timeout, so a slower machine still has room.
+    assert time.monotonic() - started < limits.timeout_seconds / 10
+
+
 def test_every_heading_level_an_extractor_can_emit_can_be_stored() -> None:
     docx_levels = set(docx_extractor._HEADING_LEVELS.values())
     markdown_levels = set(range(1, 7))  # `#` to `######`, the CommonMark range (ADR 0018)
@@ -230,10 +299,25 @@ def test_every_heading_level_an_extractor_can_emit_can_be_stored() -> None:
 
 def test_each_extractor_is_an_entry_point_with_the_version_its_extractor_writes() -> None:
     assert EXTRACTORS["docx"].version == docx_extractor.VERSION
+    assert EXTRACTORS["pdf"].version == pdf_extractor.VERSION
+    assert sandbox.ENTRY_POINTS["pdf"].target == "vault.ingest.extractors.pdf:extract"
     for extension, extractor in EXTRACTORS.items():
         assert extension in EXTENSIONS
         point = sandbox.ENTRY_POINTS[extractor.entry]
         assert bool(point.options) is extractor.text
+
+
+def test_the_server_and_the_evaluation_load_no_extractor_library() -> None:
+    # The extractors run in the sandbox only: the server (and the evaluation, which runs the stage)
+    # must never load PDFium or python-docx, which parse the file in the child.
+    code = (
+        "import sys, vault.main, vault.eval;"
+        "print(sorted(m for m in ('pypdfium2', 'docx') if m in sys.modules))"
+    )
+    result = subprocess.run(  # noqa: S603 - a fixed command
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "[]"
 
 
 # --- stale work -----------------------------------------------------------------------------------
@@ -347,7 +431,7 @@ def test_a_version_that_keeps_coming_back_fails_the_attempt(
 
 def test_every_sandbox_failure_is_either_the_documents_or_the_setups() -> None:
     def subclasses(cls: type) -> set[type]:
-        found = set(cls.__subclasses__())
+        found: set[type] = set(cls.__subclasses__())
         return found.union(*(subclasses(sub) for sub in found))
 
     assert set(DOCUMENT_FAILURES) | set(SETUP_FAILURES) == subclasses(SandboxError)
@@ -433,6 +517,63 @@ def test_the_last_failed_attempt_fails_the_document(
     assert state(engine, document_id) == "failed"
 
 
+# PDFs the extractor refuses, each holding the canary: the attempt fails as an extractor that
+# raised, and neither the refusal's class nor the text reaches the job, the log or the console.
+HOSTILE_PDFS = [
+    pytest.param(build([text_stream([CANARY])], user_password=b"pw"), id="needs a password"),
+    pytest.param(
+        build([text_stream([CANARY])], user_password=b"", security_filter="Unknown"),
+        id="unknown handler",
+    ),
+    pytest.param(build([]), id="no pages"),
+    pytest.param(build([text_stream([CANARY])], claimed_pages=3), id="a page it does not hold"),
+    pytest.param(b"%PDF-1.7\n" + CANARY.encode() * 50 + b"\n%%EOF\n", id="corrupt"),
+    pytest.param(build([text_stream([CANARY])])[:300], id="cut short"),
+]
+
+
+@pytest.mark.parametrize("data", HOSTILE_PDFS)
+def test_a_pdf_the_extractor_refuses_fails_the_attempt_by_class_name_only(
+    library: Library,
+    engine: Engine,
+    store: BlobStore,
+    data: bytes,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    document_id, _ = add(library, "Jane Roe diagnosis.pdf", data)
+    row = run_in_pool(engine, store, document_id, limits=LIMITS)
+    assert (row.status, row.attempts, row.last_error) == ("queued", 1, "SandboxChildError")
+    assert read_pages(engine, version_of(engine, document_id)) is None
+    output = capfd.readouterr()
+    refusals = ("EncryptedPdfError", "EmptyPdfError", "NotPdfError", "PdfLimitError")
+    for private in (CANARY, "Jane Roe", *refusals):
+        assert private not in caplog.text + output.out + output.err + str(row.last_error)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        Extraction(
+            "pdf-1", (Page(1, "Week 1", (Heading(1, "Week 1", 0, 6),)),)
+        ),  # pdf-1 finds none
+        Extraction("pdf-1", (Page(1, "Week 1"),), "utf-8"),  # a PDF has no encoding
+        Extraction("pdf-2", (Page(1, "Week 1"),)),
+        Extraction("docx-1", (Page(1, "Week 1"),)),
+    ],
+)
+def test_a_pdf_answer_the_extractor_cannot_give_is_refused(
+    library: Library, engine: Engine, store: BlobStore, answer: object
+) -> None:
+    document_id, sha256 = add(library, "week.pdf", build([text_stream(["Week 1"])]))
+    with pytest.raises(ExtractionResultError):
+        extract_document(
+            engine, store, document_id, sha256, limits=LIMITS, runner=lambda *_a, **_k: answer
+        )
+    assert read_pages(engine, version_of(engine, document_id)) is None
+
+
 def unsupported_system(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(sandbox, "SUPPORTED_PLATFORMS", frozenset())
     return {}
@@ -469,7 +610,7 @@ def test_a_type_with_no_extractor_is_deferred_if_it_is_ever_claimed(
 ) -> None:
     document_id, _ = add(library, "notes.txt", b"text\n")
     with engine.begin() as connection:
-        connection.execute(update(blobs).values(ext="pdf"))
+        connection.execute(update(blobs).values(ext="png"))
     queue, job = claimed(engine, document_id)  # claimed without the stage's extensions
     assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.DEFERRED
     [row] = jobs_of(engine, document_id)
@@ -582,4 +723,31 @@ def test_imported_text_and_markdown_become_searchable(
     assert found == {"xylophone": [notes], "quokka": [course], "Зачёт": [notes]}
     output = capfd.readouterr()
     for private in ("xylophone", "quokka", "Jane Roe", "Syllabus"):
+        assert private not in caplog.text + output.out + output.err
+
+
+def test_imported_pdfs_become_searchable_scans_included(
+    vault_dir: Path, caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    app = create_app(Settings.model_validate({"vault": {"path": str(vault_dir)}}))
+    engine: Engine = app.state.engine
+    headers = {"Authorization": f"Bearer {app.state.token}", "Origin": LOCAL}
+    text_pdf = build([text_stream(["Syllabus"]), None, text_stream(["quokka seminar"])])
+    with TestClient(app, base_url=LOCAL, headers=headers) as client:
+        course = upload(client, "Jane Roe course.pdf", text_pdf)
+        scan = upload(client, "Jane Roe scan.pdf", build([None]))
+        deadline = time.monotonic() + 60
+        while {state(engine, course), state(engine, scan)} != {"searchable"}:
+            assert time.monotonic() < deadline, "the documents never became searchable"
+            time.sleep(0.05)
+        response = client.post("/api/search", json={"query": "quokka"})
+        assert response.status_code == 200, response.text
+        [item] = response.json()["items"]
+        pages = client.get(f"/api/documents/{scan}/pages")
+        assert pages.status_code == 200, pages.text
+    assert (item["document_id"], item["page"]) == (course, 3)
+    assert [page["text"] for page in pages.json()["pages"]] == [""]
+    output = capfd.readouterr()
+    for private in ("quokka", "Jane Roe", "Syllabus"):
         assert private not in caplog.text + output.out + output.err
