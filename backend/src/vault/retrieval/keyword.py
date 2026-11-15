@@ -19,7 +19,10 @@ A query is at most ``MAX_QUERY_CHARS`` characters and ``MAX_TERMS`` terms (``Que
 otherwise), which bounds the work one request can ask of the index.
 
 ``search`` runs the expression against ``chunks_fts`` within the scope (plan section 8, step 1:
-documents not in the trash, and only the chunks of each document's current version), ranks the
+documents not in the trash, only the chunks of each document's current version, and the optional
+type and label filters, in the same statement, so the count, the ranking and the pages all see
+the filtered set; a label keeps the documents that carry it or a label below it, by the rule the
+document list uses, ``vault.db.labels.UNDER_LABEL_SQL``), ranks the
 chunks by BM25 over the text, title and section path, and returns one result per document: its
 best chunk, with a snippet of that chunk's text and the number of the document's chunks that match.
 A document scores as its best chunk does, and results are sorted by that score, then by document
@@ -52,6 +55,7 @@ from typing import Any, Final
 from sqlalchemy import Engine, bindparam, text
 
 from vault.db.engine import read_snapshot
+from vault.db.labels import UNDER_LABEL_SQL, check_label
 from vault.db.pages import is_storable
 from vault.db.schema import TRASHED
 
@@ -152,6 +156,8 @@ class SearchQuery:
     offset: int = 0
     # Canonical extensions (vault.ingest.validate.MIME_TYPES); empty means every type.
     extensions: tuple[str, ...] = ()
+    # Only documents that carry this label or one below it (vault.db.labels); None for all.
+    label_id: str | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.limit <= MAX_PAGE:
@@ -194,7 +200,8 @@ class SearchPage:
 
 # Chunks that match, in scope, each with its rank in its document and the document's match count.
 # Fixed text: the expression and the extensions are bound parameters.
-_SCOPED = """
+_SCOPED = (
+    """
 WITH hits AS (
     SELECT
         rowid AS chunk_id,
@@ -218,8 +225,12 @@ scoped AS (
     JOIN document_versions ON document_versions.id = chunks.version_id
     JOIN blobs ON blobs.sha256 = document_versions.blob_sha256
     WHERE documents.state != :trashed AND (:any_type OR blobs.ext IN :extensions)
+        AND (:any_label OR chunks.document_id IN ("""
+    + UNDER_LABEL_SQL
+    + """))
 )
 """
+)
 # Both are constants joined with constants; every value is a bound parameter.
 _COUNT_SQL = _SCOPED + "SELECT count(*) FROM scoped WHERE rank_in_document = 1"  # noqa: S608
 _PAGE_SQL = (
@@ -271,9 +282,14 @@ def _section_path(stored: str) -> tuple[str, ...]:
 def search(engine: Engine, query: SearchQuery) -> SearchPage:
     """One page of the documents that match ``query``, best first (see the module docstring).
 
-    Raises ``QueryError`` for a query ``build_match`` refuses."""
+    Raises ``QueryError`` for a query ``build_match`` refuses, and
+    ``vault.db.labels.UnknownLabelError`` when ``query.label_id`` names no label (also when the
+    query has nothing to match, so a filter on a deleted label is never a silent empty page)."""
     match = build_match(query.query)
     if match is None:
+        if query.label_id is not None:
+            with read_snapshot(engine) as connection:
+                check_label(connection, query.label_id)
         return SearchPage(items=(), total=0)
     scope = {
         "match": match,
@@ -281,11 +297,15 @@ def search(engine: Engine, query: SearchQuery) -> SearchPage:
         "any_type": not query.extensions,
         # An empty IN list is not valid SQL everywhere; the flag above makes the value unused.
         "extensions": list(query.extensions) or [""],
+        "any_label": query.label_id is None,
+        "label_id": query.label_id,
     }
     # A random marker per request: no text in a document can contain it by chance or by design.
     nonce = secrets.token_hex(16)
     open_mark, close_mark = f"{nonce}", f"{nonce}"
     with read_snapshot(engine) as connection:
+        if query.label_id is not None:
+            check_label(connection, query.label_id)
         total: int = connection.execute(_COUNT, scope).scalar_one()
         rows = connection.execute(
             _PAGE, {**scope, "limit": query.limit, "offset": query.offset}

@@ -1,5 +1,6 @@
 import type { Api } from "./client";
 import { type DocumentsError, ERROR_TEXT, errorFor } from "./documents";
+import { NO_LABEL_TEXT } from "./labels";
 import type { components } from "./schema";
 
 export type SearchHit = components["schemas"]["SearchHit"];
@@ -36,12 +37,17 @@ export const MAX_SEARCH_OFFSET = 1_000_000_000;
 /** The last page whose offset the backend accepts. */
 export const MAX_SEARCH_PAGE = Math.floor(MAX_SEARCH_OFFSET / SEARCH_PAGE_SIZE) + 1;
 
-/** Why a search gave no results: a documents error, or a query the backend's grammar refuses. */
-export type SearchError = DocumentsError | "refused";
+/**
+ * Why a search gave no results: a documents error, a query the backend's grammar refuses, or a
+ * label filter on a label the vault no longer has.
+ */
+export type SearchError = DocumentsError | "refused" | "no-label";
 
 export interface SearchQuery {
   query: string;
   types: readonly SearchType[];
+  /** A label's id: only the documents that carry it or a label below it; null for every one. */
+  label: string | null;
   page: number;
 }
 
@@ -49,7 +55,7 @@ export interface SearchQuery {
  * One page of results for `query` (`POST /api/search`). The query travels in the request body,
  * never in the address. Only the status code decides an error, so the server's message (which
  * never quotes the query, but is not the page's to show) is not read: a 422 is a query the
- * backend refuses.
+ * backend refuses, and a 404 with a label is the backend's answer for a label it does not have.
  */
 export async function searchDocuments(
   api: Api,
@@ -61,9 +67,12 @@ export async function searchDocuments(
       limit: SEARCH_PAGE_SIZE,
       offset: (query.page - 1) * SEARCH_PAGE_SIZE,
       types: [...query.types],
+      ...(query.label === null ? {} : { label: query.label }),
     },
   });
   if (data) return { status: "ok", data };
+  if (response.status === 404 && query.label !== null)
+    return { status: "error", error: "no-label" };
   return {
     status: "error",
     error: response.status === 422 ? "refused" : errorFor(response.status),
@@ -74,6 +83,7 @@ export const SEARCH_ERROR_TEXT: Record<SearchError, string> = {
   ...ERROR_TEXT,
   "not-found": "The search could not be run. Check that the backend is up to date.",
   unreachable: "The search could not be run. Check that the backend is running.",
+  "no-label": NO_LABEL_TEXT,
   refused:
     "This search cannot be run. A query can have at most 500 characters and 16 words or phrases, and only text characters.",
 };

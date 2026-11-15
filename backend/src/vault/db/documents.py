@@ -31,12 +31,31 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Connection, Engine, Row, delete, exists, func, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Connection,
+    Engine,
+    Row,
+    String,
+    column,
+    delete,
+    exists,
+    func,
+    select,
+    text,
+    update,
+)
 
 from vault.db import ids
 from vault.db.engine import read_snapshot, write_transaction
 from vault.db.fields import FileProperties, file_properties_of
-from vault.db.labels import LabelDetail, delete_unused_folder_labels, labels_of
+from vault.db.labels import (
+    UNDER_LABEL_SQL,
+    LabelDetail,
+    check_label,
+    delete_unused_folder_labels,
+    labels_of,
+)
 from vault.db.schema import (
     JOB_STAGES,
     TRASHED,
@@ -74,6 +93,8 @@ class ListQuery:
     limit: int = DEFAULT_PAGE
     offset: int = 0
     in_trash: bool = False
+    # Only the documents that carry this label or one below it (vault.db.labels); None for all.
+    label_id: str | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.limit <= MAX_PAGE:
@@ -111,6 +132,8 @@ def _utc(value: datetime) -> datetime:
 
 
 def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
+    """One page of the list. Raises ``vault.db.labels.UnknownLabelError`` when ``query.label_id``
+    names no label."""
     ranked = (
         select(
             import_sources.c.document_id,
@@ -131,6 +154,13 @@ def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
     )
 
     where = documents.c.state == TRASHED if query.in_trash else documents.c.state != TRASHED
+    if query.label_id is not None:
+        under_label = (
+            text(UNDER_LABEL_SQL)
+            .bindparams(label_id=query.label_id)
+            .columns(column("document_id", String))
+        )
+        where = where & documents.c.id.in_(under_label)
     base = (
         select(
             documents.c.id,
@@ -168,6 +198,8 @@ def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
     # One snapshot for both reads: the driver opens no transaction for a read, so without it a
     # commit between the page and the fallback count could pair an old page with a new total.
     with read_snapshot(engine) as connection:
+        if query.label_id is not None:
+            check_label(connection, query.label_id)
         rows = connection.execute(
             base.order_by(*ordering).limit(query.limit).offset(query.offset)
         ).all()
