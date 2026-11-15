@@ -347,7 +347,7 @@ def test_a_version_that_keeps_coming_back_fails_the_attempt(
 
 def test_every_sandbox_failure_is_either_the_documents_or_the_setups() -> None:
     def subclasses(cls: type) -> set[type]:
-        found = set(cls.__subclasses__())
+        found: set[type] = set(cls.__subclasses__())
         return found.union(*(subclasses(sub) for sub in found))
 
     assert set(DOCUMENT_FAILURES) | set(SETUP_FAILURES) == subclasses(SandboxError)
