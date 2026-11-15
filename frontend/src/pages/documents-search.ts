@@ -1,4 +1,5 @@
 import { MAX_PAGE, ORDERS, type Order, SORT_KEYS, type SortKey } from "../api/documents";
+import { isLabelId } from "../api/labels";
 import type { SearchHit } from "../api/search";
 
 /** What the document list shows, kept in the address so a page can be bookmarked or shared. */
@@ -7,6 +8,12 @@ export interface DocumentsSearch {
   order: Order;
   page: number;
   trash: boolean;
+  /**
+   * The label whose documents (its own and those of every label below it) the list shows, by its
+   * id; left out for every document, so the address holds no `label` then. Only the id goes in
+   * the address, never a label's name.
+   */
+  label?: string;
 }
 
 export const DEFAULT_SEARCH: DocumentsSearch = {
@@ -36,7 +43,14 @@ export function parseDocumentsSearch(search: Record<string, unknown>): Documents
         ? Math.min(page, MAX_PAGE)
         : DEFAULT_SEARCH.page,
     trash: search.trash === true,
+    ...(isLabelId(search.label) ? { label: search.label } : {}),
   };
+}
+
+/** The same list filtered by another label, or by none (`null`), from its first page. */
+export function withLabel(search: DocumentsSearch, label: string | null): DocumentsSearch {
+  const rest = { sort: search.sort, order: search.order, trash: search.trash, page: 1 };
+  return label === null ? rest : { ...rest, label };
 }
 
 /**

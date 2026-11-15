@@ -11,6 +11,6 @@ export function useSearchResults(
   run: number,
 ): Request<SearchResults, SearchError> {
   const api = useApi();
-  const key = JSON.stringify([run, query.query, [...query.types].sort(), query.page]);
+  const key = JSON.stringify([run, query.query, [...query.types].sort(), query.label, query.page]);
   return useRequest(key, () => searchDocuments(api, query));
 }

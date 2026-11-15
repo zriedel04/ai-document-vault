@@ -30,6 +30,7 @@ from vault.db.documents import (
     restore,
 )
 from vault.db.fields import FILE_PROPERTIES
+from vault.db.labels import UnknownLabelError
 from vault.db.pages import (
     DEFAULT_WINDOW,
     MAX_WINDOW,
@@ -94,7 +95,7 @@ class DocumentList(BaseModel):
     offset: int
 
 
-@router.get("/documents")
+@router.get("/documents", responses={404: {"description": "No such label"}})
 async def read_documents(
     request: Request,
     _user: Annotated[LocalUser, Depends(current_user)],
@@ -103,15 +104,25 @@ async def read_documents(
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = DEFAULT_PAGE,
     offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
     trash: bool = False,
+    label: str | None = None,
 ) -> DocumentList:
     """One page of documents in use (or, with ``trash``, of the trash), sorted by when they were
     added, their name or their size, newest first unless ``order`` says otherwise. ``total``
-    counts every document the list holds, so the page can show how many pages there are."""
+    counts every document the list holds, so the page can show how many pages there are.
+
+    ``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that
+    label or a label below it. An id that names no label, or is not an id at all, is a 404 whose
+    message does not repeat it."""
     engine: Engine | None = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="no vault is open")
-    query = ListQuery(sort=sort, order=order, limit=limit, offset=offset, in_trash=trash)
-    page = await run_in_threadpool(list_documents, engine, query)
+    query = ListQuery(
+        sort=sort, order=order, limit=limit, offset=offset, in_trash=trash, label_id=label
+    )
+    try:
+        page = await run_in_threadpool(list_documents, engine, query)
+    except UnknownLabelError:
+        raise HTTPException(status_code=404, detail="no such label") from None
     return DocumentList(
         items=[DocumentItem.model_validate(item, from_attributes=True) for item in page.items],
         total=page.total,

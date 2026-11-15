@@ -576,6 +576,81 @@
         "title": "Label",
         "type": "object"
       },
+      "LabelNode": {
+        "properties": {
+          "documents": {
+            "title": "Documents",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "collection",
+              "category",
+              "course",
+              "project",
+              "tag",
+              "topic",
+              "person",
+              "org",
+              "folder"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Path",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "parent_id",
+          "path",
+          "documents"
+        ],
+        "title": "LabelNode",
+        "type": "object"
+      },
+      "LabelTree": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LabelNode"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "LabelTree",
+        "type": "object"
+      },
       "Me": {
         "properties": {
           "id": {
@@ -780,6 +855,17 @@
       },
       "SearchRequest": {
         "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
           "limit": {
             "default": 20,
             "maximum": 50.0,
@@ -1119,7 +1205,7 @@
   "paths": {
     "/api/documents": {
       "get": {
-        "description": "One page of documents in use (or, with ``trash``, of the trash), sorted by when they were\nadded, their name or their size, newest first unless ``order`` says otherwise. ``total``\ncounts every document the list holds, so the page can show how many pages there are.",
+        "description": "One page of documents in use (or, with ``trash``, of the trash), sorted by when they were\nadded, their name or their size, newest first unless ``order`` says otherwise. ``total``\ncounts every document the list holds, so the page can show how many pages there are.\n\n``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that\nlabel or a label below it. An id that names no label, or is not an id at all, is a 404 whose\nmessage does not repeat it.",
         "operationId": "read_documents_api_documents_get",
         "parameters": [
           {
@@ -1173,6 +1259,22 @@
               "title": "Trash",
               "type": "boolean"
             }
+          },
+          {
+            "in": "query",
+            "name": "label",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Label"
+            }
           }
         ],
         "responses": {
@@ -1185,6 +1287,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such label"
           },
           "422": {
             "content": {
@@ -1667,6 +1772,28 @@
         ]
       }
     },
+    "/api/labels": {
+      "get": {
+        "description": "Every label as a tree in one list: each label names its parent and its path, and counts\nthe documents in use that carry it or any label below it. The list is in tree order, so a\npage can show it as it comes, indented by the length of each path.",
+        "operationId": "read_labels_api_labels_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabelTree"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Labels",
+        "tags": [
+          "labels"
+        ]
+      }
+    },
     "/api/processing": {
       "get": {
         "description": "Whether processing is paused, and how many jobs each stage has in each status.",
@@ -1735,7 +1862,7 @@
     },
     "/api/search": {
       "post": {
-        "description": "One page of the documents in use whose current text matches ``query``, best first, each\nwith its best passage: the page it is on, its place in that page's text, its section and a\nsnippet whose matched words are marked. ``total`` counts the matching documents.\n\nThe query goes in the body, never in the address, because it says what the owner is looking\nfor. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with\nno letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose\nmessage does not repeat it. Nothing here is logged.",
+        "description": "One page of the documents in use whose current text matches ``query``, best first, each\nwith its best passage: the page it is on, its place in that page's text, its section and a\nsnippet whose matched words are marked. ``total`` counts the matching documents.\n\nThe query goes in the body, never in the address, because it says what the owner is looking\nfor. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with\nno letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose\nmessage does not repeat it. ``label`` keeps only the documents that carry that label or one\nbelow it, in the same statement as the rest of the scope, so ``total`` and the pages count\nthe filtered documents; an id that names no label is a 404 whose message does not repeat\nit. Nothing here is logged.",
         "operationId": "search_documents_api_search_post",
         "requestBody": {
           "content": {
@@ -1757,6 +1884,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such label"
           },
           "422": {
             "description": "The query cannot be searched"
