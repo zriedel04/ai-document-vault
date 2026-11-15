@@ -92,6 +92,7 @@ def report(result: Evaluation) -> list[str]:
         f"  not indexed, no extractor for the type yet: {_by_word(d.no_extractor)}",
         f"  not indexed, refused at import: {_by_word(d.refused)}",
         f"  not indexed, extraction failed: {d.extraction_failed}",
+        f"  not indexed, no text to index (a scan awaiting OCR, say): {d.no_text}",
         f"Questions: {q.total}",
         f"  not answerable from the corpus (abstention, not scored here): {q.not_answerable}",
         f"  scored: {q.scored}",
