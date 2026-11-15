@@ -7,11 +7,12 @@ What runs is the product's code, not a model of it:
 - every file the manifest lists is imported by :class:`vault.ingest.importer.Importer`, as an
   upload of a file with its own name (the name is the document's title, which the keyword index
   searches), so validation, the blob store and exact-duplicate detection are the product's;
-- each new document's blob is read by the extractor of its type and the pages are stored with
-  ``vault.db.pages.replace_pages``, then the chunk stage runs (``chunk_document``). The extraction
-  stage that does this from the job queue is not on ``main`` yet, so the extractors are called
-  here directly and in this process, the way that stage calls them in the sandbox; once it is,
-  this runs the stage instead. Until then, run it only on documents you would open yourself;
+- each new document of a type the extraction stage reads (``extract_stage.EXTENSIONS``: TXT,
+  Markdown, DOCX and PDF) is extracted by that stage's own function (``extract_document``), so the
+  extractor runs in the sandbox with the product's default limits (``[processing]``'s defaults)
+  and its answer is checked and stored as the stage stores it; then the chunk stage runs
+  (``chunk_document``). The two run one after the other here instead of through the worker pool,
+  so a run does not wait on the queue's polling;
 - each question's text is the query of :func:`vault.retrieval.keyword.search`, the function behind
   ``POST /api/search``, with a page of ``K`` results. Search returns one result per document (its
   best chunk), as the Search page shows, so the ranking is those chunks in that order.
@@ -24,9 +25,13 @@ format and of every score. Exact duplicates are the documents the importer store
 the manifest that the importer does not confirm stops the run.
 
 A question is scored only if ``can_be_scored`` says the indexed documents can answer it: a question
-whose evidence is in a type that has no extractor yet (PDF, images) or that the importer refuses
-(CSV) is counted apart, never scored as a miss. A query that search refuses (too long, too many
-terms) is scored as a miss, since search finds nothing for it, and counted.
+whose evidence is in a type that has no extractor yet (images), in a document with no text to index
+(a scanned PDF, whose pages are stored empty until the OCR stage of Phase 3 reads them), or in a
+type the importer refuses (CSV) is counted apart, never scored as a miss. A query that search
+refuses (too long, too many terms) is scored as a miss, since search finds nothing for it, and
+counted. An extraction that fails as a document can make it fail (``DOCUMENT_FAILURES``, an answer
+the stage refuses) is counted; a sandbox that cannot run at all stops the run, since it is a
+failure of the setup and not a result about the corpus.
 
 Everything in the result is a count, a score or a word of this package's own vocabulary (a
 refusal reason, a stored type), never a question, an id, a path or document text, so the result
@@ -61,24 +66,26 @@ from vault_spikes.retrieval import (
     sources_missing_from,
 )
 
+from vault.core.config import ProcessingSettings
 from vault.db import ids
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
-from vault.db.pages import PageHeading, PageText, replace_pages
 from vault.db.schema import blobs, chunks, document_versions, documents
-from vault.ingest import chunk_stage
+from vault.ingest import chunk_stage, extract_stage
 from vault.ingest.chunking import structural_v1
-from vault.ingest.extractors import Extraction, ExtractionError
-from vault.ingest.extractors import docx as docx_extractor
+from vault.ingest.extract_stage import ExtractionResultError, Runner
 from vault.ingest.extractors import text as text_extractor
 from vault.ingest.importer import Importer, ImportRequest, Outcome
+from vault.ingest.setup_failures import DOCUMENT_FAILURES, SETUP_FAILURES
+from vault.jobs import sandbox
+from vault.jobs.sandbox import SandboxLimits
 from vault.retrieval.keyword import QueryError, SearchQuery, search
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
 
 SEARCH: Final = "keyword"
-# The stored types (``vault.ingest.validate.MIME_TYPES``) that have an extractor on this branch.
-EXTRACTED: Final = frozenset({"txt", "md", "docx"})
+# The stored types (``vault.ingest.validate.MIME_TYPES``) that the extraction stage reads.
+EXTRACTED: Final = extract_stage.EXTENSIONS
 
 
 class EvalError(OwnRuntimeError):
@@ -91,11 +98,15 @@ class Documents:
     groups add up to ``listed``."""
 
     listed: int
-    indexed: int  # a new document whose pages were extracted and chunked
+    indexed: int  # a new document whose pages were extracted and chunked into at least one chunk
     duplicates: int  # the same bytes as another listed file: stored once, as that document
     refused: Mapping[str, int]  # by the importer's refusal reason
     no_extractor: Mapping[str, int]  # by stored type: imported, but nothing reads it yet
-    extraction_failed: int  # the extractor refused it, or its pages broke the page rules
+    # The extraction failed as a document can make it fail (DOCUMENT_FAILURES: a timeout, the
+    # memory cap, a crash, the extractor raising) or the stage refused its answer.
+    extraction_failed: int
+    # Extracted and chunked, but no page holds text to index: a scanned PDF awaiting OCR.
+    no_text: int
     chunks: int
 
 
@@ -147,6 +158,7 @@ class Evaluation:
                 "refused": dict(sorted(d.refused.items())),
                 "no_extractor": dict(sorted(d.no_extractor.items())),
                 "extraction_failed": d.extraction_failed,
+                "no_text": d.no_text,
                 "chunks": d.chunks,
             },
             "questions": {
@@ -167,18 +179,9 @@ class Evaluation:
         }
 
 
-def extract(extension: str, data: bytes) -> Extraction:
-    """The extraction of a blob of a type in ``EXTRACTED``, as the extraction stage runs it."""
-    if extension == "docx":
-        return docx_extractor.extract(data)
-    return text_extractor.extract(
-        data, markdown=extension == "md", fallback=text_extractor.FALLBACK_ENCODING
-    )
-
-
-def evaluate(corpus: Path, questions_file: Path) -> Evaluation:
+def evaluate(corpus: Path, questions_file: Path, *, runner: Runner = sandbox.run) -> Evaluation:
     """Run the whole evaluation in a vault made for it in a temporary folder, removed after,
-    whether the run succeeds or not."""
+    whether the run succeeds or not. ``runner`` is the sandbox's ``run`` (tests replace it)."""
     documents = load_manifest(corpus / "manifest.json")
     questions = load_questions(questions_file)
     check_sources_listed(questions, documents)
@@ -189,7 +192,7 @@ def evaluate(corpus: Path, questions_file: Path) -> Evaluation:
         upgrade_to_latest(paths.db)
         engine = create_vault_engine(paths.db)
         try:
-            return _run(engine, BlobStore(paths.blobs), documents, files, questions)
+            return _run(engine, BlobStore(paths.blobs), documents, files, questions, runner)
         finally:
             engine.dispose()  # Windows removes no file that SQLite still holds open
     finally:
@@ -211,8 +214,10 @@ def _run(
     listed: Sequence[Document],
     files: Sequence[Path],
     questions: Sequence[Question],
+    runner: Runner,
 ) -> Evaluation:
     importer = Importer(engine, store)
+    limits = SandboxLimits.from_settings(ProcessingSettings())
     batch = ids.new_ulid()
     document_of: dict[str, str] = {}  # manifest path to document id
     first_path: dict[str, str] = {}  # document id to the first listed path stored as it
@@ -237,39 +242,35 @@ def _run(
     indexed: set[str] = set()
     no_extractor: Counter[str] = Counter()
     failed = 0
+    no_text = 0
     for document_id in new:
-        version_id, sha256, extension = _current_blob(engine, document_id)
+        sha256, extension = _current_blob(engine, document_id)
         if extension not in EXTRACTED:
             no_extractor[extension] += 1
             continue
-        with store.open(sha256) as stream:
-            data = stream.read()
         try:
-            extraction = extract(extension, data)
-            replace_pages(
-                engine,
-                version_id,
-                [
-                    PageText(
-                        page.number,
-                        page.text,
-                        tuple(PageHeading(h.level, h.title, h.start, h.end) for h in page.headings),
-                    )
-                    for page in extraction.pages
-                ],
-                extraction.extractor,
-                extraction.encoding,
+            extracted = extract_stage.extract_document(
+                engine, store, document_id, sha256, limits=limits, runner=runner
             )
-        except (ExtractionError, ValueError):
+        except SETUP_FAILURES:
+            msg = "the sandbox cannot run the extractors on this system"
+            raise EvalError(msg) from None
+        except (*DOCUMENT_FAILURES, ExtractionResultError):
             failed += 1
             continue
+        if extracted is not extract_stage.Outcome.STORED:
+            msg = "the extraction stage did not store the pages of a document it was given"
+            raise EvalError(msg)
         if (
             chunk_stage.chunk_document(engine, document_id, sha256)
             is not chunk_stage.Outcome.STORED
         ):
             msg = "the chunk stage did not store the chunks of a document it was given"
             raise EvalError(msg)
-        indexed.add(document_id)
+        if _has_chunks(engine, document_id):
+            indexed.add(document_id)
+        else:
+            no_text += 1
 
     # Every listed path stands for the first listed path the importer stored as the same document,
     # so exact duplicates are one document to the scores, as the importer made them.
@@ -316,6 +317,7 @@ def _run(
             refused=dict(refused),
             no_extractor=dict(no_extractor),
             extraction_failed=failed,
+            no_text=no_text,
             chunks=len(every_chunk),
         ),
         questions=Questions(
@@ -344,10 +346,10 @@ def _check_duplicate_marks(listed: Sequence[Document], document_of: Mapping[str,
             raise EvalError(msg)
 
 
-def _current_blob(engine: Engine, document_id: str) -> tuple[str, str, str]:
+def _current_blob(engine: Engine, document_id: str) -> tuple[str, str]:
     with engine.connect() as connection:
         row = connection.execute(
-            select(document_versions.c.id, blobs.c.sha256, blobs.c.ext)
+            select(blobs.c.sha256, blobs.c.ext)
             .select_from(
                 documents.join(
                     document_versions, document_versions.c.id == documents.c.current_version_id
@@ -355,7 +357,15 @@ def _current_blob(engine: Engine, document_id: str) -> tuple[str, str, str]:
             )
             .where(documents.c.id == document_id)
         ).one()
-    return row.id, row.sha256, row.ext
+    return row.sha256, row.ext
+
+
+def _has_chunks(engine: Engine, document_id: str) -> bool:
+    with engine.connect() as connection:
+        found = connection.execute(
+            select(chunks.c.id).where(chunks.c.document_id == document_id).limit(1)
+        ).first()
+    return found is not None
 
 
 def _chunks(engine: Engine, first_path: Mapping[str, str]) -> list[Chunk]:
