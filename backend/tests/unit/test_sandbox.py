@@ -1307,7 +1307,7 @@ def test_an_entry_not_on_the_allowlist_is_refused() -> None:
 def test_the_production_allowlist_holds_the_stages_entry_points_and_the_child_finds_each() -> None:
     """The extractors, and the metadata stage's DOCX reader, from whose answer the server builds
     nothing but ``CoreProperties``."""
-    assert set(sandbox.ENTRY_POINTS) == {"text", "markdown", "docx", "docx_properties"}
+    assert set(sandbox.ENTRY_POINTS) == {"text", "markdown", "docx", "pdf", "docx_properties"}
     assert sandbox.ENTRY_POINTS["docx_properties"] == sandbox.EntryPoint(
         "vault.ingest.extractors.docx:read_properties", CoreProperties
     )
@@ -1318,6 +1318,7 @@ def test_the_production_allowlist_holds_the_stages_entry_points_and_the_child_fi
     assert sandbox.ENTRY_POINTS["text"].options == FALLBACK_ENCODINGS
     assert sandbox.ENTRY_POINTS["markdown"].options == FALLBACK_ENCODINGS
     assert sandbox.ENTRY_POINTS["docx"].options == frozenset()
+    assert sandbox.ENTRY_POINTS["pdf"].options == frozenset()
 
 
 OPTIONS = {"o": EntryPoint(f"{PROBES}:with_option", list[str], frozenset({"cp1252", "cp1251"}))}

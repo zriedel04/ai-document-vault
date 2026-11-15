@@ -464,7 +464,9 @@ class EntryPoint:
 
 # The functions the stages run: the extractors of the extraction stage (vault.ingest.extract_stage),
 # whose text extractors take the configured fallback code page as their option, and the metadata
-# stage's reader of a DOCX's core properties (vault.ingest.metadata_stage).
+# stage's reader of a DOCX's core properties (vault.ingest.metadata_stage). The PDF extractor runs
+# with its default caps (``vault.ingest.validate.DEFAULT_LIMITS``), which keep its largest answer
+# inside this module's default caps on an answer.
 ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
     {
         "text": EntryPoint(
@@ -474,6 +476,7 @@ ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
             "vault.ingest.extractors.text:extract_markdown", Extraction, FALLBACK_ENCODINGS
         ),
         "docx": EntryPoint("vault.ingest.extractors.docx:extract", Extraction),
+        "pdf": EntryPoint("vault.ingest.extractors.pdf:extract", Extraction),
         "docx_properties": EntryPoint(
             "vault.ingest.extractors.docx:read_properties", CoreProperties
         ),
