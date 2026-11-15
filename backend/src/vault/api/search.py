@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine
 
 from vault.core.security import LocalUser, current_user
+from vault.db.labels import UnknownLabelError
 from vault.retrieval import keyword
 from vault.retrieval.keyword import (
     DEFAULT_PAGE,
@@ -35,6 +36,9 @@ class SearchRequest(BaseModel):
     offset: Annotated[int, Field(ge=0, le=MAX_OFFSET)] = 0
     # Only documents of these types; empty or left out means every type.
     types: Annotated[list[Extension], Field(max_length=10)] = []
+    # Only documents that carry this label (an id from GET /api/labels) or a label below it;
+    # left out or null means every document.
+    label: str | None = None
 
 
 class Segment(BaseModel):
@@ -65,7 +69,13 @@ class SearchResults(BaseModel):
     offset: int
 
 
-@router.post("/search", responses={422: {"description": "The query cannot be searched"}})
+@router.post(
+    "/search",
+    responses={
+        404: {"description": "No such label"},
+        422: {"description": "The query cannot be searched"},
+    },
+)
 async def search_documents(
     request: Request,
     body: SearchRequest,
@@ -78,7 +88,10 @@ async def search_documents(
     The query goes in the body, never in the address, because it says what the owner is looking
     for. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with
     no letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose
-    message does not repeat it. Nothing here is logged."""
+    message does not repeat it. ``label`` keeps only the documents that carry that label or one
+    below it, in the same statement as the rest of the scope, so ``total`` and the pages count
+    the filtered documents; an id that names no label is a 404 whose message does not repeat
+    it. Nothing here is logged."""
     engine: Engine | None = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="no vault is open")
@@ -87,11 +100,14 @@ async def search_documents(
         limit=body.limit,
         offset=body.offset,
         extensions=tuple(sorted(set(body.types))),
+        label_id=body.label,
     )
     try:
         page = await run_in_threadpool(search, engine, query)
     except QueryError as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
+    except UnknownLabelError:
+        raise HTTPException(status_code=404, detail="no such label") from None
     return SearchResults(
         items=[
             SearchHit(

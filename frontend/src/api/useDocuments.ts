@@ -71,13 +71,27 @@ export interface ListQuery {
   order: Order;
   page: number;
   trash: boolean;
+  /** A label's id: only the documents that carry it or a label below it; left out for all. */
+  label?: string;
 }
 
-/** One page of the document list, as the backend sorted it. */
-export function useDocumentList(query: ListQuery): Request<DocumentList> {
+/** Why the list gave no answer: a documents error, or a label filter on a label that is gone. */
+export type ListError = DocumentsError | "no-label";
+
+/**
+ * One page of the document list, as the backend sorted it. With a label, the only 404 the list
+ * can give is the backend's answer for a label it does not have.
+ */
+export function useDocumentList(query: ListQuery): Request<DocumentList, ListError> {
   const api = useApi();
-  const key = JSON.stringify([query.sort, query.order, query.page, query.trash]);
-  return useRequest(key, async () => {
+  const key = JSON.stringify([
+    query.sort,
+    query.order,
+    query.page,
+    query.trash,
+    query.label ?? null,
+  ]);
+  return useRequest<DocumentList, ListError>(key, async () => {
     const { data, response } = await api.GET("/api/documents", {
       params: {
         query: {
@@ -86,10 +100,14 @@ export function useDocumentList(query: ListQuery): Request<DocumentList> {
           limit: PAGE_SIZE,
           offset: (query.page - 1) * PAGE_SIZE,
           trash: query.trash,
+          ...(query.label === undefined ? {} : { label: query.label }),
         },
       },
     });
-    return data ? { status: "ok", data } : { status: "error", error: errorFor(response.status) };
+    if (data) return { status: "ok", data };
+    if (response.status === 404 && query.label !== undefined)
+      return { status: "error", error: "no-label" };
+    return { status: "error", error: errorFor(response.status) };
   });
 }
 
