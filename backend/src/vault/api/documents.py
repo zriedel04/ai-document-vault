@@ -125,12 +125,9 @@ async def read_documents(
     offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
     trash: bool = False,
     label: str | None = None,
-    types: Annotated[
-        list[str], Query(alias="type", json_schema_extra=_enum(Extension))
-    ] = [],  # noqa: B006 - FastAPI copies a default list for each request
-    states: Annotated[
-        list[str], Query(alias="state", json_schema_extra=_enum(FilterState))
-    ] = [],  # noqa: B006 - FastAPI copies a default list for each request
+    # FastAPI copies a default list for each request, so the shared default is never changed.
+    types: Annotated[list[str], Query(alias="type", json_schema_extra=_enum(Extension))] = [],  # noqa: B006
+    states: Annotated[list[str], Query(alias="state", json_schema_extra=_enum(FilterState))] = [],  # noqa: B006
 ) -> DocumentList:
     """One page of documents in use (or, with ``trash``, of the trash), sorted by when they were
     added, their name or their size, newest first unless ``order`` says otherwise. ``total``

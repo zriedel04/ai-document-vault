@@ -21,6 +21,8 @@ from vault.ingest.validate import MIME_TYPES
 
 URL = "/api/documents"
 CANARY = "Patient-Diagnosis-Canary"
+# A query string as the test client takes it, in order and with repeated names.
+Params = list[tuple[str, str | int | float | bool | None]]
 
 
 @pytest.fixture
@@ -30,7 +32,7 @@ def library(app: FastAPI, tmp_path: Path) -> Library:
     return Library(app, folder)
 
 
-def listing(client: TestClient, params: list[tuple[str, str]]) -> dict[str, Any]:
+def listing(client: TestClient, params: Params) -> dict[str, Any]:
     response = client.get(URL, params=params)
     assert response.status_code == 200, response.text
     body: dict[str, Any] = response.json()
@@ -134,7 +136,7 @@ def test_type_state_and_label_combine_and_total_counts_what_passes_them_all(
         assign(library.engine, markdown, school)
         unlabelled = library.add(f"other-{number}.txt", f"other text {number}\n")
         set_state(library, unlabelled, "failed")
-    filters = [("type", "txt"), ("state", "failed"), ("label", school)]
+    filters: Params = [("type", "txt"), ("state", "failed"), ("label", school)]
     seen: list[str] = []
     for offset in range(0, 9, 3):
         body = listing(client, [*filters, ("limit", "3"), ("offset", str(offset))])
@@ -176,15 +178,15 @@ def test_an_unknown_value_is_a_422_that_does_not_repeat_it(
 
 def test_the_filters_take_exactly_the_stored_extensions_and_live_states() -> None:
     assert set(typing.get_args(Extension)) == EXTENSIONS
-    assert EXTENSIONS == {extension for extension, _kind in MIME_TYPES}
+    assert {extension for extension, _kind in MIME_TYPES} == EXTENSIONS
     assert typing.get_args(FilterState) == LIVE_STATES
     assert frozenset(LIVE_STATES) == FILTER_STATES
 
 
 def test_the_query_object_refuses_an_unknown_type_or_state_with_fixed_text() -> None:
-    with pytest.raises(ValueError, match="^unknown document type$"):
+    with pytest.raises(ValueError, match=r"^unknown document type\Z"):
         ListQuery(extensions=("pdf", CANARY))
-    with pytest.raises(ValueError, match="^unknown document state$"):
+    with pytest.raises(ValueError, match=r"^unknown document state\Z"):
         ListQuery(states=("trashed",))
 
 
