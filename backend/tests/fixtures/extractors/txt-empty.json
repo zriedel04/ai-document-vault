@@ -1,0 +1,20 @@
+{
+  "fixture": "txt-empty",
+  "about": "A file of no bytes",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 0,
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "utf-8",
+    "pages": [
+      {
+        "number": 1,
+        "text": "",
+        "headings": []
+      }
+    ]
+  }
+}

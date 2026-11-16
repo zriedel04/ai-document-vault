@@ -1,0 +1,20 @@
+{
+  "fixture": "txt-utf16le-bom",
+  "about": "The same text in UTF-16 LE with a byte order mark",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 432,
+  "input_sha256": "168aaf1725a733fbf4a766a55cf96dd20da500b0230d090ab539ad674d32d13d",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "utf-16-le",
+    "pages": [
+      {
+        "number": 1,
+        "text": "Notes in several scripts\nHebrew (right to left): שלום עולם\nArabic (right to left): مرحبا بالعالم\nChinese: 文档库, Japanese: 履歴書と職務経歴書, Korean: 한국어 문서\nCombining marks: Café and Tiếng Việt\nOutside the BMP: 𠀋\n",
+        "headings": []
+      }
+    ]
+  }
+}

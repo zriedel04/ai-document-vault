@@ -1,0 +1,13 @@
+{
+  "fixture": "pdf-truncated",
+  "about": "The column-at-a-time PDF cut in half",
+  "type": "pdf",
+  "entry": "pdf",
+  "option": null,
+  "input_bytes": 581,
+  "input_sha256": "6bfd6c33290b2d0a5b67730eb19e31351fcdb40b3952a6c2246304ad74fd9fbe",
+  "error": {
+    "class": "NotPdfError",
+    "reason": null
+  }
+}

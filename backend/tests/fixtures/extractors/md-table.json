@@ -1,0 +1,35 @@
+{
+  "fixture": "md-table",
+  "about": "A pipe table (not part of CommonMark, kept as text) between headings",
+  "type": "md",
+  "entry": "markdown",
+  "option": "cp1252",
+  "input_bytes": 165,
+  "input_sha256": "51e026713168289c257cb42bdd06f4e852adc8602880acd3a93367bead5715b8",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "utf-8",
+    "pages": [
+      {
+        "number": 1,
+        "text": "# Grades\n\n| Course | Credits | Grade |\n| --- | ---: | :-: |\n| CSE 485 | 3 | A |\n| 文档库 | 2 | B |\n| שלום עולם | 1 | |\n\n## After the table\n\nClosing line.\n",
+        "headings": [
+          {
+            "level": 1,
+            "title": "Grades",
+            "start": 0,
+            "end": 8,
+            "text_at_offsets": "# Grades"
+          },
+          {
+            "level": 2,
+            "title": "After the table",
+            "start": 117,
+            "end": 135,
+            "text_at_offsets": "## After the table"
+          }
+        ]
+      }
+    ]
+  }
+}
