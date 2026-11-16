@@ -2,10 +2,12 @@ import { readFileSync } from "node:fs";
 
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ERROR_TEXT } from "../api/documents";
 import {
+  FIRST_IMPORT_DAY,
+  LAST_IMPORT_DAY,
   MAX_SEARCH_OFFSET,
   MAX_SEARCH_PAGE,
   SEARCH_ERROR_TEXT,
@@ -13,6 +15,10 @@ import {
   SEARCH_TYPES,
   type SearchHit,
   type SearchResults,
+  RANGE_ERROR_TEXT,
+  dayEnd,
+  dayStart,
+  importedRange,
 } from "../api/search";
 import { type FetchFn, TEST_TOKEN, healthyBackend, jsonResponse, renderApp } from "../test/render";
 import { resultPlace } from "./documents-search";
@@ -56,6 +62,9 @@ interface Sent {
   limit: number;
   offset: number;
   types: string[];
+  label?: string;
+  imported_from?: string;
+  imported_to?: string;
 }
 
 type Answer = (body: Sent, index: number) => Response | Promise<Response>;
@@ -515,6 +524,152 @@ describe("search page", () => {
     for (const call of calls) {
       expect(JSON.stringify(call.mock.calls)).not.toMatch(/Jane|Doe|diagnosis|Clinic/);
     }
+  });
+});
+
+describe("import dates on the page", () => {
+  function pickDay(name: string, day: string) {
+    fireEvent.change(screen.getByLabelText(name), { target: { value: day } });
+  }
+
+  it("sends the first and last instant of the chosen days and starts from the first page", async () => {
+    const { spy, sent } = backend((body) => jsonResponse(results([hit()], 45, body.offset)));
+    const { router } = await openSearch(spy);
+    await search("letter");
+    await resultList();
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => {
+      expect(sent.at(-1)?.offset).toBe(SEARCH_PAGE_SIZE);
+    });
+    expect(sent.at(-1)).not.toHaveProperty("imported_from");
+    expect(sent.at(-1)).not.toHaveProperty("imported_to");
+
+    pickDay("Imported from", "2026-03-08");
+    await waitFor(() => {
+      expect(sent.at(-1)).toEqual({
+        query: "letter",
+        limit: SEARCH_PAGE_SIZE,
+        offset: 0,
+        types: [],
+        imported_from: dayStart("2026-03-08"),
+      });
+    });
+    pickDay("Imported to", "2026-03-09");
+    await waitFor(() => {
+      expect(sent.at(-1)?.imported_to).toBe(dayEnd("2026-03-09"));
+    });
+    expect(sent.at(-1)?.imported_from).toBe(dayStart("2026-03-08"));
+    // Clearing a field opens that side again.
+    pickDay("Imported from", "");
+    await waitFor(() => {
+      expect(sent.at(-1)).not.toHaveProperty("imported_from");
+    });
+    expect(sent.at(-1)?.imported_to).toBe(dayEnd("2026-03-09"));
+    // The days stay in the page: never in the address or the history.
+    expect(router.history.location.href).toBe("/search");
+    expect(screen.getByLabelText("Imported to")).toHaveAttribute("min", FIRST_IMPORT_DAY);
+    expect(screen.getByLabelText("Imported to")).toHaveAttribute("max", LAST_IMPORT_DAY);
+  });
+
+  it("does not search when the first day is after the last", async () => {
+    const { spy, sent } = backend(() => jsonResponse(results([hit()])));
+    await openSearch(spy);
+    pickDay("Imported from", "2026-03-10");
+    pickDay("Imported to", "2026-03-09");
+    await search("letter");
+    expect(await screen.findByText(RANGE_ERROR_TEXT.reversed)).toBeInTheDocument();
+    expect(sent).toEqual([]);
+    // The same day as both ends is a whole day, and searches.
+    pickDay("Imported from", "2026-03-09");
+    await resultList();
+    expect(sent).toEqual([
+      expect.objectContaining({
+        imported_from: dayStart("2026-03-09"),
+        imported_to: dayEnd("2026-03-09"),
+      }),
+    ]);
+  });
+
+  it("says when no document was imported in the range", async () => {
+    const { spy } = backend(() => jsonResponse(results([])));
+    await openSearch(spy);
+    pickDay("Imported from", "2026-03-09");
+    pickDay("Imported to", "2026-03-09");
+    await search("letter");
+    expect(await screen.findByRole("status")).toHaveTextContent("No documents match");
+  });
+});
+
+describe("import days in the browser's time zone", () => {
+  const zone = process.env.TZ;
+  afterEach(() => {
+    process.env.TZ = zone;
+  });
+
+  // Each case: a zone, a day, its first instant and its last, in UTC.
+  const cases: [string, string, string, string][] = [
+    ["UTC", "2026-05-04", "2026-05-04T00:00:00.000Z", "2026-05-04T23:59:59.999999Z"],
+    // Clocks go forward: a day of 23 hours.
+    ["America/New_York", "2026-03-08", "2026-03-08T05:00:00.000Z", "2026-03-09T03:59:59.999999Z"],
+    // Clocks go back: a day of 25 hours.
+    ["Europe/London", "2026-10-25", "2026-10-24T23:00:00.000Z", "2026-10-25T23:59:59.999999Z"],
+    // Clocks change at midnight: the day starts at 01:00.
+    ["America/Santiago", "2026-09-06", "2026-09-06T04:00:00.000Z", "2026-09-07T02:59:59.999999Z"],
+    // Far east of UTC, the day starts on the previous UTC day.
+    ["Pacific/Kiritimati", "2026-01-01", "2025-12-31T10:00:00.000Z", "2026-01-01T09:59:59.999999Z"],
+    // A leap day, in summer time with a half-hour offset (UTC+10:30).
+    ["Australia/Adelaide", "2028-02-29", "2028-02-28T13:30:00.000Z", "2028-02-29T13:29:59.999999Z"],
+    // The zone's rules for that year, not today's: Kiritimati was UTC-10:40 in 1970.
+    ["Pacific/Kiritimati", "1970-01-01", "1970-01-01T10:40:00.000Z", "1970-01-02T10:39:59.999999Z"],
+    // The ends of the days offered, at the widest offsets.
+    ["Etc/GMT-14", "1970-01-01", "1969-12-31T10:00:00.000Z", "1970-01-01T09:59:59.999999Z"],
+    ["Etc/GMT+12", "9999-12-30", "9999-12-30T12:00:00.000Z", "9999-12-31T11:59:59.999999Z"],
+  ];
+
+  it.each(cases)("in %s, %s runs from %s to %s", (timeZone, day, first, last) => {
+    process.env.TZ = timeZone;
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(timeZone);
+    expect(dayStart(day)).toBe(first);
+    expect(dayEnd(day)).toBe(last);
+    expect(importedRange(day, day)).toEqual({ from: first, to: last });
+  });
+
+  it("refuses a day that does not exist or is outside the days offered", () => {
+    process.env.TZ = "UTC";
+    for (const day of [
+      "2026-02-29",
+      "2026-04-31",
+      "2026-13-01",
+      "2026-00-10",
+      "2026-3-8",
+      "2026-03-08\n",
+      " 2026-03-08",
+      "2026-03-08T00:00",
+      "1969-12-31",
+      "9999-12-31",
+      "0099-01-01",
+      "+02026-03-08",
+    ]) {
+      expect(dayStart(day), day).toBeNull();
+      expect(dayEnd(day), day).toBeNull();
+      expect(importedRange(day, ""), day).toEqual({ error: "invalid" });
+      expect(importedRange("", day), day).toEqual({ error: "invalid" });
+    }
+  });
+
+  it("leaves an empty side open and refuses a first day after the last", () => {
+    process.env.TZ = "UTC";
+    expect(importedRange("", "")).toEqual({ from: null, to: null });
+    expect(importedRange("2026-05-04", "")).toEqual({
+      from: "2026-05-04T00:00:00.000Z",
+      to: null,
+    });
+    expect(importedRange("", "2026-05-04")).toEqual({
+      from: null,
+      to: "2026-05-04T23:59:59.999999Z",
+    });
+    expect(importedRange("2026-05-05", "2026-05-04")).toEqual({ error: "reversed" });
+    expect(importedRange("2027-01-01", "2026-12-31")).toEqual({ error: "reversed" });
   });
 });
 

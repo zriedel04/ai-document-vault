@@ -855,6 +855,30 @@
       },
       "SearchRequest": {
         "properties": {
+          "imported_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imported From"
+          },
+          "imported_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imported To"
+          },
           "label": {
             "anyOf": [
               {
@@ -1862,7 +1886,7 @@
     },
     "/api/search": {
       "post": {
-        "description": "One page of the documents in use whose current text matches ``query``, best first, each\nwith its best passage: the page it is on, its place in that page's text, its section and a\nsnippet whose matched words are marked. ``total`` counts the matching documents.\n\nThe query goes in the body, never in the address, because it says what the owner is looking\nfor. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with\nno letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose\nmessage does not repeat it. ``label`` keeps only the documents that carry that label or one\nbelow it, in the same statement as the rest of the scope, so ``total`` and the pages count\nthe filtered documents; an id that names no label is a 404 whose message does not repeat\nit. Nothing here is logged.",
+        "description": "One page of the documents in use whose current text matches ``query``, best first, each\nwith its best passage: the page it is on, its place in that page's text, its section and a\nsnippet whose matched words are marked. ``total`` counts the matching documents.\n\nThe query goes in the body, never in the address, because it says what the owner is looking\nfor. Quotes make a phrase, a trailing ``*`` a prefix, and every term must match; a query with\nno letter or digit matches nothing. A query over 500 characters or 16 terms is a 422 whose\nmessage does not repeat it. ``label`` keeps only the documents that carry that label or one\nbelow it, in the same statement as the rest of the scope, so ``total`` and the pages count\nthe filtered documents; an id that names no label is a 404 whose message does not repeat\nit. ``imported_from`` and ``imported_to`` keep the documents first imported at or between\nthose instants (``parse_instant``), in the same statement; a bound that is not an instant\nwith an offset, or a start after the end, is a 422 whose message names the field and not\nthe value. Nothing here is logged.",
         "operationId": "search_documents_api_search_post",
         "requestBody": {
           "content": {
@@ -1889,7 +1913,7 @@
             "description": "No such label"
           },
           "422": {
-            "description": "The query cannot be searched"
+            "description": "The query or the import dates cannot be searched"
           }
         },
         "summary": "Search Documents",

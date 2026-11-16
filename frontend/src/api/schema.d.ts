@@ -323,7 +323,10 @@ export interface paths {
          *     message does not repeat it. ``label`` keeps only the documents that carry that label or one
          *     below it, in the same statement as the rest of the scope, so ``total`` and the pages count
          *     the filtered documents; an id that names no label is a 404 whose message does not repeat
-         *     it. Nothing here is logged.
+         *     it. ``imported_from`` and ``imported_to`` keep the documents first imported at or between
+         *     those instants (``parse_instant``), in the same statement; a bound that is not an instant
+         *     with an offset, or a start after the end, is a 422 whose message names the field and not
+         *     the value. Nothing here is logged.
          */
         post: operations["search_documents_api_search_post"];
         delete?: never;
@@ -669,6 +672,10 @@ export interface components {
         };
         /** SearchRequest */
         SearchRequest: {
+            /** Imported From */
+            imported_from?: string | null;
+            /** Imported To */
+            imported_to?: string | null;
             /** Label */
             label?: string | null;
             /**
@@ -1326,7 +1333,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The query cannot be searched */
+            /** @description The query or the import dates cannot be searched */
             422: {
                 headers: {
                     [name: string]: unknown;
