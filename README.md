@@ -14,17 +14,29 @@ Pre-alpha. There is nothing to use day to day yet. The plan has phases 0 to 11 p
 - the frontend shell ([`frontend/`](frontend/README.md)): navigation, light and dark mode, a typed API client generated from the backend's OpenAPI schema;
 - the Windows launcher [`vault.ps1`](docs/launcher.md) and CI on Linux and Windows;
 - a synthetic demo corpus (44 fictional documents) and a 60-question public evaluation set;
-- the spike scripts for the four hardware-dependent questions. One has been run so far (sqlite-vec, [results below](#measured-so-far)); the embedding, OCR and PDF extraction spikes have yet to run on the owner's PC.
+- the spike scripts for the four hardware-dependent questions. One has been run so far (sqlite-vec, [results below](#measured-so-far)); the embedding, OCR and PDF extraction spikes have yet to run on the owner's PC, and the sqlite-vec conclusion awaits the owner's confirmation.
 
-**Phase 1, vault storage and import: in progress.** Built so far:
+**Phase 1, vault storage and import: built.** Every feature on the plan's list exists:
 
 - file validation by content (type, size, archive limits) before anything is parsed;
 - the content-addressed blob store, with exact-duplicate handling that is safe under concurrent imports;
-- the import of one file, recording a document, its version and where it came from, and an upload endpoint (`POST /api/imports/upload`);
-- the persistent job queue and a worker pool that starts with the server (no processing stage has a handler yet);
-- in the app, a document library with sorting and paging, a page for each document, **Download original**, and **Move to trash** and **Restore**.
+- the import of one file, recording a document, its version and where it came from, through `POST /api/imports/upload` and an **Import** page that takes several dropped or chosen files;
+- the persistent job queue with retries, and a worker pool that starts with the server;
+- a document library with sorting and paging, a page for each document, **Download original**, **Move to trash**, **Restore** and **Delete permanently**.
 
-Not built yet: an upload page in the app (uploads go through the API for now), permanent delete, text extraction, search, OCR, embeddings and Ask the Vault. The full list of what has changed is in the [changelog](CHANGELOG.md).
+**Phase 2, extraction and keyword search: mostly built.** Done:
+
+- extractors for TXT, Markdown, DOCX and the text layer of PDFs, run by the extraction stage in a sandboxed child process with a timeout and a memory cap;
+- the pages table, chunker v1 and an FTS5 keyword index, filled by the chunk stage;
+- keyword search (`POST /api/search`) and a **Search** page with highlighted snippets, type and label filters and paging;
+- a PDF viewer with **Go to page** that opens at a result's page, and a text view for the other types;
+- deterministic metadata: each import folder becomes a label, and a DOCX's own title, author and dates are read by the metadata stage.
+
+Left in Phase 2: PDF file properties, PDF headings (which wait on ADR 0015, below), the import-date filter, and showing labels and file properties on the document page. The phase is done when a search over the owner's own sample set finds the right documents and pages.
+
+**Built ahead of its phase:** pause, resume and retry of background processing, an image viewer for PNG and JPEG (without text until OCR), `vault.ps1` `check`, `backup`, `restore` and `export`, and `python -m vault.eval`, which scores keyword search on the public evaluation set.
+
+**Waiting on the spikes.** The embedding model, the OCR engine and the PDF extraction approach are Proposed ([ADRs 0013 to 0015](docs/decisions/README.md)) until their spikes have run on the owner's PC. The PDF extractor is a first version on ADR 0015's proposal and finds no headings until pdfplumber is added for them; images and scanned PDFs are imported but hold no searchable text until the OCR stage (Phase 3); embeddings, semantic and hybrid search (Phase 4) and Ask the Vault (Phase 5) are not built. The full list of what has changed is in the [changelog](CHANGELOG.md).
 
 ## Architecture in brief
 
@@ -38,7 +50,8 @@ Browser (React)  --HTTP/JSON-->  vault-server (FastAPI, 127.0.0.1:8765)
                                    v
                                  vault folder (outside every Git repository)
                                    blobs/     originals, content-addressed, read-only
-                                   vault.db   SQLite: documents, versions, jobs
+                                   vault.db   SQLite: documents, versions, jobs, labels,
+                                              pages, chunks, FTS5 keyword index
                                    index.db   SQLite + sqlite-vec (planned, Phase 4)
 ```
 
@@ -47,7 +60,7 @@ Browser (React)  --HTTP/JSON-->  vault-server (FastAPI, 127.0.0.1:8765)
 | Local-first | Extraction, OCR, search and embeddings will run locally. A cloud model will be used to answer questions, and will receive only the question, recent turns and the retrieved passages. Later, if you enable it, it may also receive a document's opening section once to suggest metadata. Every call will go through one egress gate, which refuses or drops passages from documents and labels marked local-only | [ADR 0001](docs/decisions/0001-local-first-design.md), [ADR 0010](docs/decisions/0010-cloud-models-receive-only-retrieved-context.md) |
 | Local web app, React + FastAPI, bound to `127.0.0.1` | One process serves the API and the built UI to the browser; the server refuses to listen on anything but a loopback address | [ADR 0002](docs/decisions/0002-local-web-app.md) |
 | Native Windows, no Docker or WSL2 | Docker and WSL2 add a virtual machine, slow file access and unreliable folder-change events, for a single-machine app that needs none of that | [ADR 0003](docs/decisions/0003-native-windows.md) |
-| Two SQLite files instead of PostgreSQL | `vault.db` (WAL mode) holds what cannot be rebuilt; `index.db` holds vectors that can. FTS5 for keywords and sqlite-vec for vectors are planned for Phases 2 and 4 | [ADR 0004](docs/decisions/0004-sqlite-instead-of-postgresql.md) |
+| Two SQLite files instead of PostgreSQL | `vault.db` (WAL mode) holds what cannot be rebuilt; `index.db` holds vectors that can. FTS5 keyword search is built; sqlite-vec for vectors is planned for Phase 4 | [ADR 0004](docs/decisions/0004-sqlite-instead-of-postgresql.md) |
 | In-process job queue instead of Redis and Celery | A `jobs` table and worker threads survive restarts and need no extra services | [ADR 0005](docs/decisions/0005-in-process-job-queue.md) |
 | Content-addressed blobs | Each original is stored once under its SHA-256, read-only, so the same file imported twice is one document with two sources | [ADR 0006](docs/decisions/0006-content-addressed-storage.md) |
 | Hybrid retrieval with Reciprocal Rank Fusion (planned) | Keyword search finds codes and names, vector search finds meaning; RRF merges the two lists by rank, because their scores are not comparable | [ADR 0007](docs/decisions/0007-hybrid-retrieval.md), [ADR 0008](docs/decisions/0008-reciprocal-rank-fusion.md) |
@@ -91,6 +104,8 @@ Only one spike has been run: [Spike 01, sqlite-vec](docs/spikes/01-sqlite-vec.md
 
 The extension loaded, and its exact search gave the same ranked ten neighbours as a plain-Python search on 5 of 5 probe queries. Latency grows about linearly with the number of vectors. That run used SQLite's rollback journal rather than the WAL mode the app uses, so the insert rates are to be measured again; the search figures are not expected to change. The recommended conclusion (keep ADR 0004; exact search slows past roughly 100k chunks, sooner than the plan estimated) is awaiting the owner's confirmation. How spikes are run and recorded: [`docs/spikes/`](docs/spikes/README.md).
 
+The retrieval evaluation (`python -m vault.eval`) runs on the public set in CI, but has no meaningful score yet: keyword search with each question as typed requires every word to match, so Recall@10, MRR and Hit@1 are all 0. CI therefore only checks that it runs; a minimum score comes with hybrid retrieval in Phase 4.
+
 ## Quick start
 
 You need Windows, [uv](https://docs.astral.sh/uv/) and Node.js 22.13 or newer on an even-numbered line (22.13+, 24 or 26+, the range `frontend/package.json` requires). The backend runs on Python 3.12 only (`backend/pyproject.toml`); uv installs it if it is missing. Copy `config.example.toml` to `backend\config.toml`, set `vault.path` to an absolute folder outside every Git repository (the server refuses to start otherwise), then run `.\vault.ps1 install` and `.\vault.ps1 run`. The launcher builds the app, starts the server and opens the browser; `.\vault.ps1 stop` stops it and `.\vault.ps1 dev` runs the development servers. Details: [docs/launcher.md](docs/launcher.md).
@@ -99,7 +114,7 @@ You need Windows, [uv](https://docs.astral.sh/uv/) and Node.js 22.13 or newer on
 
 | Path | Contents |
 | --- | --- |
-| [`backend/`](backend/README.md) | The FastAPI server (`src/vault/`: api, core, db, ingest, jobs, storage) and its tests |
+| [`backend/`](backend/README.md) | The FastAPI server (`src/vault/`: api, core, db, ingest, jobs, retrieval, storage) and its tests |
 | [`frontend/`](frontend/README.md) | The React app (Vite, TypeScript, Mantine, TanStack Router) |
 | [`docs/`](docs/architecture.md) | The architecture plan, ADRs in `decisions/`, spike results in `spikes/`, the launcher guide |
 | [`demo/`](demo/generate/README.md) | The synthetic corpus and its reproducible generator |
