@@ -7,7 +7,6 @@ hostile child could write.
 
 from __future__ import annotations
 
-import functools
 import io
 import logging
 import os
@@ -15,7 +14,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -31,6 +30,7 @@ from sqlalchemy import Connection, Engine, insert, select, update
 from tests.conftest import LOCAL
 from tests.unit.pdf_builder import build, text_stream
 from tests.unit.test_documents_api import Library
+from tests.unit.test_setup_failures import SETUP_KINDS
 from vault.core.config import ProcessingSettings, Settings
 from vault.db import ids
 from vault.db.engine import read_snapshot
@@ -39,11 +39,8 @@ from vault.db.schema import blobs, document_versions, documents, jobs
 from vault.ingest import extract_stage
 from vault.ingest.chunk_stage import CHUNK_STAGE
 from vault.ingest.extract_stage import (
-    DOCUMENT_FAILURES,
     EXTRACT_STAGE,
     EXTRACTORS,
-    SETUP_DELAY,
-    SETUP_FAILURES,
     BlobChangedError,
     ExtractionResultError,
     Outcome,
@@ -55,6 +52,7 @@ from vault.ingest.extractors import docx as docx_extractor
 from vault.ingest.extractors import pdf as pdf_extractor
 from vault.ingest.importer import ImportRequest
 from vault.ingest.importer import Outcome as ImportOutcome
+from vault.ingest.setup_failures import DOCUMENT_FAILURES, SETUP_DELAY
 from vault.ingest.validate import DEFAULT_LIMITS, EXTENSIONS
 from vault.jobs import sandbox
 from vault.jobs.queue import Completion, Job, JobQueue, utc_now
@@ -64,7 +62,6 @@ from vault.jobs.sandbox import (
     DEFAULT_MAX_RESULT_VALUES,
     MIB,
     SandboxCrashError,
-    SandboxError,
     SandboxLimits,
     SandboxMemoryLimitError,
 )
@@ -429,15 +426,6 @@ def test_a_version_that_keeps_coming_back_fails_the_attempt(
 # --- failures ------------------------------------------------------------------------------------
 
 
-def test_every_sandbox_failure_is_either_the_documents_or_the_setups() -> None:
-    def subclasses(cls: type) -> set[type]:
-        found: set[type] = set(cls.__subclasses__())
-        return found.union(*(subclasses(sub) for sub in found))
-
-    assert set(DOCUMENT_FAILURES) | set(SETUP_FAILURES) == subclasses(SandboxError)
-    assert not set(DOCUMENT_FAILURES) & set(SETUP_FAILURES)
-
-
 def run_in_pool(engine: Engine, store: BlobStore, document_id: str, **options: Any) -> Any:
     """Run the document's extract job once through a worker pool; its row afterwards."""
     queue = JobQueue(engine)
@@ -574,27 +562,15 @@ def test_a_pdf_answer_the_extractor_cannot_give_is_refused(
     assert read_pages(engine, version_of(engine, document_id)) is None
 
 
-def unsupported_system(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    monkeypatch.setattr(sandbox, "SUPPORTED_PLATFORMS", frozenset())
-    return {}
-
-
-def refused(_monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    return {"runner": functools.partial(sandbox.run, entry_points={})}
-
-
-@pytest.mark.parametrize(
-    ("setup", "error"),
-    [(refused, "SandboxRefusedError"), (unsupported_system, "SandboxUnavailableError")],
-)
+@pytest.mark.parametrize("kind", sorted(SETUP_KINDS))
 def test_a_failure_of_the_setup_defers_the_job_without_an_attempt(
     library: Library,
     engine: Engine,
     store: BlobStore,
     monkeypatch: pytest.MonkeyPatch,
-    setup: Callable[[pytest.MonkeyPatch], dict[str, Any]],
-    error: str,
+    kind: str,
 ) -> None:
+    setup, error = SETUP_KINDS[kind]
     document_id, _ = add(library, "notes.txt", b"text\n")
     with engine.begin() as connection:
         connection.execute(update(jobs).values(max_attempts=1))  # deferring never uses it up

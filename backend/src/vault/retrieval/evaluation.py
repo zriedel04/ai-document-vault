@@ -73,14 +73,10 @@ from vault.db.migrate import upgrade_to_latest
 from vault.db.schema import blobs, chunks, document_versions, documents
 from vault.ingest import chunk_stage, extract_stage
 from vault.ingest.chunking import structural_v1
-from vault.ingest.extract_stage import (
-    DOCUMENT_FAILURES,
-    SETUP_FAILURES,
-    ExtractionResultError,
-    Runner,
-)
+from vault.ingest.extract_stage import ExtractionResultError, Runner
 from vault.ingest.extractors import text as text_extractor
 from vault.ingest.importer import Importer, ImportRequest, Outcome
+from vault.ingest.setup_failures import DOCUMENT_FAILURES, SETUP_FAILURES
 from vault.jobs import sandbox
 from vault.jobs.sandbox import SandboxLimits
 from vault.retrieval.keyword import QueryError, SearchQuery, search

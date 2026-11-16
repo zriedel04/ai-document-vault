@@ -24,6 +24,7 @@ from sqlalchemy import Engine, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from tests.unit.test_docx_extractor import build, members_of, replace_member
+from tests.unit.test_setup_failures import SETUP_KINDS
 from vault.api.documents import FieldSource
 from vault.api.documents import FileProperties as ApiProperties
 from vault.db import ids
@@ -52,6 +53,7 @@ from vault.ingest.metadata_stage import (
     queue_pending,
     read_document_properties,
 )
+from vault.ingest.setup_failures import SETUP_DELAY
 from vault.ingest.validate import EXTENSIONS
 from vault.jobs import sandbox
 from vault.jobs.queue import Completion, Job, JobQueue
@@ -442,6 +444,22 @@ class Vault:
             ).one()
         return row.status, row.last_error, row.attempts
 
+    def run_after(self, document_id: str) -> datetime:
+        with self.engine.connect() as connection:
+            value: datetime = connection.execute(
+                select(jobs.c.run_after).where(
+                    jobs.c.document_id == document_id, jobs.c.stage == METADATA_STAGE
+                )
+            ).scalar_one()
+        return value
+
+    def state(self, document_id: str) -> str:
+        with self.engine.connect() as connection:
+            value: str = connection.execute(
+                select(documents.c.state).where(documents.c.id == document_id)
+            ).scalar_one()
+        return value
+
     def claim(self) -> Job:
         job = self.queue.claim(ids.new_ulid(), (METADATA_STAGE,))
         assert job is not None
@@ -623,6 +641,38 @@ def test_an_answer_of_another_shape_fails_the_attempt(vault: Vault) -> None:
     document_id, _ = vault.add(build())
     assert vault.run(lambda *_args, **_kw: "not properties") is None
     assert vault.job(document_id) == ("queued", "PropertiesResultError", 1)
+
+
+@pytest.mark.parametrize("kind", sorted(SETUP_KINDS))
+def test_a_failure_of_the_setup_defers_the_job_without_an_attempt(
+    vault: Vault, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """The sandbox cannot run at all: the job is given back for later with its attempt, and
+    the document is not failed, even on the job's last attempt."""
+    setup, error = SETUP_KINDS[kind]
+    document_id, _ = vault.add(with_core(full_properties()))
+    with vault.engine.begin() as connection:
+        connection.execute(update(jobs).values(max_attempts=1))  # deferring never uses it up
+    options = setup(monkeypatch)
+    assert vault.run(options.get("runner", sandbox.run)) is Completion.DEFERRED
+    assert vault.job(document_id) == ("queued", error, 0)
+    assert vault.run_after(document_id) == NOW + SETUP_DELAY
+    assert vault.state(document_id) == "processing"
+    assert vault.fields(document_id) == {}
+
+
+def test_a_failure_of_the_file_still_uses_its_attempt_and_can_fail_the_document(
+    vault: Vault,
+) -> None:
+    """The contrast to the setup: a DOCX the reader cannot open fails its last attempt, and the
+    document with it."""
+    broken = f"<cp:coreProperties {NAMESPACES}><dc:title>{CANARY}".encode()
+    document_id, _ = vault.add(replace_member(build(), "docProps/core.xml", broken))
+    with vault.engine.begin() as connection:
+        connection.execute(update(jobs).values(max_attempts=1))
+    assert vault.run() is None
+    assert vault.job(document_id) == ("failed", "SandboxChildError", 1)
+    assert vault.state(document_id) == "failed"
 
 
 def test_a_blob_that_does_not_hold_its_bytes_is_never_read(

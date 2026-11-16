@@ -24,7 +24,8 @@ was deleted, ends without changing anything.
    becomes ``searchable`` when the chunk stage has run.
 
 How each failure ends the attempt (ADR 0005: a failed job marks the document Failed once its
-attempts are used up):
+attempts are used up), by the rule ``vault.ingest.setup_failures`` holds for every stage that runs
+the sandbox:
 
 - every sandbox failure that the document can cause (``DOCUMENT_FAILURES``: a timeout, the memory
   cap, a crash, the extractor raising, an answer that cannot be read) and the checks above fail
@@ -34,8 +35,9 @@ attempts are used up):
 - a sandbox that cannot run at all (``SETUP_FAILURES``: an entry point the allowlist refuses, a
   child that cannot be started or limited on this system) and a type with no extractor are a
   failure of the setup, not a result about the document: the job is given back without using an
-  attempt (``JobQueue.defer``) and runs again after ``SETUP_DELAY``, its error's class name showing
-  why it waits; the document stays ``processing`` and is never failed by it.
+  attempt (``JobQueue.defer``, through ``run_deferring_setup``) and runs again after
+  ``SETUP_DELAY``, its error's class name showing why it waits; the document stays
+  ``processing`` and is never failed by it.
 
 The types extracted are TXT, Markdown, DOCX and PDF. A PDF is read by its text layer only
 (``vault.ingest.extractors.pdf``, ``pdf-1``): a first version on ADR 0015, which stays Proposed
@@ -59,7 +61,6 @@ import codecs
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -74,38 +75,17 @@ from vault.db.schema import document_versions, documents
 from vault.ingest.chunk_stage import CHUNK_STAGE
 from vault.ingest.extractors import Extraction
 from vault.ingest.extractors import text as text_extractor
+from vault.ingest.setup_failures import run_deferring_setup
 from vault.ingest.validate import TEXT_BOMS
 from vault.jobs import sandbox
 from vault.jobs.queue import Completion, Job, JobQueue
-from vault.jobs.sandbox import (
-    SandboxChildError,
-    SandboxCrashError,
-    SandboxLimits,
-    SandboxMemoryLimitError,
-    SandboxRefusedError,
-    SandboxResultError,
-    SandboxTimeoutError,
-    SandboxUnavailableError,
-)
+from vault.jobs.sandbox import SandboxLimits
 from vault.jobs.worker import Handler
 from vault.storage.blobs import BlobStore
 
 EXTRACT_STAGE: Final = "extract"
-# How long a job waits after a failure of the setup before it is tried again.
-SETUP_DELAY: Final = timedelta(minutes=10)
 # Rounds of snapshot and decision before a version that keeps appearing fails the attempt.
 MAX_ROUNDS: Final = 2
-
-# The sandbox failures a document can cause: the attempt fails and is retried within its attempts.
-DOCUMENT_FAILURES: Final = (
-    SandboxTimeoutError,
-    SandboxMemoryLimitError,
-    SandboxCrashError,
-    SandboxChildError,
-    SandboxResultError,
-)
-# The sandbox failures of the setup: the job is deferred, the document is never failed by them.
-SETUP_FAILURES: Final = (SandboxRefusedError, SandboxUnavailableError)
 
 # The encodings the text extractor reports without its fallback: UTF-8 and every byte order mark.
 _TEXT_ENCODINGS: Final = frozenset(
@@ -332,7 +312,7 @@ def handler(
         raise ValueError(msg)
 
     def run(job: Job) -> Completion:
-        try:
+        def work() -> Completion:
             outcome = extract_document(
                 engine,
                 store,
@@ -343,9 +323,8 @@ def handler(
                 finish=(queue, job),
                 runner=runner,
             )
-        except (*SETUP_FAILURES, NoExtractorError) as error:
-            queue.defer(job.id, job.worker_id, error, SETUP_DELAY)
-            return Completion.DEFERRED
-        return _COMPLETION[outcome]
+            return _COMPLETION[outcome]
+
+        return run_deferring_setup(queue, job, work, also=(NoExtractorError,))
 
     return run

@@ -30,12 +30,21 @@ that version still holds those bytes; otherwise it ends without changing anythin
    follows the extract and chunk stages.
 
 A type with no reader (TXT, Markdown, images; PDF for now) has no properties: its job, which only
-a hand edit or a later reader could queue, stores none and ends. A sandbox that fails (a timeout,
-the memory cap, a crash, a reader that raised because the file is not a readable DOCX, an answer
-that cannot be read) raises, and the worker records the failed attempt by the error's class name
-only; the queue retries it within the job's attempts. A sandbox that cannot start on this system
-(``SandboxUnavailableError``) is a failure of the setup, not of the document, but the queue has
-no way yet to give a job back for later without using an attempt, so for now it uses them too.
+a hand edit or a later reader could queue, stores none and ends.
+
+How each failure ends the attempt (ADR 0005: a failed job marks the document Failed once its
+attempts are used up), by the rule ``vault.ingest.setup_failures`` holds for every stage that runs
+the sandbox, the same as the extraction stage's:
+
+- every sandbox failure that the document can cause (``DOCUMENT_FAILURES``: a timeout, the memory
+  cap, a crash, a reader that raised because the file is not a readable DOCX, an answer that
+  cannot be read) and the checks above raise, and the worker records the failed attempt by the
+  error's class name only; the queue retries it within the job's attempts;
+- a sandbox that cannot run at all (``SETUP_FAILURES``: an entry point the allowlist refuses, a
+  child that cannot be started or limited on this system) is a failure of the setup, not a result
+  about the document: the job is given back without using an attempt (``JobQueue.defer``, through
+  ``run_deferring_setup``) and runs again after ``SETUP_DELAY``, its error's class name showing
+  why it waits; the document is never failed by it.
 
 Nothing here logs; the worker logs the stage and the outcome. The values are the owner's own text
 and stay in ``vault.db``. Errors carry fixed text only.
@@ -60,6 +69,7 @@ from vault.db.schema import MAX_FIELD_CHARS, document_versions, documents, jobs
 from vault.db.schema import blobs as blob_rows
 from vault.ingest.extractors import CoreProperties
 from vault.ingest.path_metadata import clean
+from vault.ingest.setup_failures import run_deferring_setup
 from vault.jobs import sandbox
 from vault.jobs.queue import Completion, Job, JobQueue
 from vault.jobs.sandbox import SandboxLimits
@@ -311,19 +321,22 @@ def handler(
     runner: Runner = sandbox.run,
 ) -> Handler:
     """The worker pool's handler for ``metadata`` jobs, which ends each job in ``queue`` in the
-    transaction that stores its result."""
+    transaction that stores its result, or defers it when the sandbox cannot run at all."""
 
     def run(job: Job) -> Completion:
-        outcome = read_document_properties(
-            engine,
-            store,
-            job.document_id,
-            job.input_hash,
-            limits=limits,
-            finish=(queue, job),
-            runner=runner,
-        )
-        return _COMPLETION[outcome]
+        def work() -> Completion:
+            outcome = read_document_properties(
+                engine,
+                store,
+                job.document_id,
+                job.input_hash,
+                limits=limits,
+                finish=(queue, job),
+                runner=runner,
+            )
+            return _COMPLETION[outcome]
+
+        return run_deferring_setup(queue, job, work)
 
     return run
 
