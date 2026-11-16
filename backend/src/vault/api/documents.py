@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -14,10 +14,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import Engine
 
+from vault.api.search import Extension
 from vault.core.logging import log_event, metric
 from vault.core.security import LocalUser, current_user
 from vault.db.documents import (
     DEFAULT_PAGE,
+    EXTENSIONS,
+    FILTER_STATES,
     MAX_PAGE,
     DeleteRefusal,
     ListQuery,
@@ -74,6 +77,23 @@ LabelStatus = Literal["suggested", "accepted", "rejected"]
 # AI > pending AI > file properties / import path > file name); only the last two tiers exist so
 # far.
 FieldSource = Literal["file_properties", "filename"]
+# The states the list filters by: those of a document in use (vault.db.documents.FILTER_STATES).
+# The trash is the list's own flag, so ``trashed`` is not one of them.
+FilterState = Literal["processing", "searchable", "ready", "failed"]
+
+
+def _choices(values: list[str], allowed: frozenset[str], detail: str) -> tuple[str, ...]:
+    """The distinct values of a repeated filter, in a fixed order, or a 422 with fixed text when
+    one is not ``allowed``: FastAPI's own 422 would repeat the value it refused."""
+    if not set(values) <= allowed:
+        raise HTTPException(status_code=422, detail=detail)
+    return tuple(sorted(set(values)))
+
+
+def _enum(literal: object) -> dict[str, object]:
+    """The schema of a repeated query value taken from ``literal``'s values, for the API schema;
+    the route checks the values itself (``_choices``)."""
+    return {"items": {"type": "string", "enum": list(get_args(literal))}}
 
 
 class DocumentItem(BaseModel):
@@ -105,6 +125,12 @@ async def read_documents(
     offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
     trash: bool = False,
     label: str | None = None,
+    types: Annotated[
+        list[str], Query(alias="type", json_schema_extra=_enum(Extension))
+    ] = [],  # noqa: B006 - FastAPI copies a default list for each request
+    states: Annotated[
+        list[str], Query(alias="state", json_schema_extra=_enum(FilterState))
+    ] = [],  # noqa: B006 - FastAPI copies a default list for each request
 ) -> DocumentList:
     """One page of documents in use (or, with ``trash``, of the trash), sorted by when they were
     added, their name or their size, newest first unless ``order`` says otherwise. ``total``
@@ -112,12 +138,26 @@ async def read_documents(
 
     ``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that
     label or a label below it. An id that names no label, or is not an id at all, is a 404 whose
-    message does not repeat it."""
+    message does not repeat it.
+
+    ``type`` (a canonical extension, as ``POST /api/search`` takes it) and ``state`` (a state of a
+    document in use) may each repeat, and keep the documents that match any of their values; left
+    out, they keep every type or state. In the trash, ``state`` is the state a document had when
+    it went there, the one a restore brings back. A value the list does not take is a 422 whose
+    message does not repeat it. Every filter is applied in the statement that pages and counts,
+    so ``total`` counts only the documents that pass them all."""
     engine: Engine | None = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="no vault is open")
     query = ListQuery(
-        sort=sort, order=order, limit=limit, offset=offset, in_trash=trash, label_id=label
+        sort=sort,
+        order=order,
+        limit=limit,
+        offset=offset,
+        in_trash=trash,
+        label_id=label,
+        extensions=_choices(types, EXTENSIONS, "unknown document type"),
+        states=_choices(states, FILTER_STATES, "unknown document state"),
     )
     try:
         page = await run_in_threadpool(list_documents, engine, query)
