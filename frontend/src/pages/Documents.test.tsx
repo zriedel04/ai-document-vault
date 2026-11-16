@@ -6,9 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DELETE_ERROR_TEXT,
+  DOCUMENT_TYPES,
   type DocumentDetail,
   type DocumentItem,
   ERROR_TEXT,
+  FILTER_STATES,
   MAX_OFFSET,
   MOVE_UNKNOWN_RELOAD_FAILED_TEXT,
   MOVE_UNKNOWN_TEXT,
@@ -21,7 +23,7 @@ import {
   formatSize,
 } from "../api/documents";
 import { type FetchFn, TEST_TOKEN, healthyBackend, jsonResponse, renderApp } from "../test/render";
-import { DEFAULT_SEARCH, parseDocumentsSearch } from "./documents-search";
+import { DEFAULT_SEARCH, parseDocumentsSearch, withFilters, withLabel } from "./documents-search";
 
 const ID = "01J9Z8Y7X6W5V4T3S2R1Q0P9N8";
 
@@ -364,6 +366,118 @@ describe("document list", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.getByText("The trash is empty.")).toBeInTheDocument();
+  });
+});
+
+describe("type and state filters", () => {
+  it("asks the backend for the checked states and types, from the first page", async () => {
+    const spy = backend(listOf([item({ state: "failed" })], 120));
+    const { router } = await renderApp({
+      route: "/documents?page=2",
+      fetch: spy,
+      token: TEST_TOKEN,
+    });
+    await screen.findByRole("table");
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Failed" }));
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.getAll("state")).toEqual(["failed"]);
+    });
+    expect(listRequests(spy).at(-1)?.get("offset")).toBe("0");
+    expect(listRequests(spy).at(-1)?.has("type")).toBe(false);
+    expect(router.state.location.search).toMatchObject({ state: ["failed"], page: 1 });
+
+    // Checked in another order, sent and kept in the list's own order.
+    await userEvent.click(screen.getByRole("checkbox", { name: "Markdown" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "PDF" }));
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.getAll("type")).toEqual(["pdf", "md"]);
+    });
+    expect(listRequests(spy).at(-1)?.getAll("state")).toEqual(["failed"]);
+    expect(router.state.location.search).toMatchObject({ type: ["pdf", "md"], state: ["failed"] });
+
+    // Unchecking every one shows every state again, and the address holds no filter.
+    await userEvent.click(screen.getByRole("checkbox", { name: "Failed" }));
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.has("state")).toBe(false);
+    });
+    expect(router.state.location.search).not.toHaveProperty("state");
+  });
+
+  it("reads the filters from the address, and keeps them across tabs and labels", async () => {
+    const spy = backend(listOf([item()]));
+    const route = `/documents?type=${encodeURIComponent('["txt"]')}&state=${encodeURIComponent('["failed","processing"]')}`;
+    const { router } = await renderApp({ route, fetch: spy, token: TEST_TOKEN });
+    await screen.findByRole("table");
+    expect(screen.getByRole("checkbox", { name: "Text" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Failed" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Processing" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "PDF" })).not.toBeChecked();
+    expect(listRequests(spy).at(-1)?.getAll("type")).toEqual(["txt"]);
+    expect(listRequests(spy).at(-1)?.getAll("state")).toEqual(["processing", "failed"]);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Trash" }));
+    await waitFor(() => {
+      expect(listRequests(spy).at(-1)?.get("trash")).toBe("true");
+    });
+    expect(listRequests(spy).at(-1)?.getAll("state")).toEqual(["processing", "failed"]);
+    expect(screen.getByText(/The state each had before the trash/)).toBeInTheDocument();
+    expect(router.state.location.search).toMatchObject({ type: ["txt"], trash: true });
+  });
+
+  it.each([
+    ["an unknown type", { type: ["txt", "exe"] }],
+    ["the trash as a state", { state: ["trashed"] }],
+    ["a value in another case", { state: ["Failed"] }],
+    ["a bare value", { type: "pdf" }],
+    ["a number", { type: [1] }],
+  ])("sends no filter for %s in the address", async (_case, search) => {
+    const spy = backend(listOf([item()]));
+    const query = Object.entries(search)
+      .map(([key, value]) => `${key}=${encodeURIComponent(JSON.stringify(value))}`)
+      .join("&");
+    await renderApp({ route: `/documents?${query}`, fetch: spy, token: TEST_TOKEN });
+    await screen.findByRole("table");
+    const sent = listRequests(spy).at(-1);
+    expect(sent?.has("type")).toBe(false);
+    expect(sent?.has("state")).toBe(false);
+  });
+
+  it("says when nothing matches the filters and clears them on request", async () => {
+    const spy = backend((request, url) =>
+      url.pathname === "/api/documents" && url.searchParams.has("state")
+        ? jsonResponse({ items: [], total: 0, limit: 50, offset: 0 })
+        : listOf([item()])(request, url),
+    );
+    const { router } = await renderApp({
+      route: `/documents?state=${encodeURIComponent('["failed"]')}`,
+      fetch: spy,
+      token: TEST_TOKEN,
+    });
+    expect(
+      await screen.findByText("No document in the library matches these filters."),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Clear type and state" }));
+    expect(await screen.findByRole("table")).toBeInTheDocument();
+    expect(listRequests(spy).at(-1)?.has("state")).toBe(false);
+    expect(router.state.location.search).not.toHaveProperty("state");
+  });
+
+  it("knows every type and state the backend's list accepts, and no other", () => {
+    const schema = JSON.parse(readFileSync("openapi.json", "utf8")) as {
+      paths: {
+        "/api/documents": {
+          get: { parameters: { name: string; schema: { items?: { enum?: string[] } } }[] };
+        };
+      };
+    };
+    const parameters = schema.paths["/api/documents"].get.parameters;
+    const values = (name: string) =>
+      [
+        ...(parameters.find((parameter) => parameter.name === name)?.schema.items?.enum ?? []),
+      ].sort();
+    expect([...DOCUMENT_TYPES].sort()).toEqual(values("type"));
+    expect([...FILTER_STATES].sort()).toEqual(values("state"));
   });
 });
 
@@ -1217,8 +1331,45 @@ describe("helpers", () => {
     [{ page: MAX_PAGE + 1 }, { ...DEFAULT_SEARCH, page: MAX_PAGE }],
     [{ page: Number.MAX_SAFE_INTEGER }, { ...DEFAULT_SEARCH, page: MAX_PAGE }],
     [{ trash: 1 }, DEFAULT_SEARCH],
+    [{ type: ["md", "pdf", "md"] }, { ...DEFAULT_SEARCH, type: ["pdf", "md"] }],
+    [{ state: ["failed"] }, { ...DEFAULT_SEARCH, state: ["failed"] }],
+    [
+      { type: ["jpg"], state: ["ready", "processing"] },
+      { ...DEFAULT_SEARCH, type: ["jpg"], state: ["processing", "ready"] },
+    ],
+    [{ type: ["pdf", "exe"] }, DEFAULT_SEARCH],
+    [{ type: ["jpeg"] }, DEFAULT_SEARCH],
+    [{ type: ["PDF"] }, DEFAULT_SEARCH],
+    [{ type: ["pdf\n"] }, DEFAULT_SEARCH],
+    [{ type: [] }, DEFAULT_SEARCH],
+    [{ type: "pdf" }, DEFAULT_SEARCH],
+    [{ type: [null] }, DEFAULT_SEARCH],
+    [{ state: ["trashed"] }, DEFAULT_SEARCH],
+    [{ state: ["failed "] }, DEFAULT_SEARCH],
+    [{ state: "failed" }, DEFAULT_SEARCH],
+    [{ state: { 0: "failed" } }, DEFAULT_SEARCH],
   ])("reads the address %j", (search, expected) => {
     expect(parseDocumentsSearch(search)).toEqual(expected);
+  });
+
+  it("keeps the type and state when the label changes, and the label when they change", () => {
+    const label = "01J9Z8Y7X6W5V4T3S2R1Q0P9M1";
+    const filtered = {
+      ...DEFAULT_SEARCH,
+      page: 4,
+      type: ["txt" as const],
+      state: ["failed" as const],
+    };
+    expect(withLabel(filtered, label)).toEqual({ ...filtered, page: 1, label });
+    expect(withLabel({ ...filtered, label }, null)).toEqual({ ...filtered, page: 1 });
+    expect(
+      withFilters({ ...DEFAULT_SEARCH, label, page: 3 }, ["md", "exe", "pdf"], ["trashed"]),
+    ).toEqual({
+      ...DEFAULT_SEARCH,
+      label,
+      type: ["pdf", "md"],
+    });
+    expect(withFilters(filtered, [], [])).toEqual({ ...DEFAULT_SEARCH });
   });
 
   it("pages only as far as the backend's largest offset", () => {

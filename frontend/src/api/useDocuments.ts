@@ -6,7 +6,9 @@ import {
   type DocumentDetail,
   type DocumentList,
   type DocumentPages,
+  type DocumentType,
   type DocumentsError,
+  type FilterState,
   type Order,
   PAGE_SIZE,
   type SortKey,
@@ -73,6 +75,10 @@ export interface ListQuery {
   trash: boolean;
   /** A label's id: only the documents that carry it or a label below it; left out for all. */
   label?: string;
+  /** Only documents of these types; left out (or empty) for every type. */
+  type?: readonly DocumentType[];
+  /** Only documents in these states (in the trash, the state each had); left out for every one. */
+  state?: readonly FilterState[];
 }
 
 /** Why the list gave no answer: a documents error, or a label filter on a label that is gone. */
@@ -90,6 +96,8 @@ export function useDocumentList(query: ListQuery): Request<DocumentList, ListErr
     query.page,
     query.trash,
     query.label ?? null,
+    query.type ?? [],
+    query.state ?? [],
   ]);
   return useRequest<DocumentList, ListError>(key, async () => {
     const { data, response } = await api.GET("/api/documents", {
@@ -101,6 +109,8 @@ export function useDocumentList(query: ListQuery): Request<DocumentList, ListErr
           offset: (query.page - 1) * PAGE_SIZE,
           trash: query.trash,
           ...(query.label === undefined ? {} : { label: query.label }),
+          ...(query.type?.length ? { type: [...query.type] } : {}),
+          ...(query.state?.length ? { state: [...query.state] } : {}),
         },
       },
     });
