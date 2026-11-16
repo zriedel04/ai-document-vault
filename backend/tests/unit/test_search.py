@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import typing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, insert, select, text, update
 
 from tests.unit.test_documents_api import Library
-from vault.api.search import Extension
+from vault.api.search import Extension, parse_instant
 from vault.core.config import Settings
 from vault.db import ids
 from vault.db.pages import PageHeading, PageText, replace_pages
@@ -474,3 +475,209 @@ def test_a_section_path_edited_by_hand_is_a_fixed_error(app: FastAPI, library: L
     with pytest.raises(ValueError, match="section path") as error:
         search(engine, SearchQuery(query="edited"))
     assert CANARY not in str(error.value)
+
+
+# --- the import date filter ---------------------------------------------------------------------
+
+
+def add_at(library: Library, when: datetime, name: str, body: str) -> str:
+    """A document whose first import is at ``when`` (naive UTC), to the microsecond. ``body``
+    must differ from every other document's, or the import is a duplicate of that one."""
+    library.now = when - timedelta(minutes=1)  # Library.add moves the clock on by a minute
+    return add(library, name, body)
+
+
+def test_import_bounds_are_inclusive_to_the_microsecond(
+    client: TestClient, library: Library
+) -> None:
+    start = datetime(2026, 5, 4, 0, 0, 0)
+    end = datetime(2026, 5, 4, 23, 59, 59, 999999)
+    before = add_at(library, start - timedelta(microseconds=1), "a.txt", "Lease renewal a.")
+    first = add_at(library, start, "b.txt", "Lease renewal b.")
+    last = add_at(library, end, "c.txt", "Lease renewal c.")
+    after = add_at(library, end + timedelta(microseconds=1), "d.txt", "Lease renewal d.")
+    day = {"imported_from": "2026-05-04T00:00:00Z", "imported_to": "2026-05-04T23:59:59.999999Z"}
+    assert sorted(found(client, "lease", **day)) == sorted([first, last])
+    assert sorted(found(client, "lease", imported_from=day["imported_from"])) == sorted(
+        [first, last, after]
+    )
+    assert sorted(found(client, "lease", imported_to=day["imported_to"])) == sorted(
+        [before, first, last]
+    )
+    assert len(found(client, "lease")) == 4
+    # A range of one instant holds what was imported at that instant.
+    instant = "2026-05-04T23:59:59.999999Z"
+    assert found(client, "lease", imported_from=instant, imported_to=instant) == [last]
+
+
+def test_a_day_in_the_owners_zone_is_the_instants_the_page_sends(
+    client: TestClient, library: Library
+) -> None:
+    # 8 March 2026 in New York is 23 hours long: it starts at 05:00 UTC (EST) and ends at 04:00
+    # UTC the next day (EDT). The page sends those instants with the browser's offsets.
+    late_on_the_7th = add_at(library, datetime(2026, 3, 8, 4, 59, 59, 999999), "a.md", "Rent due a")
+    first = add_at(library, datetime(2026, 3, 8, 5, 0, 0), "b.md", "Rent due b")
+    last = add_at(library, datetime(2026, 3, 9, 3, 59, 59, 999999), "c.md", "Rent due c")
+    early_on_the_9th = add_at(library, datetime(2026, 3, 9, 4, 0, 0), "d.md", "Rent due d")
+    local = {
+        "imported_from": "2026-03-08T00:00:00-05:00",
+        "imported_to": "2026-03-08T23:59:59.999999-04:00",
+    }
+    utc = {"imported_from": "2026-03-08T05:00:00Z", "imported_to": "2026-03-09T03:59:59.999999Z"}
+    assert sorted(found(client, "rent", **local)) == sorted([first, last])
+    assert sorted(found(client, "rent", **utc)) == sorted([first, last])
+    # The same calendar day in UTC is a different set of documents.
+    utc_day = {"imported_from": "2026-03-08T00:00:00Z", "imported_to": "2026-03-08T23:59:59.999Z"}
+    assert sorted(found(client, "rent", **utc_day)) == sorted([late_on_the_7th, first])
+    # East of UTC (UTC+14), the day starts on the previous UTC day.
+    kiritimati = {
+        "imported_from": "2026-03-09T00:00:00+14:00",
+        "imported_to": "2026-03-09T23:59:59.999999+14:00",
+    }
+    assert sorted(found(client, "rent", **kiritimati)) == sorted([last, early_on_the_9th])
+
+
+def test_the_import_date_is_the_first_import(client: TestClient, library: Library) -> None:
+    document_id = add_at(library, datetime(2026, 6, 1, 12, 0), "a.txt", "Warranty card.")
+    # The same bytes again a month later: a new source, but the document keeps its date.
+    library.now = datetime(2026, 7, 1, 12, 0)
+    assert library.add("copy.txt", "Warranty card.") == document_id
+    june = {"imported_from": "2026-06-01T00:00:00Z", "imported_to": "2026-06-30T23:59:59Z"}
+    july = {"imported_from": "2026-07-01T00:00:00Z", "imported_to": "2026-07-31T23:59:59Z"}
+    assert found(client, "warranty", **june) == [document_id]
+    assert found(client, "warranty", **july) == []
+
+
+def test_an_empty_range_finds_nothing(client: TestClient, library: Library) -> None:
+    add_at(library, datetime(2026, 4, 1, 8, 0), "a.txt", "Tax return.")
+    empty = {"imported_from": "2026-04-02T00:00:00Z", "imported_to": "2026-04-30T23:59:59Z"}
+    assert find(client, "tax", **empty) == {"items": [], "total": 0, "limit": 20, "offset": 0}
+
+
+def test_totals_ranking_and_pages_see_only_the_range(client: TestClient, library: Library) -> None:
+    inside = []
+    for number in range(6):
+        document_id = add_at(
+            library,
+            datetime(2026, 8, 1 + number, 10, 0),
+            f"memo-{number}.txt",
+            "Memo " * (number + 1),
+        )
+        if 2 <= number <= 4:
+            inside.append(document_id)
+    week = {"imported_from": "2026-08-03T00:00:00Z", "imported_to": "2026-08-05T23:59:59Z"}
+    everything = find(client, "memo", limit=50, **week)
+    assert everything["total"] == 3
+    order = [item["document_id"] for item in everything["items"]]
+    assert sorted(order) == sorted(inside)
+    pages = [find(client, "memo", limit=2, offset=offset, **week) for offset in (0, 2)]
+    assert [item["document_id"] for p in pages for item in p["items"]] == order
+    assert all(p["total"] == 3 for p in pages)
+    # With the type filter and the trash, in the same statement.
+    library.trash(inside[0])
+    assert sorted(found(client, "memo", types=["txt"], **week)) == sorted(inside[1:])
+    assert found(client, "memo", types=["md"], **week) == []
+
+
+def test_the_whole_representable_range_is_accepted(client: TestClient, library: Library) -> None:
+    document_id = add(library, "a.txt", "Insurance policy.")
+    widest = {
+        "imported_from": "0001-01-01T00:00:00Z",
+        "imported_to": "9999-12-31T23:59:59.999999Z",
+    }
+    assert found(client, "insurance", **widest) == [document_id]
+    assert found(client, "insurance", imported_from="0001-01-01T00:00:00-23:59") == [document_id]
+    assert found(client, "insurance", imported_to="9999-12-31T23:59:59.999999+23:59") == [
+        document_id
+    ]
+
+
+BAD_INSTANTS: list[Any] = [
+    CANARY,
+    f"2026-05-04T00:00:00Z{CANARY}",
+    "2026-05-04",  # a day: whose midnight?
+    "2026-05-04T00:00:00",  # no offset: the server's zone is not the owner's
+    "2026-05-04 00:00:00Z",
+    "2026-05-04t00:00:00z",
+    "2026-05-04T00:00:00Z\n",
+    "2026-05-04T00:00:00Z ",
+    " 2026-05-04T00:00:00Z",
+    "2026-05-04T00:00:00+0500",
+    "2026-05-04T00:00:00+05",
+    "2026-05-04T00:00:00+24:00",
+    "2026-05-04T00:00:00+05:60",
+    "2026-05-04T00:00Z",
+    "2026-05-04T00:00:00.1234567Z",  # finer than the database stores
+    "2026-05-04T00:00:00.Z",
+    "2026-02-29T00:00:00Z",  # not a leap year
+    "2026-04-31T00:00:00Z",
+    "2026-05-04T24:00:00Z",
+    "2026-05-04T23:59:60Z",  # a leap second
+    "0000-01-01T00:00:00Z",
+    "0001-01-01T00:00:00+00:01",  # before the year 1 in UTC
+    "9999-12-31T23:59:59.999999-00:01",  # after the year 9999 in UTC
+    "10000-01-01T00:00:00Z",
+    "+002026-05-04T00:00:00Z",
+    "\uff12\uff10\uff12\uff16-05-04T00:00:00Z",  # full-width digits
+    "\u0662\u0660\u0662\u0666-05-04T00:00:00Z",  # Arabic-Indic digits
+    "",
+    # Not strings: the framework's own refusal would repeat these.
+    20260504,
+    True,
+    [CANARY],
+    {"at": CANARY},
+]
+
+
+def test_bad_bounds_are_refused_without_repeating_them(
+    client: TestClient, library: Library, caplog: pytest.LogCaptureFixture
+) -> None:
+    add(library, "a.txt", "Lease renewal a.")
+    caplog.set_level(logging.DEBUG)
+    for field in ("imported_from", "imported_to"):
+        for value in BAD_INSTANTS:
+            response = client.post(URL, json={"query": "lease", field: value})
+            assert response.status_code == 422, (field, value)
+            assert CANARY not in response.text
+            assert response.json() == {
+                "detail": f"{field} is not a time with a UTC offset between the years 1 and 9999"
+            }
+            # Refused before the query is read, so a query with nothing to match is no way past.
+            assert client.post(URL, json={"query": "-", field: value}).status_code == 422
+    assert CANARY not in caplog.text
+
+
+def test_a_start_after_the_end_is_refused(client: TestClient) -> None:
+    for start, end in (
+        ("2026-05-04T00:00:00.000001Z", "2026-05-04T00:00:00Z"),
+        # The same instant written two ways is not reversed; one microsecond later is.
+        ("2026-05-04T00:00:00.000001-05:00", "2026-05-04T05:00:00Z"),
+    ):
+        response = client.post(URL, json={"query": "a", "imported_from": start, "imported_to": end})
+        assert response.status_code == 422
+        assert response.json() == {"detail": "imported_from is after imported_to"}
+    same = {"imported_from": "2026-05-04T00:00:00-05:00", "imported_to": "2026-05-04T05:00:00Z"}
+    assert client.post(URL, json={"query": "a", **same}).status_code == 200
+
+
+def test_instants_become_naive_utc_by_arithmetic() -> None:
+    assert parse_instant("2026-03-08T00:00:00-05:00", "f") == datetime(2026, 3, 8, 5, 0)
+    assert parse_instant("2026-03-09T00:00:00+14:00", "f") == datetime(2026, 3, 8, 10, 0)
+    assert parse_instant("2026-03-08T00:00:00.5Z", "f") == datetime(2026, 3, 8, 0, 0, 0, 500000)
+    assert parse_instant("2026-03-08T00:00:00.000007Z", "f") == datetime(2026, 3, 8, 0, 0, 0, 7)
+    assert parse_instant("2026-03-08T00:00:00-00:00", "f") == datetime(2026, 3, 8)
+    # Past the year 3000, where Windows' C library stops.
+    assert parse_instant("3001-01-01T00:00:00+01:00", "f") == datetime(3000, 12, 31, 23, 0)
+    with pytest.raises(ValueError, match=r"^f is not") as error:
+        parse_instant(CANARY, "f")
+    assert CANARY not in str(error.value)
+
+
+def test_search_query_bounds_are_checked() -> None:
+    with pytest.raises(ValueError, match="naive UTC"):
+        SearchQuery(query="a", imported_from=datetime(2026, 1, 1, tzinfo=UTC))
+    with pytest.raises(ValueError, match="naive UTC"):
+        SearchQuery(query="a", imported_to=datetime(2026, 1, 1, tzinfo=UTC))
+    with pytest.raises(ValueError, match="after"):
+        SearchQuery(query="a", imported_from=datetime(2026, 1, 2), imported_to=datetime(2026, 1, 1))
+    SearchQuery(query="a", imported_from=datetime(2026, 1, 1), imported_to=datetime(2026, 1, 1))
