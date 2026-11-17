@@ -148,6 +148,18 @@ def test_start_up_empties_a_damaged_index_and_leaves_vault_db(vault_dir: Any) ->
     assert app.state.index_db == vault_dir / "index.db"
 
 
+def test_start_up_rebuilds_an_index_whose_meta_table_has_another_shape(vault_dir: Any) -> None:
+    import sqlite3
+
+    create_app(vault_settings(vault_dir)).state.engine.dispose()
+    connection = sqlite3.connect(vault_dir / "index.db")
+    connection.execute("CREATE TABLE index_meta (key TEXT, wrong_column TEXT)")
+    connection.commit()
+    connection.close()
+    create_app(vault_settings(vault_dir)).state.engine.dispose()
+    assert not (vault_dir / "index.db").exists()
+
+
 def test_start_up_stops_when_a_link_is_where_the_index_belongs(
     vault_dir: Any, tmp_path: Any
 ) -> None:

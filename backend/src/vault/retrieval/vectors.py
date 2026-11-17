@@ -16,12 +16,14 @@ dimension count is refused (``IndexModelMismatch``) until the caller rebuilds th
 (``VectorIndex.create``). No embedding model is chosen here (ADR 0013 is Proposed): the model id is
 whatever the caller names.
 
-**Damage.** A file that is not a SQLite database, fails ``PRAGMA quick_check``, or does not have
-exactly this layout is rebuildable data in a bad state: it is removed with its side files
-(``-wal``, ``-shm``, ``-journal``) and an empty index is made in its place, and ``vault.db`` is
-never opened or touched. Only those answers count as damage: a database that is busy (locked by
-another connection), a disk error or an extension that cannot load is a failure of the setup, and
-propagates without removing anything.
+**Damage.** A file that is not a SQLite database, fails ``PRAGMA quick_check``, or whose schema is
+not exactly the one this module writes (every table, column, shadow table, index, view and
+trigger, compared before any table is read) is rebuildable data in a bad state: it is removed
+with its side files (``-wal``, ``-shm``, ``-journal``) and an empty index is made in its place,
+and ``vault.db`` is never opened or touched. Only those answers count as damage: a database
+that is busy (locked by another connection), a disk error or an extension that cannot load is a
+failure of the setup, and propagates without removing anything. An index made by another
+sqlite-vec version whose shadow tables differ is rebuilt too.
 
 **Links.** A symbolic link, a Windows junction or other reparse point, or a file with a second name
 (a hard link) where ``index.db`` or one of its side files belongs is refused (``IndexPathError``),
@@ -176,16 +178,20 @@ def _create_file(path: Path) -> None:
     os.close(os.open(path, flags, FILE_MODE))
 
 
+def _load_extension(connection: sqlite3.Connection) -> None:
+    try:
+        connection.enable_load_extension(True)
+        connection.load_extension(sqlite_vec.loadable_path())
+        connection.enable_load_extension(False)
+    except (AttributeError, sqlite3.OperationalError) as error:
+        msg = "sqlite-vec cannot be loaded into this Python's sqlite3"
+        raise VectorIndexUnavailable(msg) from error
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
     try:
-        try:
-            connection.enable_load_extension(True)
-            connection.load_extension(sqlite_vec.loadable_path())
-            connection.enable_load_extension(False)
-        except (AttributeError, sqlite3.OperationalError) as error:
-            msg = "sqlite-vec cannot be loaded into this Python's sqlite3"
-            raise VectorIndexUnavailable(msg) from error
+        _load_extension(connection)
         connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         if str(mode).lower() != "wal":
@@ -216,27 +222,59 @@ def check_model(model: str, dimensions: int) -> None:
         raise ValueError(msg)
 
 
+META_SQL: Final = "CREATE TABLE index_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)"
+
+type _Schema = frozenset[tuple[str, str, str, str | None]]
+
+
+def _schema(connection: sqlite3.Connection) -> _Schema:
+    """Every object of the database (tables, sqlite-vec's shadow tables, indexes, views,
+    triggers) as (type, name, table, SQL)."""
+    return frozenset(
+        (str(kind), str(name), str(table), None if sql is None else str(sql))
+        for kind, name, table, sql in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema"
+        )
+    )
+
+
+def _expected_schema(dimensions: int) -> _Schema:
+    """The schema this module writes for ``dimensions``, made in a database in memory, so the
+    comparison includes sqlite-vec's own shadow tables exactly as this version makes them."""
+    reference = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        _load_extension(reference)
+        _create_tables(reference, dimensions)
+        return _schema(reference)
+    finally:
+        reference.close()
+
+
 def _layout(connection: sqlite3.Connection) -> tuple[str, int] | None:
     """The model and dimension count of an index in this module's layout; None for an empty
-    database; ``_DamagedError`` for anything else."""
+    database; ``_DamagedError`` for anything else.
+
+    Nothing is read from a table before its shape is known, so an incompatible layout (a missing,
+    extra or renamed column, a view or another virtual table where a table belongs, an extra
+    trigger or index, sqlite-vec shadow tables of another version) is damage and never a SQL
+    error: the shape of ``index_meta`` is compared before it is read, and then the whole schema
+    with the one this module writes for the recorded dimension count."""
     if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
         raise _DamagedError
-    names = {
-        row[0]
-        for row in connection.execute(
-            "SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
-        )
-    }
-    if not names:
+    found = _schema(connection)
+    if not found:
         return None
-    if "index_meta" not in names:
+    if ("table", "index_meta", "index_meta", META_SQL) not in found:
         raise _DamagedError
-    meta = dict(connection.execute("SELECT key, value FROM index_meta").fetchall())
+    meta: dict[object, object] = dict(
+        connection.execute("SELECT key, value FROM index_meta").fetchall()
+    )
     if set(meta) != {"format", "model", "dimensions"} or meta["format"] != FORMAT:
         raise _DamagedError
     model, raw_dimensions = meta["model"], meta["dimensions"]
     if (
-        not isinstance(raw_dimensions, str)
+        not isinstance(model, str)
+        or not isinstance(raw_dimensions, str)
         or re.fullmatch(r"[1-9][0-9]{0,3}", raw_dimensions) is None
     ):
         raise _DamagedError
@@ -245,10 +283,7 @@ def _layout(connection: sqlite3.Connection) -> tuple[str, int] | None:
         check_model(model, dimensions)
     except ValueError:
         raise _DamagedError from None
-    table = connection.execute(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?", (TABLE,)
-    ).fetchone()
-    if table is None or table[0] != _table_sql(dimensions):
+    if found != _expected_schema(dimensions):
         raise _DamagedError
     # The table is read once, so a vec0 table whose own storage is broken shows here too.
     connection.execute(f"SELECT count(*) FROM {TABLE}").fetchone()  # noqa: S608 - a constant
@@ -259,17 +294,19 @@ class _DamagedError(Exception):
     """The file is rebuildable data in a bad state."""
 
 
+def _create_tables(connection: sqlite3.Connection, dimensions: int) -> None:
+    connection.execute(META_SQL)
+    connection.execute(_table_sql(dimensions))
+
+
 def _initialise(connection: sqlite3.Connection, model: str, dimensions: int) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
-        connection.execute(
-            "CREATE TABLE index_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)"
-        )
+        _create_tables(connection, dimensions)
         connection.executemany(
             "INSERT INTO index_meta (key, value) VALUES (?, ?)",
             [("format", FORMAT), ("model", model), ("dimensions", str(dimensions))],
         )
-        connection.execute(_table_sql(dimensions))
     except BaseException:
         connection.execute("ROLLBACK")
         raise

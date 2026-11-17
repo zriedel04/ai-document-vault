@@ -311,18 +311,86 @@ def write_foreign_database(path: Path, statements: list[str]) -> None:
     connection.close()
 
 
-@pytest.mark.parametrize(
-    "damage",
-    [
-        "garbage",
-        "truncated",
-        "unrelated tables",
-        "other format",
-        "meta without the vector table",
-        "vector table of another layout",
-        "dimensions not a number",
+VEC = "CREATE VIRTUAL TABLE chunk_vectors USING vec0("
+# Each layout an index may be found in that is not the one the module writes. Every one of them is
+# rebuildable data in a bad state, never a SQL error that stops the start-up.
+DAMAGE: dict[str, list[str]] = {
+    "other format": ["UPDATE index_meta SET value = '2' WHERE key = 'format'"],
+    "meta without the vector table": ["DROP TABLE chunk_vectors"],
+    "vector table of another layout": [
+        "UPDATE index_meta SET value = '3' WHERE key = 'dimensions'"
     ],
-)
+    "dimensions not a number": ["UPDATE index_meta SET value = 'four' WHERE key = 'dimensions'"],
+    "dimensions with a leading zero": [
+        "UPDATE index_meta SET value = '04' WHERE key = 'dimensions'"
+    ],
+    "a meta row missing": ["DELETE FROM index_meta WHERE key = 'model'"],
+    "an extra meta row": ["INSERT INTO index_meta VALUES ('extra', 'x')"],
+    "meta with a renamed column": [
+        "DROP TABLE index_meta",
+        "CREATE TABLE index_meta (key TEXT, wrong_column TEXT)",
+    ],
+    "meta missing a column": [
+        "DROP TABLE index_meta",
+        "CREATE TABLE index_meta (key TEXT PRIMARY KEY NOT NULL)",
+        "INSERT INTO index_meta VALUES ('format'), ('model'), ('dimensions')",
+    ],
+    "meta with an extra column": [
+        "DROP TABLE index_meta",
+        "CREATE TABLE index_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, note TEXT)",
+        "INSERT INTO index_meta (key, value) VALUES ('format', '1'),"
+        " ('model', 'synthetic/test-model@0123abc'), ('dimensions', '4')",
+    ],
+    "meta as a view": [
+        "DROP TABLE index_meta",
+        "CREATE VIEW index_meta AS SELECT 'format' AS key, '1' AS value"
+        " UNION ALL SELECT 'model', 'synthetic/test-model@0123abc'"
+        " UNION ALL SELECT 'dimensions', '4'",
+    ],
+    "meta with a value that is not text": [
+        "UPDATE index_meta SET value = x'00' WHERE key = 'model'"
+    ],
+    "vector table without filter columns": [
+        "DROP TABLE chunk_vectors",
+        f"{VEC}chunk_id integer primary key, embedding float[4] distance_metric=cosine)",
+    ],
+    "vector table with another distance": [
+        "DROP TABLE chunk_vectors",
+        f"{VEC}chunk_id integer primary key, embedding float[4],"
+        " document_id text, version_id text)",
+    ],
+    "another virtual table in its place": [
+        "DROP TABLE chunk_vectors",
+        "CREATE VIRTUAL TABLE chunk_vectors USING fts5(document_id, version_id)",
+    ],
+    "a plain table in its place": [
+        "DROP TABLE chunk_vectors",
+        "CREATE TABLE chunk_vectors (chunk_id INTEGER, document_id TEXT, version_id TEXT)",
+    ],
+    "a view in its place": [
+        "DROP TABLE chunk_vectors",
+        "CREATE VIEW chunk_vectors AS SELECT 1 AS chunk_id",
+    ],
+    "a shadow table changed": ["ALTER TABLE chunk_vectors_rowids ADD COLUMN extra TEXT"],
+    "an extra table": ["CREATE TABLE notes (body TEXT)"],
+    "an extra trigger": [
+        "CREATE TRIGGER meta_changed AFTER UPDATE ON index_meta BEGIN SELECT 1; END"
+    ],
+    "an extra index": ["CREATE INDEX meta_value ON index_meta (value)"],
+}
+
+
+def alter(path: Path, statements: list[str]) -> None:
+    connection = sqlite3.connect(path)
+    connection.enable_load_extension(True)
+    connection.load_extension(sqlite_vec.loadable_path())
+    for statement in statements:
+        connection.execute(statement)
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize("damage", ["garbage", "truncated", "unrelated tables", *DAMAGE])
 def test_a_damaged_index_is_made_anew_without_touching_vault_db(path: Path, damage: str) -> None:
     vault_db = sibling_vault_db(path)
     if damage == "garbage":
@@ -337,25 +405,36 @@ def test_a_damaged_index_is_made_anew_without_touching_vault_db(path: Path, dama
     else:
         with VectorIndex.open(path, MODEL, DIMS) as index:
             index.put([row(1, [1, 0, 0, 0])])
-        statement = {
-            "other format": "UPDATE index_meta SET value = '2' WHERE key = 'format'",
-            "meta without the vector table": "DROP TABLE chunk_vectors",
-            "vector table of another layout": "UPDATE index_meta SET value = '3'"
-            " WHERE key = 'dimensions'",
-            "dimensions not a number": "UPDATE index_meta SET value = 'four'"
-            " WHERE key = 'dimensions'",
-        }[damage]
-        connection = sqlite3.connect(path)
-        connection.enable_load_extension(True)
-        connection.load_extension(sqlite_vec.loadable_path())
-        connection.execute(statement)
-        connection.commit()
-        connection.close()
+        alter(path, DAMAGE[damage])
     with VectorIndex.open(path, MODEL, DIMS) as index:
         assert index.count() == 0
         index.put([row(1, [1, 0, 0, 0])])
         assert index.count() == 1
     assert (path.parent / "vault.db").read_bytes() == vault_db
+
+
+@pytest.mark.parametrize("damage", list(DAMAGE))
+def test_the_sweep_and_the_delete_rebuild_an_incompatible_layout(path: Path, damage: str) -> None:
+    # The start-up sweep and the permanent delete open the index without a model; an incompatible
+    # layout must be removed there too, never raise a SQL error that stops the server.
+    for step in ("sweep", "delete"):
+        with VectorIndex.open(path, MODEL, DIMS) as index:
+            index.put([row(1, [1, 0, 0, 0])])
+        alter(path, DAMAGE[damage])
+        if step == "sweep":
+            assert vectors.sweep(path, set) == vectors.Swept(removed=0, rebuilt=True)
+        else:
+            assert vectors.remove_document(path, DOC_A) == 0
+        assert not path.exists()
+
+
+def test_the_layout_this_module_writes_is_not_damage(path: Path) -> None:
+    # The control for the cases above: the comparison accepts exactly what open() writes.
+    with VectorIndex.open(path, MODEL, DIMS) as index:
+        index.put([row(1, [1, 0, 0, 0])])
+    alter(path, [])
+    with VectorIndex.open(path, MODEL, DIMS) as index:
+        assert index.count() == 1
 
 
 def test_a_missing_index_is_made_owner_only(path: Path) -> None:
