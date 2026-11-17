@@ -1,3 +1,5 @@
+import tomllib
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -185,3 +187,136 @@ def test_the_text_fallback_must_be_a_windows_code_page(tmp_path: Path, encoding:
     config.write_text(f'[processing]\ntext_fallback_encoding = "{encoding}"\n', encoding="utf-8")
     with pytest.raises(ValidationError, match="text_fallback_encoding"):
         load_settings(config)
+
+
+RETRIEVAL_KEYS = ("keyword_candidates", "vector_candidates", "rrf_k", "max_chunks_per_document")
+
+
+@pytest.fixture
+def _no_retrieval_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in RETRIEVAL_KEYS:
+        monkeypatch.delenv(f"AIVAULT_RETRIEVAL__{key.upper()}", raising=False)
+    monkeypatch.delenv("AIVAULT_RETRIEVAL", raising=False)
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+def test_retrieval_defaults_are_the_plans() -> None:
+    retrieval = Settings().retrieval
+    assert (
+        retrieval.keyword_candidates,
+        retrieval.vector_candidates,
+        retrieval.rrf_k,
+        retrieval.max_chunks_per_document,
+    ) == (50, 50, 60, 3)
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+def test_retrieval_values_from_the_file(tmp_path: Path) -> None:
+    config = write(
+        tmp_path / "c.toml",
+        "[retrieval]\nkeyword_candidates = 1\nvector_candidates = 500\nrrf_k = 0\n"
+        "max_chunks_per_document = 100\n",
+    )
+    retrieval = load_settings(config).retrieval
+    assert (
+        retrieval.keyword_candidates,
+        retrieval.vector_candidates,
+        retrieval.rrf_k,
+        retrieval.max_chunks_per_document,
+    ) == (1, 500, 0, 100)
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("keyword_candidates", "0"),
+        ("keyword_candidates", "501"),
+        ("vector_candidates", "0"),
+        ("vector_candidates", "501"),
+        ("rrf_k", "-1"),
+        ("rrf_k", "1001"),
+        ("max_chunks_per_document", "0"),
+        ("max_chunks_per_document", "101"),
+        # Exactly a whole number: no boolean, float or text, even one that spells a valid number.
+        ("rrf_k", "true"),
+        ("rrf_k", "false"),
+        ("rrf_k", "60.0"),
+        ("rrf_k", "6e1"),
+        ("rrf_k", '"60"'),
+        ("keyword_candidates", "true"),
+        ("vector_candidates", "50.0"),
+        ("max_chunks_per_document", '"3"'),
+        ("rrf_k", "[60]"),
+        ("rrf_k_typo", "60"),
+    ],
+)
+def test_retrieval_values_must_be_whole_numbers_in_range(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    with pytest.raises(ValidationError):
+        load_settings(write(tmp_path / "c.toml", f"[retrieval]\n{key} = {value}\n"))
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+@pytest.mark.parametrize("value", [True, 60.0, "60", None, Decimal(60)])
+def test_retrieval_values_in_code_are_exactly_whole_numbers(value: object) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"retrieval": {"rrf_k": value}})
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+def test_retrieval_values_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write(tmp_path / "c.toml", "[retrieval]\nrrf_k = 10\nkeyword_candidates = 20\n")
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__RRF_K", "30")
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__MAX_CHUNKS_PER_DOCUMENT", "0")
+    with pytest.raises(ValidationError):  # in range from the environment too
+        load_settings(config)
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__MAX_CHUNKS_PER_DOCUMENT", "5")
+    retrieval = load_settings(config).retrieval
+    assert (retrieval.rrf_k, retrieval.keyword_candidates, retrieval.max_chunks_per_document) == (
+        30,
+        20,
+        5,
+    )
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__RRF_K", "0")
+    assert load_settings(config).retrieval.rrf_k == 0
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "030",
+        "+30",
+        "-0",
+        " 30",
+        "30 ",
+        "30\n",
+        "30\r",
+        "30.0",
+        "3e1",
+        "true",
+        "",
+        "٣٠",
+        "0x1e",
+        "1_0",
+    ],
+)
+def test_an_environment_value_must_be_plain_decimal(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__RRF_K", text)
+    with pytest.raises(ValidationError):
+        load_settings()
+
+
+@pytest.mark.usefixtures("_no_retrieval_environment")
+def test_the_example_config_names_every_retrieval_setting_at_its_default() -> None:
+    example = Path(__file__).resolve().parents[3] / "config.example.toml"
+    with example.open("rb") as handle:
+        written = tomllib.load(handle)["retrieval"]
+    assert set(written) == set(RETRIEVAL_KEYS) == set(Settings().retrieval.model_dump())
+    assert load_settings(example).retrieval == Settings().retrieval
