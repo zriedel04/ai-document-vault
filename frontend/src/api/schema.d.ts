@@ -501,7 +501,7 @@ export interface components {
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
+            detail: components["schemas"]["ValidationError"][];
         };
         /** Heading */
         Heading: {
@@ -786,18 +786,20 @@ export interface components {
             outcome: components["schemas"]["Outcome"];
             reason?: components["schemas"]["Reason"] | null;
         };
-        /** ValidationError */
+        /**
+         * ValidationError
+         * @description One refused part of the request: where, and whether it was missing or not valid.
+         */
         ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>;
-            /** Input */
-            input?: unknown;
             /** Location */
-            loc: (string | number)[];
+            loc: string[];
             /** Message */
             msg: string;
-            /** Error Type */
-            type: string;
+            /**
+             * Error Type
+             * @enum {string}
+             */
+            type: "missing" | "invalid";
         };
     };
     responses: never;
