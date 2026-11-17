@@ -497,7 +497,12 @@ def _pdf_truncated() -> bytes:
 
 def _pdf_cross_reference_cut() -> bytes:
     data = _two_columns(by_row=False)
-    return _cut(data, data.rindex(b"xref"))
+    # The table starts a line of its own; a bare b"xref" also matches inside "startxref".
+    cut = _cut(data, data.rindex(b"\nxref\n") + 1)
+    if b"xref" in cut or b"trailer" in cut:
+        msg = "the cut keeps part of the cross-reference table"
+        raise ValueError(msg)
+    return cut
 
 
 def _pdf_garbage_body() -> bytes:
