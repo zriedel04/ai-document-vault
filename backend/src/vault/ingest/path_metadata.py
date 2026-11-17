@@ -78,9 +78,22 @@ def clean(text: str) -> str:
     return " ".join(unicodedata.normalize("NFC", kept).split())
 
 
+def _trimmed(text: str) -> str:
+    """``text`` cleaned (``clean``) and without trailing dots and spaces, as Windows drops them."""
+    return clean(text).rstrip(". ")
+
+
 def _folder_name(text: str) -> str:
-    name = clean(text).rstrip(". ")
-    return name[:MAX_LABEL_CHARS].rstrip(". ")
+    return _trimmed(text)[:MAX_LABEL_CHARS].rstrip(". ")
+
+
+def owner_label_name(text: str) -> str | None:
+    """The name of a label the owner makes or renames (a collection or a tag), cleaned exactly as
+    a folder name is (``clean``, then trailing dots and spaces dropped), or None when nothing is
+    left or more than ``MAX_LABEL_CHARS`` characters are: a folder's name is cut to fit, but a name
+    the owner types is refused, so it is never stored other than as they will see it."""
+    name = _trimmed(text)
+    return name if 1 <= len(name) <= MAX_LABEL_CHARS else None
 
 
 def _drop_anchor(parts: list[str], *, unc: bool) -> list[str]:
