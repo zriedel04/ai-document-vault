@@ -82,7 +82,7 @@ function carried(label: LabelNode, source: "user" | "ai" | "import_path" = "user
 
 interface Options {
   /** Answers a change instead of the stand-in backend, when it returns a response. */
-  answer?: (request: Request, url: URL) => Response | undefined;
+  answer?: (request: Request, url: URL) => Response | Promise<Response> | undefined;
 }
 
 /**
@@ -127,7 +127,16 @@ function backend(tree: LabelNode[], assigned: DocumentDetail["labels"], options:
     }
     return jsonResponse({ detail: "not found" }, 404);
   });
-  return { spy, changes, created };
+  return { spy, changes, created, now: () => detail(current) };
+}
+
+/** A promise and the function that settles it, to hold an answer back until the test says so. */
+function held(): { promise: Promise<Response>; release: (response: Response) => void } {
+  let release: (response: Response) => void = () => undefined;
+  const promise = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 const TREE = [
@@ -258,5 +267,77 @@ describe("the document's collections and tags", () => {
     await userEvent.click(section().getByRole("button", { name: "Add" }));
     expect(await screen.findByText("Change not confirmed")).toBeVisible();
     expect(screen.queryByText(SERVER_TEXT)).toBeNull();
+  });
+
+  it("does not start a trash while a label change is in flight, and shows the later answer", async () => {
+    const pending = held();
+    let snapshot: (() => DocumentDetail) | null = null;
+    let trashed = false;
+    const fake = backend(TREE, [], {
+      answer: (request, url) => {
+        if (request.method === "PUT") return pending.promise;
+        if (url.pathname === `/api/documents/${ID}/trash` && snapshot !== null) {
+          trashed = true;
+          return jsonResponse({
+            ...snapshot(),
+            state: "trashed",
+            trashed_at: "2026-10-02T12:00:00Z",
+          });
+        }
+        return undefined;
+      },
+    });
+    snapshot = fake.now;
+    await openDocument(fake.spy);
+    await userEvent.selectOptions(screen.getByLabelText("Add to"), URGENT);
+    await userEvent.click(section().getByRole("button", { name: "Add" }));
+    // The label answer is held back: every other change of the document waits for it.
+    const trash = screen.getByRole("button", { name: "Move to trash" });
+    await waitFor(() => {
+      expect(trash).toBeDisabled();
+    });
+    await userEvent.click(trash);
+    expect(fake.changes).toEqual([`PUT /api/documents/${ID}/labels/${URGENT}`]);
+    // The label's answer: the document in use, with the tag.
+    pending.release(jsonResponse({ ...fake.now(), labels: [carried(TREE[2] as LabelNode)] }));
+    await section().findByRole("button", { name: "Remove Urgent" });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Move to trash" })).toBeEnabled();
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Move to trash" }));
+    expect(await screen.findByRole("button", { name: "Restore" })).toBeVisible();
+    expect(trashed).toBe(true);
+    expect(fake.changes).toEqual([
+      `PUT /api/documents/${ID}/labels/${URGENT}`,
+      `POST /api/documents/${ID}/trash`,
+    ]);
+  });
+
+  it("does not start a label change while a trash is in flight, so the trash's answer stays", async () => {
+    const pending = held();
+    const fake = backend(TREE, [], {
+      answer: (_request, url) =>
+        url.pathname === `/api/documents/${ID}/trash` ? pending.promise : undefined,
+    });
+    await openDocument(fake.spy);
+    await userEvent.click(screen.getByRole("button", { name: "Move to trash" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Add to")).toBeDisabled();
+    });
+    expect(section().getByRole("button", { name: "Add" })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("New collection"), "Late");
+    expect(section().getByRole("button", { name: "Create and add" })).toBeDisabled();
+    await userEvent.click(section().getByRole("button", { name: "Create and add" }));
+    expect(fake.changes).toEqual([`POST /api/documents/${ID}/trash`]);
+    pending.release(
+      jsonResponse({ ...fake.now(), state: "trashed", trashed_at: "2026-10-02T12:00:00Z" }),
+    );
+    expect(await screen.findByRole("button", { name: "Restore" })).toBeVisible();
+    // Once the trash has settled, a label change may run, and the page keeps the trashed state
+    // its answer carries.
+    await waitFor(() => {
+      expect(screen.getByLabelText("Add to")).toBeEnabled();
+    });
+    expect(fake.changes).toEqual([`POST /api/documents/${ID}/trash`]);
   });
 });

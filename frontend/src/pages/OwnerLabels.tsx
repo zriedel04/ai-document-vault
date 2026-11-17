@@ -1,5 +1,5 @@
 import { Alert, Button, Group, NativeSelect, Stack, Text, TextInput, Title } from "@mantine/core";
-import { useRef, useState } from "react";
+import { useState } from "react";
 
 import { useApi } from "../api/api-context";
 import { type DocumentDetail, type DocumentsError, ERROR_TEXT } from "../api/documents";
@@ -18,6 +18,7 @@ import {
 } from "../api/labels";
 import { useSessionState } from "../api/session-context";
 import { loadDocument } from "../api/useDocuments";
+import type { MutationLock } from "./mutation-lock";
 
 const KIND_TEXT: Record<OwnerKind, string> = { collection: "Collection", tag: "Tag" };
 
@@ -39,22 +40,28 @@ function pathText(path: readonly string[]): string {
  * Names are the owner's text and are only ever rendered as text. Every outcome is a fixed text
  * chosen by the status code (`LABEL_CHANGE_ERROR_TEXT`); an answer that does not prove the change
  * reloads the document, since both requests are safe to repeat.
+ *
+ * Every change runs under the page's one mutation lock (`lock`), the one its trash, restore,
+ * delete and retry take, so no two requests that answer with the whole document are ever in
+ * flight at once, and an older document can never replace the one a later change returned.
  */
 export function OwnerLabels({
   document,
   onDocument,
+  lock,
 }: {
   document: DocumentDetail;
   onDocument: (document: DocumentDetail) => void;
+  lock: MutationLock;
 }) {
   const api = useApi();
   const { recheck } = useSessionState();
   const { state: tree, reload: reloadTree } = useLabels();
   const [chosen, setChosen] = useState(NONE);
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  // Set at once on a click, so a second click before the re-render sends nothing.
-  const busyNow = useRef(false);
+  // A label change of this section is running (the spinner); `lock.busy` is any change of the page.
+  const [working, setWorking] = useState(false);
+  const busy = lock.busy;
   const [outcome, setOutcome] = useState<Outcome | null>(null);
 
   const assigned = ownerAssignments(document);
@@ -65,17 +72,16 @@ export function OwnerLabels({
       : [];
 
   const settle = (next: Outcome | null) => {
-    busyNow.current = false;
-    setBusy(false);
+    setWorking(false);
+    lock.end();
     setOutcome(next);
     const error = next !== null && "error" in next ? next.error : null;
     if (error === "needs-token") recheck(); // bring the token notice back (see useRequest)
   };
 
   const start = (): boolean => {
-    if (busyNow.current) return false;
-    busyNow.current = true;
-    setBusy(true);
+    if (!lock.begin()) return false;
+    setWorking(true);
     setOutcome(null);
     return true;
   };
@@ -205,7 +211,12 @@ export function OwnerLabels({
               setName(event.currentTarget.value);
             }}
           />
-          <Button type="submit" variant="light" disabled={name.trim() === ""} loading={busy}>
+          <Button
+            type="submit"
+            variant="light"
+            disabled={name.trim() === "" || (busy && !working)}
+            loading={working}
+          >
             Create and add
           </Button>
         </Group>
