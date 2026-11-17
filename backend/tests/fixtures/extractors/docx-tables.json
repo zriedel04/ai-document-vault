@@ -1,0 +1,35 @@
+{
+  "fixture": "docx-tables",
+  "about": "A table with a header row, a right-to-left cell, an empty row, a merged cell, a cell of two paragraphs, a tab in a cell and a nested table",
+  "type": "docx",
+  "entry": "docx",
+  "option": null,
+  "input_bytes": 4771,
+  "input_sha256": "bfe191dfc327bac091276df70a101a50b45ef3b1b1d6946bc63ef31c1b759441",
+  "result": {
+    "extractor": "docx-1",
+    "encoding": null,
+    "pages": [
+      {
+        "number": 1,
+        "text": "Grades\n\nCourse\tCredits\tGrade\nCSE 485\t3\tA\n文档库\t2\tB\nשלום עולם\t1\t\nSpans two columns\tC\nTwo paragraphs\ttab in\tinner a inner b after nested\n\nAfter the table\n\nClosing line.",
+        "headings": [
+          {
+            "level": 1,
+            "title": "Grades",
+            "start": 0,
+            "end": 6,
+            "text_at_offsets": "Grades"
+          },
+          {
+            "level": 2,
+            "title": "After the table",
+            "start": 134,
+            "end": 149,
+            "text_at_offsets": "After the table"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "fixture": "txt-utf16-odd-length",
+  "about": "UTF-16 with a mark, cut to an odd number of bytes",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 431,
+  "input_sha256": "b90445f07c55b506b31975c2ce002d5cc2d244e41a34011fd149a057d628df0d",
+  "error": {
+    "class": "NotTextError",
+    "reason": null
+  }
+}

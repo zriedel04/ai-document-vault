@@ -1,0 +1,13 @@
+{
+  "fixture": "md-bad-utf8-after-mark",
+  "about": "A UTF-8 byte order mark followed by bytes that are not UTF-8",
+  "type": "md",
+  "entry": "markdown",
+  "option": "cp1252",
+  "input_bytes": 29,
+  "input_sha256": "d3e384dd3faf810cc29ff45dae67b45912dd90e55dfb09bc4554d570e49796e0",
+  "error": {
+    "class": "NotTextError",
+    "reason": null
+  }
+}

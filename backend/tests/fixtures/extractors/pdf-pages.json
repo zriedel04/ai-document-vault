@@ -1,0 +1,35 @@
+{
+  "fixture": "pdf-pages",
+  "about": "Four pages: a hyphenated word at a line end, a page with no content, a page of white space, and escaped characters",
+  "type": "pdf",
+  "entry": "pdf",
+  "option": null,
+  "input_bytes": 1402,
+  "input_sha256": "4d1986038ea5746df9bb704f7d00cc5c3ea7e9c1d074e29e917f0c00f89b0546",
+  "result": {
+    "extractor": "pdf-1",
+    "encoding": null,
+    "pages": [
+      {
+        "number": 1,
+        "text": "First page\nThe measurements were taken.",
+        "headings": []
+      },
+      {
+        "number": 2,
+        "text": "",
+        "headings": []
+      },
+      {
+        "number": 3,
+        "text": "",
+        "headings": []
+      },
+      {
+        "number": 4,
+        "text": "Fourth page (with parentheses) and a back\\slash",
+        "headings": []
+      }
+    ]
+  }
+}

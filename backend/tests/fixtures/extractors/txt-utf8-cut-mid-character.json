@@ -1,0 +1,13 @@
+{
+  "fixture": "txt-utf8-cut-mid-character",
+  "about": "Multilingual UTF-8 cut in the middle of a character: not valid UTF-8, and not valid in the fallback code page either (bytes Windows-1252 leaves undefined)",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 130,
+  "input_sha256": "834cc1546ed8cd8ea3b5b2f4b2c82f93945967d0227599b2559c95ff46f79453",
+  "error": {
+    "class": "NotTextError",
+    "reason": null
+  }
+}
