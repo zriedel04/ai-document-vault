@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from vault.answers import citations
+from vault.answers import citations, graphemes
 from vault.answers.citations import (
     MAX_ANSWER_CHARS,
     MAX_LABEL_CHARS,
@@ -141,11 +141,79 @@ def test_only_the_exact_label_resolves(label: str) -> None:
 
 
 def test_an_invented_label_is_removed_and_the_rest_kept() -> None:
+    # Any invented label makes the segment unsupported (plan section 11, ADR 0011), even beside
+    # a label whose passage holds the quote; that label is still resolved and checked.
     result = _one(["S9", "S1"], "prototype is due October 15")
     (segment,) = result.segments
-    assert segment.status is SegmentStatus.SUPPORTED
+    assert segment.status is SegmentStatus.UNSUPPORTED
     assert [citation.label for citation in segment.citations] == ["S1"]
+    assert segment.citations[0].verified
     assert _codes(result) == [(FindingCode.INVENTED_LABEL, 0, 0)]
+    assert result.cited_chunk_ids == frozenset({11})
+
+
+@pytest.mark.parametrize(
+    ("sources", "quote", "status", "codes"),
+    [
+        # No label at all comes first.
+        ([], "prototype", SegmentStatus.UNCITED, [(FindingCode.UNCITED_SEGMENT, 0, None)]),
+        # Any invented label comes next, whatever the given labels show.
+        (
+            ["S1", "S9"],
+            "prototype",
+            SegmentStatus.UNSUPPORTED,
+            [(FindingCode.INVENTED_LABEL, 0, 1)],
+        ),
+        (
+            ["S9", "S2"],
+            "prototype",
+            SegmentStatus.UNSUPPORTED,
+            [(FindingCode.INVENTED_LABEL, 0, 0), (FindingCode.QUOTE_NOT_FOUND, 0, 1)],
+        ),
+        (
+            ["S9", "S1"],
+            "",
+            SegmentStatus.UNSUPPORTED,
+            [(FindingCode.INVENTED_LABEL, 0, 0), (FindingCode.MISSING_QUOTE, 0, None)],
+        ),
+        (
+            ["S1", "S1", "s1"],
+            "prototype",
+            SegmentStatus.UNSUPPORTED,
+            [(FindingCode.REPEATED_LABEL, 0, 1), (FindingCode.INVENTED_LABEL, 0, 2)],
+        ),
+        (["S9"], "", SegmentStatus.UNSUPPORTED, [(FindingCode.INVENTED_LABEL, 0, 0)]),
+        # Then a quote found in a given passage.
+        (["S2", "S1"], "prototype", SegmentStatus.SUPPORTED, [(FindingCode.QUOTE_NOT_FOUND, 0, 0)]),
+        (["S1"], "absent", SegmentStatus.UNVERIFIED, [(FindingCode.QUOTE_NOT_FOUND, 0, 0)]),
+        (["S1"], "", SegmentStatus.UNVERIFIED, [(FindingCode.MISSING_QUOTE, 0, None)]),
+    ],
+)
+def test_status_precedence(
+    sources: list[str],
+    quote: str,
+    status: SegmentStatus,
+    codes: list[tuple[FindingCode, int | None, int | None]],
+) -> None:
+    result = _one(sources, quote)
+    assert result.segments[0].status is status
+    assert _codes(result) == codes
+
+
+@pytest.mark.parametrize("cited", [False, True])
+@pytest.mark.parametrize("invented", [False, True])
+@pytest.mark.parametrize("verified", [False, True])
+def test_status_table(cited: bool, invented: bool, verified: bool) -> None:
+    expected = (
+        SegmentStatus.UNCITED
+        if not cited
+        else SegmentStatus.UNSUPPORTED
+        if invented
+        else SegmentStatus.SUPPORTED
+        if verified
+        else SegmentStatus.UNVERIFIED
+    )
+    assert citations._status(cited=cited, invented=invented, verified=verified) is expected
 
 
 def test_a_repeated_label_counts_once() -> None:
@@ -251,7 +319,10 @@ def test_findings_name_the_position_in_the_models_list() -> None:
         (FindingCode.EMPTY_SEGMENT, 1, None),
         (FindingCode.INVENTED_LABEL, 2, 1),
     ]
-    assert [segment.status for segment in result.segments] == [SegmentStatus.SUPPORTED] * 2
+    assert [segment.status for segment in result.segments] == [
+        SegmentStatus.SUPPORTED,
+        SegmentStatus.UNSUPPORTED,
+    ]
 
 
 # The flag
@@ -370,6 +441,22 @@ def test_quotes_found_after_the_documented_folding(quote: str, text: str) -> Non
         ("\u0303", "q\u0303"),  # a mark without its base letter
         ("\u1100\u1161", "\uac01"),  # half of a Hangul syllable
         ("Room 201. Extra", SYLLABUS),  # past the end
+        # Part of a grapheme cluster (UAX #29) is not a whole character.
+        ("\u0915", "\u0915\u093e"),  # a consonant without its vowel sign (Mc, class 0)
+        ("\u0915", "\u0915\u0903"),  # without its visarga
+        ("\u0e01", "\u0e01\u0e33"),  # a Thai consonant without sara am
+        ("\u2764", "\u2764\ufe0f"),  # an emoji without its variation selector
+        ("\u845b", "\u845b\U000e0100"),  # an ideograph without its variation selector
+        ("\U0001f44d", "\U0001f44d\U0001f3fd"),  # without its skin tone modifier
+        ("\U0001f468", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),  # part of a ZWJ sequence
+        ("\U0001f469", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
+        ("\U0001f1fa", "\U0001f1fa\U0001f1f8"),  # half a flag
+        ("\U0001f1f8\U0001f1ea", "\U0001f1fa\U0001f1f8\U0001f1ea\U0001f1f8"),  # across two flags
+        ("\u0661", "\u0600\u0661"),  # a number without its prepended sign
+        ("\u1100", "\u1100\u1161"),  # a Hangul initial without its vowel
+        # A space carrying a mark is not a run of white space, and a run is not such a space.
+        (" \ufe0f", "a \n\ufe0f"),
+        ("a \n\ufe0f", "a \ufe0f"),
     ],
 )
 def test_quotes_not_found_without_over_broad_folding(quote: str, text: str) -> None:
@@ -381,6 +468,23 @@ def test_the_span_is_in_the_text_as_sent() -> None:
     span = find_quote('caf\u00e9\'s "menu" opens', text)
     assert span is not None
     assert text[span[0] : span[1]] == "caf\u00e9\u2019s   \u201cmenu\u201d opens"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\u0915\u093e",
+        "\u2764\ufe0f",
+        "\U0001f44d\U0001f3fd",
+        "\U0001f468\u200d\U0001f469\u200d\U0001f467",
+        "\U0001f1fa\U0001f1f8",
+        "\u0600\u0661",
+    ],
+)
+def test_a_whole_cluster_is_found_with_its_span(text: str) -> None:
+    passage = f"Before {text} after."
+    assert find_quote(f"Before {text} after", passage) == (0, len(passage) - 1)
+    assert find_quote(text, passage) == (7, 7 + len(text))
 
 
 def test_the_span_covers_combining_marks_and_composed_hangul() -> None:
@@ -424,7 +528,10 @@ def test_whitespace_set_is_spaces_and_breaks_only() -> None:
 
 def _decomposition_alphabet() -> list[str]:
     """Characters that take part in canonical composition, with a few starters and marks."""
-    chars = set("ae Aq\u0301\u0308\u0323\u0327\u0345\u1100\u1161\u11a8\uac00\u212b\u0958")
+    chars = set(
+        "\n\u200d\ufe0f\u0915\u093eae Aq\u0301\u0308\u0323\u0327\u0345"
+        "\u1100\u1161\u11a8\uac00\u212b\u0958"
+    )
     for cp in range(0x30000):
         parts = unicodedata.decomposition(chr(cp)).split()
         if len(parts) == 2 and not parts[0].startswith("<"):
@@ -444,20 +551,18 @@ def test_characters_normalise_independently() -> None:
 
 def _reference_find(quote: str, text: str) -> bool:
     """Brute force: some slice of ``text`` between two character boundaries normalises to the
-    quote. A boundary is a place where NFC of the parts equals NFC of the whole and that is not
-    before a combining mark (a base letter is not cut from its marks)."""
+    quote. A boundary is a grapheme cluster boundary (checked on its own against Perl's ``\\X``
+    in ``test_graphemes``) where NFC of the parts equals NFC of the whole."""
     needle = normalise(quote)
     if not needle:
         return False
     whole = unicodedata.normalize("NFC", text)
+    clusters = graphemes.boundaries(text)
     cuts = [
         i
         for i in range(len(text) + 1)
         if unicodedata.normalize("NFC", text[:i]) + unicodedata.normalize("NFC", text[i:]) == whole
-        and (
-            i in {0, len(text)}
-            or unicodedata.combining(unicodedata.normalize("NFD", text[i])[0]) == 0
-        )
+        and clusters[i]
     ]
     return any(normalise(text[i:j]) == needle for i in cuts for j in cuts if i < j)
 
@@ -479,6 +584,13 @@ def test_find_quote_agrees_with_a_brute_force_reference() -> None:
         "\u1161",
         "\u11a8",
         "\uac00",
+        "\u0915",
+        "\u093e",
+        "\u2764",
+        "\ufe0f",
+        "\u200d",
+        "\U0001f1fa",
+        "\U0001f1f8",
     ]
     rng = random.Random(15)  # noqa: S311 - a fixed seed for a repeatable test
     found = 0

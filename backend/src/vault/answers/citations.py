@@ -12,11 +12,12 @@ Rules (each failure is a :class:`Finding` with a fixed code and fixed text):
   ``s3``, ``S03``, ``S0``, ``S3`` with a space or a line break, and a label past ``Sn`` are not
   labels that were given, and each is removed as ``invented_label``. A label given twice in one
   segment counts once (``repeated_label``).
-- **Segment status.** ``uncited``: the segment names no label (shown muted). ``unsupported``: it
-  names labels but none was given. ``unverified``: at least one label resolves, but its quote is
-  blank (``missing_quote``) or found in none of them. ``supported``: the quote is found in at least
-  one cited passage. Each citation records its own match, so a quote found in ``S3`` and not in
-  ``S5`` verifies ``S3`` only (``quote_not_found`` for ``S5``).
+- **Segment status**, by precedence. ``uncited``: the segment names no label (shown muted).
+  ``unsupported``: it names at least one label that was not given, whatever its other labels
+  show; the labels that were given are still resolved and checked. ``supported``: the quote is
+  found in at least one cited passage. ``unverified``: anything less (a blank quote,
+  ``missing_quote``, or one found in no cited passage). Each citation records its own match, so a
+  quote found in ``S3`` and not in ``S5`` verifies ``S3`` only (``quote_not_found`` for ``S5``).
 - **Quote matching.** The quote must occur in one cited passage's text, as a whole: a quote that
   runs across two passages is found in neither. Both texts are compared after
   :func:`normalise` and nothing else, which folds only what a model changes when it copies text:
@@ -26,10 +27,11 @@ Rules (each failure is a :class:`Finding` with a fixed code and fixed text):
   mark is compared as it is) to one space, with the quote's ends trimmed. Case, other
   punctuation, ellipses, primes, compatibility forms (NFKC: ligatures, full-width letters,
   superscripts), zero-width characters and soft hyphens are compared as they are, so a quote
-  that only matches once those are folded is not found. A match starts and ends on
-  whole characters of the passage (a base letter and its combining marks), so ``q`` is not found in
-  ``q`` followed by a combining tilde. Its span is given in characters of the passage text as it
-  was sent, for the highlight.
+  that only matches once those are folded is not found. A match starts and ends on whole
+  characters of the passage, its extended grapheme clusters (UAX #29): ``q`` is not found in ``q``
+  with a combining tilde, a consonant without its vowel sign, an emoji without its variation
+  selector, modifier or the rest of its ZWJ sequence, or one regional indicator of a flag. Its
+  span is given in code points of the passage text as it was sent, for the highlight.
 - **The flag.** With ``insufficient_evidence`` set the answer should hold no segments
   (``flag_with_claims``) and should say what is missing (``missing_note``). Without it, an answer
   with no segment left is ``empty_answer``. Segments whose text is blank are removed
@@ -53,6 +55,8 @@ from types import MappingProxyType
 from typing import Annotated, Final
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
+
+from vault.answers import graphemes
 
 # Bounds on what one answer may hold, so a malformed or hostile response costs bounded work. They
 # are far above a real answer (the plan sends 8-12 passages and asks for short quotes).
@@ -332,27 +336,28 @@ def _never_joins_previous(char: str) -> bool:
     )
 
 
-def _starter(char: str) -> bool:
-    first = unicodedata.normalize("NFD", char)[0]
-    return unicodedata.combining(char) == 0 and unicodedata.combining(first) == 0
-
-
 def _characters(text: str) -> list[tuple[int, int]]:
-    """``text`` cut into spans that NFC normalises independently: a starter and its marks, and a
-    starter that NFC would compose into the span before it (a Hangul vowel after its leading
-    consonant) joined to that span."""
+    """``text`` cut into whole characters as a reader sees them: extended grapheme clusters
+    (UAX #29, :mod:`vault.answers.graphemes`: a letter with its marks, spacing vowel signs and
+    variation selectors, an emoji with its modifiers and ZWJ sequence, a flag's two regional
+    indicators, a Hangul syllable written in jamo), joined further wherever NFC would compose
+    across the cut, so that every span normalises independently."""
     spans: list[tuple[int, int]] = []
     start = 0
+    clusters = graphemes.boundaries(text)
     for index in range(1, len(text) + 1):
         if index < len(text):
             char = text[index]
+            if not clusters[index]:
+                continue
             if not _never_joins_previous(char):
-                # A starter that could compose (NFC_Quick_Check Maybe) starts a new span only if
-                # it does not compose with this one; a mark never does.
+                # A character that could compose or reorder (NFC_Quick_Check Maybe, or a mark,
+                # which begins a cluster only after a control) starts a new span only if NFC
+                # leaves the cut alone.
                 before = text[start:index]
-                if not _starter(char) or unicodedata.normalize(
-                    "NFC", before + char
-                ) != unicodedata.normalize("NFC", before) + unicodedata.normalize("NFC", char):
+                if unicodedata.normalize("NFC", before + char) != unicodedata.normalize(
+                    "NFC", before
+                ) + unicodedata.normalize("NFC", char):
                     continue
         spans.append((start, index))
         start = index
@@ -412,27 +417,39 @@ def _folded(text: str) -> _Folded:
     return _Folded("".join(chars), tuple(starts), tuple(ends), tuple(boundary), tuple(space))
 
 
-def normalise(text: str) -> str:
-    """``text`` as quotes are compared: NFC, quotation marks and dashes folded, each run of white
-    space as one space, and a run at either end removed. Nothing else is changed."""
+def _trimmed(text: str) -> tuple[str, tuple[bool, ...]]:
+    """The folded text with the white space runs at either end removed, and which of its
+    characters stand for a run of white space."""
     folded = _folded(text)
     first, last = 0, len(folded.text)
     while first < last and folded.space[first]:
         first += 1
     while last > first and folded.space[last - 1]:
         last -= 1
-    return folded.text[first:last]
+    return folded.text[first:last], folded.space[first:last]
+
+
+def normalise(text: str) -> str:
+    """``text`` as quotes are compared: NFC, quotation marks and dashes folded, each run of white
+    space as one space, and a run at either end removed. Nothing else is changed."""
+    return _trimmed(text)[0]
 
 
 def _find(quote: str, passage: _Folded) -> tuple[int, int] | None:
-    needle = normalise(quote)
+    needle, space = _trimmed(quote)
     if not needle:
         return None
     haystack = passage.text
     at = haystack.find(needle)
     while at != -1:
         after = at + len(needle)
-        if passage.boundary[at] and (after == len(haystack) or passage.boundary[after]):
+        # A match starts and ends on whole characters, and a space in it stands for a run of
+        # white space exactly where the quote's does (a space carrying a mark is not a run).
+        if (
+            passage.boundary[at]
+            and (after == len(haystack) or passage.boundary[after])
+            and passage.space[at:after] == space
+        ):
             return passage.starts[at], passage.ends[after - 1]
         at = haystack.find(needle, at + 1)
     return None
@@ -441,6 +458,18 @@ def _find(quote: str, passage: _Folded) -> tuple[int, int] | None:
 def find_quote(quote: str, text: str) -> tuple[int, int] | None:
     """The span ``(start, end)`` in ``text`` of the first match of ``quote``, or ``None``."""
     return _find(quote, _folded(text))
+
+
+def _status(*, cited: bool, invented: bool, verified: bool) -> SegmentStatus:
+    """A segment's status, by precedence: no label at all is ``uncited``; any label that was not
+    given makes it ``unsupported`` (plan section 11, ADR 0011), whatever its other labels show;
+    otherwise a quote found in a cited passage makes it ``supported`` and anything less
+    ``unverified``."""
+    if not cited:
+        return SegmentStatus.UNCITED
+    if invented:
+        return SegmentStatus.UNSUPPORTED
+    return SegmentStatus.SUPPORTED if verified else SegmentStatus.UNVERIFIED
 
 
 def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAnswer:
@@ -455,6 +484,7 @@ def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAn
         quoted = bool(normalise(segment.quote))
         citations: list[Citation] = []
         seen: set[str] = set()
+        invented = False
         for index, label in enumerate(segment.sources):
             if label in seen:
                 findings.append(Finding(FindingCode.REPEATED_LABEL, position, index))
@@ -463,6 +493,7 @@ def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAn
             source = sources.get(label)
             if source is None:
                 findings.append(Finding(FindingCode.INVENTED_LABEL, position, index))
+                invented = True
                 continue
             span = None
             if quoted:
@@ -482,17 +513,17 @@ def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAn
                     quote_span=span,
                 )
             )
+        # Findings are recorded whatever the status, and the status is decided by precedence
+        # alone (``_status``), so no finding depends on which status won.
         if not segment.sources:
-            status = SegmentStatus.UNCITED
             findings.append(Finding(FindingCode.UNCITED_SEGMENT, position))
-        elif not citations:
-            status = SegmentStatus.UNSUPPORTED
-        elif any(citation.verified for citation in citations):
-            status = SegmentStatus.SUPPORTED
-        else:
-            status = SegmentStatus.UNVERIFIED
-            if not quoted:
-                findings.append(Finding(FindingCode.MISSING_QUOTE, position))
+        if citations and not quoted:
+            findings.append(Finding(FindingCode.MISSING_QUOTE, position))
+        status = _status(
+            cited=bool(segment.sources),
+            invented=invented,
+            verified=any(citation.verified for citation in citations),
+        )
         segments.append(ValidatedSegment(segment.text, segment.quote, tuple(citations), status))
     if answer.insufficient_evidence:
         if segments:
