@@ -1,0 +1,28 @@
+{
+  "fixture": "md-cut-in-table",
+  "about": "The table file cut in the middle of a row",
+  "type": "md",
+  "entry": "markdown",
+  "option": "cp1252",
+  "input_bytes": 65,
+  "input_sha256": "bcdfbff04f3a9e1905c30a0f0d6c0e7595d0e966602325d48dfd2c07273e3b7a",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "utf-8",
+    "pages": [
+      {
+        "number": 1,
+        "text": "# Grades\n\n| Course | Credits | Grade |\n| --- | ---: | :-: |\n| CSE",
+        "headings": [
+          {
+            "level": 1,
+            "title": "Grades",
+            "start": 0,
+            "end": 8,
+            "text_at_offsets": "# Grades"
+          }
+        ]
+      }
+    ]
+  }
+}

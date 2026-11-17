@@ -1,0 +1,20 @@
+{
+  "fixture": "txt-utf8-western-cut-mid-character",
+  "about": "Western accents in UTF-8 cut in the middle of a character: not valid UTF-8, so the whole file is decoded with the fallback code page",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 27,
+  "input_sha256": "96b14daa247d9d75da8d39c74cf42db244faed9ec2e276a6f387c4e93fda4628",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "cp1252",
+    "pages": [
+      {
+        "number": 1,
+        "text": "crÃ¨me brÃ»lÃ©e, naÃ¯ve faÃ",
+        "headings": []
+      }
+    ]
+  }
+}
