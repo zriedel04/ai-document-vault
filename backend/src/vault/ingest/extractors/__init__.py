@@ -2,7 +2,8 @@
 
 Each format has a module of its own (``text`` for TXT and Markdown, ``docx`` for DOCX, ``pdf`` for
 the text layer of a PDF). The ``docx`` module also reads a DOCX's core properties
-(``CoreProperties``) for the metadata stage (``vault.ingest.metadata_stage``).
+(``CoreProperties``), and the ``pdf`` module a PDF's document information dictionary
+(``PdfProperties``), for the metadata stage (``vault.ingest.metadata_stage``).
 What an extractor returns is derived data: it can be rebuilt from the blob at any time, so the
 result records the extractor's version, and a new version re-queues extraction (hash chain).
 
@@ -79,5 +80,22 @@ class CoreProperties:
 
     title: str | None
     creator: str | None
+    created: str | None
+    modified: str | None
+
+
+@dataclass(frozen=True)
+class PdfProperties:
+    """The document information dictionary of a PDF (the trailer's ``Info``), as PDFium decodes it.
+
+    Each is the text of ``Title``, ``Author``, ``CreationDate`` and ``ModDate`` as PDFium returns
+    it (decoded from PDFDocEncoding or UTF-16BE), or None when PDFium gives no text for it or the
+    text is longer than the reader returns (see ``vault.ingest.extractors.pdf``). Nothing here is
+    cleaned or parsed, for the reason ``CoreProperties`` gives: the metadata stage judges every
+    value itself. Defined here so that the server can name the type without importing pypdfium2.
+    """
+
+    title: str | None
+    author: str | None
     created: str | None
     modified: str | None
