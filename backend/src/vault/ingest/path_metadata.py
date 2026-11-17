@@ -119,11 +119,11 @@ def title_from_filename(filename: str) -> str | None:
 
 def resolved_title(first_filename: object, from_file: object = None) -> tuple[str, str] | None:
     """The title a document shows and where it came from, by the resolution order's tiers that
-    exist: the file's own title (``from_file``, a DOCX's ``dc:title`` stored by the metadata
-    stage, source ``FILE_PROPERTIES``), then a title from the file name of its first import
-    (``FILENAME``), or None. The detail panel and the export both read it here, so they never
-    disagree. A value that is not text of 1 to ``MAX_FIELD_CHARS`` characters, or a name that is
-    not text (only a hand edit writes either), is passed over."""
+    exist: the file's own title (``from_file``, a DOCX's ``dc:title`` or a PDF's ``Title`` stored
+    by the metadata stage, source ``FILE_PROPERTIES``), then a title from the file name of its
+    first import (``FILENAME``), or None. The detail panel and the export both read it here, so
+    they never disagree. A value that is not text of 1 to ``MAX_FIELD_CHARS`` characters, or a
+    name that is not text (only a hand edit writes either), is passed over."""
     if type(from_file) is str and 1 <= len(from_file) <= MAX_FIELD_CHARS:
         return from_file, FILE_PROPERTIES
     if not isinstance(first_filename, str):

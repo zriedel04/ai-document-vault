@@ -8,8 +8,8 @@
 
 The layout follows the first import (earliest, ties broken by id: the rule that names a document
 in the library); collections do not exist yet. Each document's title is the one the library
-shows, with its source (``vault.ingest.path_metadata.resolved_title``: a DOCX's own title, else
-the first import's file name), its labels are listed
+shows, with its source (``vault.ingest.path_metadata.resolved_title``: a DOCX's or PDF's own
+title, else the first import's file name), its labels are listed
 in the library's order (``vault.db.labels.label_order``) with their full path, and its file
 properties (``vault.db.fields.NAMES``: the values the metadata stage read from the current version,
 each ``null`` when absent) are listed exactly. Documents in the
