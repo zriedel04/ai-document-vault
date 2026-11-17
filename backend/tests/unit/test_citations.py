@@ -397,6 +397,13 @@ def test_an_empty_source_map_supports_nothing() -> None:
         ("  prototype is due  ", REQUIREMENTS),  # the quote's ends are trimmed
         ("due\u00a0October\u202f15", REQUIREMENTS),  # no-break spaces
         ("week\t14", REQUIREMENTS),
+        # CR LF is one grapheme cluster, made only of white space, so it is a run too.
+        ("final report is due", "final report\r\nis due"),  # CR LF in the passage
+        ("final report\r\nis due", REQUIREMENTS),  # CR LF in the quote
+        ("final report\r\nis due", "final report\r\nis due"),
+        ("a b c d", "a\r\n\r\nb\r\n \tc\n\r\r\nd"),  # runs that mix CR LF, CR and LF
+        ("a\r\n\u00a0\r b", "a b"),
+        ("a b", "a\u2028\r\n\u3000b"),
         ("the team's report", "Read the team\u2019s report."),
         ("the team\u2019s report", "Read the team's report."),
         ('"final"', "The \u201cfinal\u201d draft."),
@@ -457,6 +464,9 @@ def test_quotes_found_after_the_documented_folding(quote: str, text: str) -> Non
         # A space carrying a mark is not a run of white space, and a run is not such a space.
         (" \ufe0f", "a \n\ufe0f"),
         ("a \n\ufe0f", "a \ufe0f"),
+        ("a b", "a\r\n\u0301b"),  # a mark after CR LF stands alone and is not white space
+        ("a \u0301 b", "a \r\n b"),
+        ("a b", "a \u0301b"),  # a space carrying a mark is not a run
     ],
 )
 def test_quotes_not_found_without_over_broad_folding(quote: str, text: str) -> None:
@@ -571,6 +581,9 @@ def test_find_quote_agrees_with_a_brute_force_reference() -> None:
     alphabet = [
         *"ab ",
         "\n",
+        "\r",
+        "\r\n",
+        "\t",
         "\u00a0",
         "\u2019",
         "'",

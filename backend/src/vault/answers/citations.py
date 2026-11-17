@@ -23,12 +23,13 @@ Rules (each failure is a :class:`Finding` with a fixed code and fixed text):
   :func:`normalise` and nothing else, which folds only what a model changes when it copies text:
   Unicode NFC, the curly and low single and double quotation marks to ``'`` and ``"``, the
   hyphens, dashes and minus sign of ``DASHES`` to ``-``, and every run of white space
-  (``WHITESPACE``: space separators, tab, line and paragraph breaks; one that carries a combining
-  mark is compared as it is) to one space, with the quote's ends trimmed. Case, other
-  punctuation, ellipses, primes, compatibility forms (NFKC: ligatures, full-width letters,
-  superscripts), zero-width characters and soft hyphens are compared as they are, so a quote
-  that only matches once those are folded is not found. A match starts and ends on whole
-  characters of the passage, its extended grapheme clusters (UAX #29): ``q`` is not found in ``q``
+  (``WHITESPACE``: space separators, tab, line and paragraph breaks, CR LF included; a white space
+  character that carries a combining mark is compared as it is) to one space, with the quote's
+  ends trimmed. Case, other punctuation, ellipses, primes, compatibility forms (NFKC: ligatures,
+  full-width letters, superscripts), zero-width characters and soft hyphens are compared as they
+  are, so a quote that only matches once those are folded is not found. A match starts and ends
+  on whole characters of the passage, its extended grapheme clusters (UAX #29): ``q`` is not found
+  in ``q``
   with a combining tilde, a consonant without its vowel sign, an emoji without its variation
   selector, modifier or the rest of its ZWJ sequence, or one regional indicator of a flag. Its
   span is given in code points of the passage text as it was sent, for the highlight.
@@ -394,9 +395,10 @@ def _folded(text: str) -> _Folded:
     boundary: list[bool] = []
     space: list[bool] = []
     for start, end in _characters(text):
-        # Only a white space character on its own is white space: one that carries a combining
-        # mark is compared as it is, so a mark is never cut from the character it sits on.
-        if end - start == 1 and text[start] in WHITESPACE:
+        # A cluster made only of white space (one character, or CR LF, which UAX #29 keeps
+        # together) is white space; one that carries a combining mark or any other character is
+        # compared as it is, so a mark is never cut from the character it sits on.
+        if all(char in WHITESPACE for char in text[start:end]):
             # A run counts as one space. A match never starts or ends on one (the quote's ends
             # are trimmed), so the span of a run is never needed.
             if not (space and space[-1]):
