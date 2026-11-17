@@ -33,5 +33,16 @@ chunk = 1
 embed = 1
 enrich = 2
 
+[retrieval]
+# Hybrid search (plan section 8). Not used yet: search is keyword only until vectors exist.
+# Whole numbers only (no quotes, no decimal point).
+# How many hits of keyword search and of vector search are fused (1 to 500 each).
+keyword_candidates = 50
+vector_candidates = 50
+# Reciprocal Rank Fusion: a chunk scores 1 / (rrf_k + rank) in each list it is in (0 to 1000).
+rrf_k = 60
+# At most this many chunks of one document in the results (1 to 100).
+max_chunks_per_document = 3
+
 [logging]
 level = "INFO"
