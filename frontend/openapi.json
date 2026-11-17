@@ -857,6 +857,8 @@
         "type": "object"
       },
       "SearchRequest": {
+        "additionalProperties": false,
+        "description": "A search; an unknown key (a misspelt filter) is refused, never ignored.",
         "properties": {
           "imported_from": {
             "anyOf": [
