@@ -7,13 +7,19 @@
   "input_bytes": 1162,
   "input_sha256": "f2a2821b9dfe44a34a3cac8e16bc29b32f10a07cf4f2e67f90666f5e5f29aa18",
   "result": {
-    "extractor": "pdf-1",
+    "extractor": "pdf-2",
     "encoding": null,
     "pages": [
       {
         "number": 1,
         "text": "Two column page\nField notes on the river\nsurvey began in early\nspring, when the water\nwas high.\nThe second column lists\nthe stations sampled\neach week and the\nreadings taken there.",
-        "headings": []
+        "headings": [],
+        "layer": {
+          "width": 612.0,
+          "height": 792.0,
+          "unmapped": 0
+        },
+        "text_layer": "usable"
       }
     ]
   }

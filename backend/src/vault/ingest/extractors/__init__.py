@@ -45,12 +45,29 @@ class Heading:
 
 
 @dataclass(frozen=True)
+class PageLayer:
+    """What the PDF extractor measured of a page for the OCR decision (``vault.ingest.text_layer``).
+
+    ``width`` and ``height`` are the page's size in points, as PDFium gives it, each taken between
+    3 and 14,400 (``text_layer.side``). ``unmapped`` counts the page's glyphs that PDFium found no
+    Unicode mapping for and that read as a letter, number or mark (PDFium gives such a glyph its
+    raw character code), so the rule does not count them as readable text.
+    """
+
+    width: float
+    height: float
+    unmapped: int
+
+
+@dataclass(frozen=True)
 class Page:
-    """One page of a document. ``number`` counts from 1."""
+    """One page of a document. ``number`` counts from 1. ``layer`` is the PDF extractor's
+    measurement of the page's text layer, and ``None`` from every other extractor."""
 
     number: int
     text: str
     headings: tuple[Heading, ...] = ()
+    layer: PageLayer | None = None
 
 
 @dataclass(frozen=True)
