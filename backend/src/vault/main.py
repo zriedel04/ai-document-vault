@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -25,6 +26,7 @@ from vault.core.config import Settings, load_settings
 from vault.core.headers import SecurityHeadersMiddleware
 from vault.core.logging import configure_logging, log_event, metric
 from vault.core.security import LocalSecurityMiddleware, load_or_create_token, new_token
+from vault.db.chunks import chunk_entries
 from vault.db.engine import create_vault_engine
 from vault.db.migrate import upgrade_to_latest
 from vault.ingest import chunk_stage, extract_stage, metadata_stage
@@ -34,6 +36,7 @@ from vault.ingest.path_metadata import label_pending_sources
 from vault.jobs.queue import JobQueue, utc_now
 from vault.jobs.sandbox import SandboxLimits
 from vault.jobs.worker import WorkerPool
+from vault.retrieval import vectors
 from vault.storage.blobs import BlobStore
 from vault.storage.layout import ensure_vault
 from vault.web import INDEX, find_file, install_frontend
@@ -52,12 +55,14 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     With ``vault.path`` set, the vault folder is validated and created, the install's token is read
     (or created), the blob store recovers from a crash (leftover copies and locks are removed, then
     every blob is made read-only again), the database is migrated, blobs that no database row uses
-    are moved to ``blobs/orphans/``, jobs that a killed process left running are queued again,
+    are moved to ``blobs/orphans/``, vectors in ``index.db`` whose chunk is gone are removed (or a
+    damaged ``index.db`` is emptied), jobs that a killed process left running are queued again,
     import sources recorded before folder labels existed get their labels (once) and documents
     whose file properties were never read get a ``metadata`` job, all before the first request.
     The worker pool (``vault.jobs.worker``) starts with the server and is stopped when it shuts
     down. A bad vault folder (inside a Git repository, say) or a
-    damaged blob store (the temporary folder is a link) stops the start-up.
+    damaged blob store (the temporary folder is a link) or a link where ``index.db`` belongs stops
+    the start-up.
     Without a vault (demo mode, tests) there is no database and the token is random for this
     process only, so only the open endpoints work.
 
@@ -68,6 +73,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     configure_logging(settings.logging.level)
 
     engine = None
+    index_db = None
     blobs = None
     importer = None
     workers = None
@@ -98,6 +104,10 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
             failed=metric(orphans.failed),
             strays=metric(orphans.strays),
         )
+        # Before any request: vectors a crash left after a permanent delete are removed.
+        index_db = paths.index_db
+        swept = vectors.sweep(index_db, partial(chunk_entries, engine))
+        log_event(logger, "vectors.swept", removed=metric(swept.removed), rebuilt=swept.rebuilt)
         # Before any import can run: sources recorded before folder labels existed get theirs.
         backfill = label_pending_sources(engine, utc_now())
         if backfill is not None:
@@ -161,6 +171,7 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     app.state.token = token
     app.state.engine = engine
     app.state.blobs = blobs
+    app.state.index_db = index_db
     app.state.importer = importer
     app.state.workers = workers
     app.state.upload_slots = anyio.Semaphore(imports.UPLOAD_SLOTS)
