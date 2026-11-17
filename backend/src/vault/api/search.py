@@ -11,6 +11,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, WithJsonSchema
 from sqlalchemy import Engine
 
+from vault.api.models import RequestBody
 from vault.core.security import LocalUser, current_user
 from vault.db.labels import UnknownLabelError
 from vault.retrieval import keyword
@@ -48,12 +49,14 @@ Instant = Annotated[
 ]
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(RequestBody):
+    """A search; an unknown key (a misspelt filter) is refused, never ignored."""
+
     query: str
     limit: Annotated[int, Field(ge=1, le=MAX_PAGE)] = DEFAULT_PAGE
     offset: Annotated[int, Field(ge=0, le=MAX_OFFSET)] = 0
     # Only documents of these types; empty or left out means every type.
-    types: Annotated[list[Extension], Field(max_length=10)] = []
+    types: Annotated[list[Extension], Field(max_length=10)] = []  # noqa: RUF012 - a pydantic default
     # Only documents that carry this label (an id from GET /api/labels) or a label below it;
     # left out or null means every document.
     label: str | None = None
