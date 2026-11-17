@@ -43,6 +43,12 @@ import {
 } from "../api/documents";
 import { useSessionState } from "../api/session-context";
 import { loadDocument, useDocument } from "../api/useDocuments";
+import {
+  PATH_SEPARATOR,
+  TITLE_SOURCE_TEXT,
+  folderPaths,
+  formatPropertyDate,
+} from "./document-fields";
 import { DEFAULT_SEARCH } from "./documents-search";
 import { isImageType } from "./image-limits";
 import { ImageView } from "./ImageView";
@@ -86,8 +92,9 @@ interface PdfPlace {
 }
 
 /**
- * One document: what the list shows, plus its hash, version, every import and its jobs, then the
- * original in the PDF viewer for a PDF, or the extracted text for any other document.
+ * One document: what the list shows, plus its title, folders and file properties, its hash,
+ * version, every import and its jobs, then the original in the PDF viewer for a PDF, or the
+ * extracted text for any other document.
  */
 export function DocumentDetail({ documentId, ...place }: { documentId: string } & PdfPlace) {
   const { state: session } = useSessionState();
@@ -136,6 +143,66 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
         {children}
       </Text>
     </div>
+  );
+}
+
+// Text from the document (its title, author, folder names) may be long, have no spaces, or run
+// right to left: it wraps anywhere, and each piece takes its own direction (`dir="auto"`, `bdi`)
+// so it cannot reorder the text around it. It is always a React text child, never markup.
+const UNTRUSTED_STYLE = { overflowWrap: "anywhere", wordBreak: "break-word" } as const;
+
+/** One folder path, outermost first, each name isolated so a right-to-left one stays in place. */
+function FolderPath({ path }: { path: readonly string[] }) {
+  return (
+    <Text size="sm" component="div" style={UNTRUSTED_STYLE}>
+      {path.map((name, index) => (
+        // The same name can sit at two levels, so the level is the key.
+        <span key={String(index)}>
+          {index > 0 && PATH_SEPARATOR}
+          <bdi>{name}</bdi>
+        </span>
+      ))}
+    </Text>
+  );
+}
+
+/** The title, folders and file properties the backend found for the document. */
+function AboutFields({ document }: { document: Detail }) {
+  const { title, file_properties: properties } = document;
+  const paths = folderPaths(document.labels);
+  return (
+    <>
+      {title !== null && (
+        <Field label="Title">
+          <div style={UNTRUSTED_STYLE}>
+            <bdi>{title.value}</bdi>
+          </div>
+          <Text size="xs" c="dimmed">
+            {TITLE_SOURCE_TEXT[title.source]}
+          </Text>
+        </Field>
+      )}
+      {properties.author !== null && (
+        <Field label="Author">
+          <div style={UNTRUSTED_STYLE}>
+            <bdi>{properties.author}</bdi>
+          </div>
+        </Field>
+      )}
+      {properties.created !== null && (
+        <Field label="Created (file property)">{formatPropertyDate(properties.created)}</Field>
+      )}
+      {properties.modified !== null && (
+        <Field label="Modified (file property)">{formatPropertyDate(properties.modified)}</Field>
+      )}
+      {paths.length > 0 && (
+        <Field label={paths.length === 1 ? "Folder" : "Folders"}>
+          {paths.map((path) => (
+            <FolderPath key={path.join("\u0000")} path={path} />
+          ))}
+        </Field>
+      )}
+    </>
   );
 }
 
@@ -419,6 +486,7 @@ function Details({
       )}
       <Card withBorder>
         <SimpleGrid cols={{ base: 1, sm: 3 }}>
+          <AboutFields document={document} />
           <Field label="Status">
             <Badge variant="light" color={document.state === "failed" ? "red" : "gray"}>
               {STATE_LABEL[document.state]}
