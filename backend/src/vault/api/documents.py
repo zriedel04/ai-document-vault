@@ -208,10 +208,11 @@ class Title(BaseModel):
 
 
 class FileProperties(BaseModel):
-    """What the current version's bytes say about themselves (a DOCX's core properties), each
-    cleaned as untrusted text, or null when the file does not say it or says it in a form the
-    vault does not take. ``created`` and ``modified`` are W3CDTF: a year, a month, a day, or a
-    time in UTC to the second (``2026-03-04T05:06:07Z``)."""
+    """What the current version's bytes say about themselves (a DOCX's core properties, a PDF's
+    document information dictionary), each cleaned as untrusted text, or null when the file does
+    not say it or says it in a form the vault does not take. ``created`` and ``modified`` are in
+    W3CDTF's forms, whichever format the file states them in: a year, a month, a day, or a time
+    in UTC to the second (``2026-03-04T05:06:07Z``)."""
 
     title: str | None
     author: str | None
