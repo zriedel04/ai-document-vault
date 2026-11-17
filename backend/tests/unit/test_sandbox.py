@@ -32,7 +32,7 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 import pytest
 
 from vault.core.config import ProcessingSettings, Settings
-from vault.ingest.extractors import CoreProperties, Extraction
+from vault.ingest.extractors import CoreProperties, Extraction, PdfProperties
 from vault.ingest.extractors.text import FALLBACK_ENCODINGS
 from vault.jobs import sandbox, sandbox_child, sandbox_probes
 from vault.jobs.sandbox import (
@@ -1305,15 +1305,27 @@ def test_an_entry_not_on_the_allowlist_is_refused() -> None:
 
 
 def test_the_production_allowlist_holds_the_stages_entry_points_and_the_child_finds_each() -> None:
-    """The extractors, and the metadata stage's DOCX reader, from whose answer the server builds
-    nothing but ``CoreProperties``."""
-    assert set(sandbox.ENTRY_POINTS) == {"text", "markdown", "docx", "pdf", "docx_properties"}
+    """The extractors, and the metadata stage's DOCX and PDF readers, from whose answers the
+    server builds nothing but ``CoreProperties`` and ``PdfProperties``."""
+    assert set(sandbox.ENTRY_POINTS) == {
+        "text",
+        "markdown",
+        "docx",
+        "pdf",
+        "docx_properties",
+        "pdf_properties",
+    }
     assert sandbox.ENTRY_POINTS["docx_properties"] == sandbox.EntryPoint(
         "vault.ingest.extractors.docx:read_properties", CoreProperties
     )
+    assert sandbox.ENTRY_POINTS["pdf_properties"] == sandbox.EntryPoint(
+        "vault.ingest.extractors.pdf:read_properties", PdfProperties
+    )
+    readers = {"docx_properties": CoreProperties, "pdf_properties": PdfProperties}
     for name, point in sandbox.ENTRY_POINTS.items():
-        expected = CoreProperties if name == "docx_properties" else Extraction
+        expected = readers.get(name, Extraction)
         assert point.result_type is expected
+        assert point.options == frozenset() or name in {"text", "markdown"}
         assert sandbox_child.resolve(point.target) is not None
     assert sandbox.ENTRY_POINTS["text"].options == FALLBACK_ENCODINGS
     assert sandbox.ENTRY_POINTS["markdown"].options == FALLBACK_ENCODINGS

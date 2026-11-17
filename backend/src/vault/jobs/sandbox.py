@@ -118,7 +118,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING, Final
 
-from vault.ingest.extractors import CoreProperties, Extraction
+from vault.ingest.extractors import CoreProperties, Extraction, PdfProperties
 from vault.ingest.extractors.text import FALLBACK_ENCODINGS
 from vault.jobs import sandbox_child as child
 
@@ -464,9 +464,11 @@ class EntryPoint:
 
 # The functions the stages run: the extractors of the extraction stage (vault.ingest.extract_stage),
 # whose text extractors take the configured fallback code page as their option, and the metadata
-# stage's reader of a DOCX's core properties (vault.ingest.metadata_stage). The PDF extractor runs
-# with its default caps (``vault.ingest.validate.DEFAULT_LIMITS``), which keep its largest answer
-# inside this module's default caps on an answer.
+# stage's readers of a DOCX's core properties and a PDF's document information dictionary
+# (vault.ingest.metadata_stage). The PDF extractor runs with its default caps
+# (``vault.ingest.validate.DEFAULT_LIMITS``), which keep its largest answer inside this module's
+# default caps on an answer; the PDF properties reader bounds each value it returns
+# (``vault.ingest.extractors.pdf.MAX_PROPERTY_UNITS``).
 ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
     {
         "text": EntryPoint(
@@ -480,6 +482,7 @@ ENTRY_POINTS: Final[Mapping[str, EntryPoint]] = MappingProxyType(
         "docx_properties": EntryPoint(
             "vault.ingest.extractors.docx:read_properties", CoreProperties
         ),
+        "pdf_properties": EntryPoint("vault.ingest.extractors.pdf:read_properties", PdfProperties),
     }
 )
 

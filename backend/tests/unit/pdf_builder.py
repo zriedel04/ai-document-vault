@@ -3,8 +3,9 @@
 Small and fully controlled: pages with text in a standard font (Helvetica, no font file), pages
 with no text layer, an optional ``ToUnicode`` map (to give PDFium any characters), an optional
 font encoding with glyph names PDFium does not know (glyphs with no Unicode mapping), pages of any
-size, a page tree that
-claims more pages than it holds, and the standard security handler (revision 2, RC4 with a 40-bit
+size, a page tree that claims more pages than it holds, a document information dictionary
+(``Info``, its strings given as bytes and encrypted with the file, or its source written as is),
+and the standard security handler (revision 2, RC4 with a 40-bit
 key, ISO 32000-1 section 7.6.3), with a user password or an owner password only.
 """
 
@@ -72,13 +73,18 @@ def build(
     claimed_pages: int | None = None,
     unknown_glyphs: range | None = None,
     sizes: Sequence[tuple[float, float]] | None = None,
+    info: dict[str, bytes] | None = None,
+    info_source: bytes | None = None,
 ) -> bytes:
     """A PDF with one page per item of ``pages``: a content stream, or None for a page with no
     content at all. ``user_password`` encrypts the file (``b""`` for an owner password only);
     ``claimed_pages`` is the page count the page tree claims. ``unknown_glyphs`` gives the font an
     encoding that names each of those one-byte codes with a glyph name PDFium does not know
     (``/g1``, ``/g2`` ...), so PDFium has no Unicode for them and gives their raw codes. ``sizes``
-    is each page's width and height in points (US Letter, 612 by 792, by default)."""
+    is each page's width and height in points (US Letter, 612 by 792, by default). ``info`` gives
+    the trailer an ``Info`` dictionary whose entries are strings of exactly these bytes (written
+    in hex, and encrypted when the file is); ``info_source`` gives it one written as is instead
+    (names, numbers, a key twice), never encrypted."""
     objects: dict[int, bytes] = {}
     streams: dict[int, bytes] = {}
     catalog, tree, font = 1, 2, 3
@@ -109,6 +115,9 @@ def build(
         streams[map_id] = to_unicode
         font_entries += f" /ToUnicode {map_id} 0 R"
     objects[font] = f"<< {font_entries} >>".encode()
+    info_id: int | None = None
+    if info is not None or info_source is not None:
+        info_id, next_id = next_id, next_id + 1
 
     key: bytes | None = None
     encrypt_id: int | None = None
@@ -125,17 +134,31 @@ def build(
             f"/U <{user_value.hex()}> /P {_PERMISSIONS} >>"
         ).encode()
 
+    def encrypted(number: int, data: bytes) -> bytes:
+        if key is None:
+            return data
+        object_key = hashlib.md5(  # noqa: S324
+            key + struct.pack("<I", number)[:3] + b"\x00\x00"
+        ).digest()[: len(key) + 5]
+        return rc4(object_key, data)
+
+    if info_id is not None:
+        if info_source is not None:
+            objects[info_id] = info_source
+        else:
+            assert info is not None
+            entries = b" ".join(
+                f"/{name} <{encrypted(info_id, value).hex()}>".encode()
+                for name, value in info.items()
+            )
+            objects[info_id] = b"<< " + entries + b" >>"
+
     out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets: dict[int, int] = {}
     for number in sorted(objects.keys() | streams.keys()):
         offsets[number] = len(out)
         if number in streams:
-            data = streams[number]
-            if key is not None:
-                object_key = hashlib.md5(  # noqa: S324
-                    key + struct.pack("<I", number)[:3] + b"\x00\x00"
-                ).digest()[: len(key) + 5]
-                data = rc4(object_key, data)
+            data = encrypted(number, streams[number])
             body = f"<< /Length {len(data)} >>\nstream\n".encode() + data + b"\nendstream"
         else:
             body = objects[number]
@@ -148,5 +171,7 @@ def build(
     trailer = f"<< /Size {size} /Root {catalog} 0 R /ID [<{_FILE_ID.hex()}> <{_FILE_ID.hex()}>]"
     if encrypt_id is not None:
         trailer += f" /Encrypt {encrypt_id} 0 R"
+    if info_id is not None:
+        trailer += f" /Info {info_id} 0 R"
     out += f"trailer\n{trailer} >>\nstartxref\n{xref}\n%%EOF\n".encode()
     return bytes(out)

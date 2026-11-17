@@ -244,8 +244,11 @@ def test_a_pdf_file_is_extracted_with_its_empty_pages_and_queues_the_chunk_job(
         PageText(2, "", text_layer="empty"),
         PageText(3, "", text_layer="empty"),
     )
-    [_extract, chunk] = jobs_of(engine, document_id)
-    assert (chunk.stage, chunk.status, chunk.input_hash) == (CHUNK_STAGE, "queued", sha256)
+    # A PDF also has its metadata job, queued at import (vault.ingest.metadata_stage).
+    by_stage = {row.stage: row for row in jobs_of(engine, document_id)}
+    assert sorted(by_stage) == ["chunk", "extract", "metadata"]
+    chunk = by_stage[CHUNK_STAGE]
+    assert (chunk.status, chunk.input_hash) == ("queued", sha256)
 
 
 def test_a_pdf_with_no_text_layer_at_all_is_stored_as_empty_pages(

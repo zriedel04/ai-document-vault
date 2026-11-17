@@ -1,4 +1,5 @@
-"""PDF: the text layer of each page, read with pypdfium2 (PDFium).
+"""PDF: the text layer of each page, and the document's own properties, read with pypdfium2
+(PDFium).
 
 The library is the one ADR 0012 (Accepted) names for PDF text. Whether it extracts well enough on
 real documents is ADR 0015, which is still Proposed until the owner's PDF spike has run, so this
@@ -21,12 +22,12 @@ What the text holds:
 - Each page also carries its measurements for the OCR decision (``Page.layer``, a ``PageLayer``):
   its width and height in points (``FPDF_GetPageWidthF`` and ``HeightF``; the rule uses only
   their product, the area, which a rotation does not change; each taken between 3 and 14,400
-  points, ``text_layer.side``), and how many of its
-  glyphs PDFium flags as having no Unicode mapping (``FPDFText_HasUnicodeMapError``) while their
-  character reads as a letter, number or mark (``text_layer.is_readable``), at most the readable
-  characters of the stored text. The extraction stage decides from them and the text whether the
-  page needs OCR (``vault.ingest.text_layer``, plan section 7: "a PDF page is OCRed only if its
-  text layer is empty or obviously garbage"); nothing here runs OCR.
+  points, ``text_layer.side``), and how many of its glyphs PDFium flags as having no Unicode
+  mapping (``FPDFText_HasUnicodeMapError``) while their character reads as a letter, number or
+  mark (``text_layer.is_readable``), at most the readable characters of the stored text. The
+  extraction stage decides from them and the text whether the page needs OCR
+  (``vault.ingest.text_layer``, plan section 7: "a PDF page is OCRed only if its text layer is
+  empty or obviously garbage"); nothing here runs OCR.
 
 Refused, each with an error class of its own and fixed text, never the file's name or content, and
 without the library's exception attached (its message is not kept):
@@ -46,6 +47,33 @@ without the library's exception attached (its message is not kept):
   that claims more pages than it holds, say): the file is refused rather than stored without that
   page.
 
+``read_properties`` reads the document information dictionary (the trailer's ``Info``) for the
+metadata stage (``vault.ingest.metadata_stage``): ``Title``, ``Author``, ``CreationDate`` and
+``ModDate``, through ``FPDF_GetMetaText``. XMP metadata (the catalog's ``Metadata`` stream) is not
+read, so a file that states its properties only there has none. The bytes are checked and opened
+exactly as ``extract`` opens them, so a PDF that needs a password, or that PDFium cannot parse,
+raises the same error (``EncryptedPdfError``, ``NotPdfError``); its pages are not loaded, so a PDF
+with no pages, or a page PDFium cannot load, still has its properties read (extraction refuses
+it). What PDFium does with each entry, which the tests pin:
+
+- A text string is decoded by its form (ISO 32000-1, 7.9.2.2): UTF-16BE after the byte order
+  mark ``FE FF``, otherwise PDFDocEncoding (Annex D), with the codes that encoding leaves
+  undefined given as U+0000. PDFium also takes two marks the standard does not have in PDF 1.7:
+  UTF-8 after ``EF BB BF`` (PDF 2.0) and UTF-16LE after ``FF FE``. A UTF-16 unit that is half of
+  a pair is replaced by U+FFFD here, so the text is always storable.
+- A name is read as its text (``/Foo#20Bar`` reads ``Foo Bar``); a number, a boolean, null, an
+  array, a dictionary and a reference to an object that does not exist give no text; an entry
+  written twice gives the last one; a missing or empty entry, an ``Info`` that is not a
+  dictionary, and a file with no ``Info``, give no text. Each of these
+  comes back as None, never as an empty string.
+- A value longer than ``MAX_PROPERTY_UNITS`` UTF-16 units is None (left out, not cut), so the
+  four values always fit the sandbox's caps on an answer; the stage keeps at most 255 characters
+  of a name anyway.
+
+The value is returned as PDFium gives it: nothing is cleaned and no date is parsed, because the
+answer comes from the sandbox, which a hostile file may control, so the metadata stage judges
+every value itself.
+
 Time and memory are bounded by the process that runs the extractor: the sandbox (``vault.jobs.
 sandbox``) with its timeout and memory cap. PDFium is not thread safe, so one lock serialises every
 call into it within a process; the sandbox runs each extraction in a process of its own anyway.
@@ -53,6 +81,7 @@ call into it within a process; the sandbox runs each extraction in a process of 
 
 from __future__ import annotations
 
+import ctypes
 import re
 import sys
 import threading
@@ -62,7 +91,7 @@ import pypdfium2
 import pypdfium2.raw as pdfium_c
 
 from vault.ingest import text_layer
-from vault.ingest.extractors import Extraction, ExtractionError, Page, PageLayer
+from vault.ingest.extractors import Extraction, ExtractionError, Page, PageLayer, PdfProperties
 from vault.ingest.validate import DEFAULT_LIMITS, PDF_HEADER, Limits, Reason
 
 # pdf-2 adds the measurements of each page's text layer (``Page.layer``); pdf-1 had none.
@@ -77,6 +106,16 @@ _LINE_BREAK: Final = re.compile(r"\r\n?")
 _NOT_TEXT: Final = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f￾￿]")
 _PASSWORD_ERRORS: Final = frozenset({pdfium_c.FPDF_ERR_PASSWORD, pdfium_c.FPDF_ERR_SECURITY})
 _LOCK: Final = threading.Lock()
+# The entries of the document information dictionary read, by the field of ``PdfProperties`` each
+# fills.
+PROPERTIES: Final = {
+    "title": "Title",
+    "author": "Author",
+    "created": "CreationDate",
+    "modified": "ModDate",
+}
+# The longest property value returned, in UTF-16 units; a longer one is None.
+MAX_PROPERTY_UNITS: Final = 65_536
 
 
 class NotPdfError(ExtractionError):
@@ -116,17 +155,36 @@ class PdfLimitError(ExtractionError):
 
 def extract(data: bytes, limits: Limits = DEFAULT_LIMITS) -> Extraction:
     """One page for each page of the PDF in ``data``, with the text of its text layer."""
+    _check(data, limits)
+    with _LOCK:
+        return Extraction(VERSION, _pages(data, limits))
+
+
+def read_properties(data: bytes, limits: Limits = DEFAULT_LIMITS) -> PdfProperties:
+    """The document information dictionary of the PDF in ``data``, each value as PDFium gives it
+    or None (see the module)."""
+    _check(data, limits)
+    with _LOCK:
+        document = _open(data)
+        try:
+            values = {field: _meta_text(document, key) for field, key in PROPERTIES.items()}
+        finally:
+            document.close()  # as in ``_pages``: ``data`` is referenced until here
+    return PdfProperties(**values)
+
+
+def _check(data: bytes, limits: Limits) -> None:
+    """The validator's rules for a PDF that hold before PDFium sees the bytes."""
     if not data:
         raise NotPdfError(Reason.EMPTY)
     if len(data) > limits.max_bytes:
         raise NotPdfError(Reason.TOO_LARGE)
     if not PDF_HEADER.match(data):
         raise NotPdfError(Reason.CONTENT_MISMATCH)
-    with _LOCK:
-        return Extraction(VERSION, _pages(data, limits))
 
 
-def _pages(data: bytes, limits: Limits) -> tuple[Page, ...]:
+def _open(data: bytes) -> pypdfium2.PdfDocument:
+    """The PDF in ``data`` opened without a password, which the caller closes."""
     # The raw call, not ``PdfDocument(data)``: that wrapper reads PDFium's last error also when
     # the document opened with no pages, and PDFium does not clear it on success, so a file with no
     # pages read after an encrypted one would be reported as encrypted.
@@ -136,7 +194,26 @@ def _pages(data: bytes, limits: Limits) -> tuple[Page, ...]:
             raise EncryptedPdfError
         raise NotPdfError
     # The wrapper owns the document from here and closes it once (``close`` detaches its finalizer).
-    document = pypdfium2.PdfDocument(raw)
+    return pypdfium2.PdfDocument(raw)
+
+
+def _meta_text(document: pypdfium2.PdfDocument, key: str) -> str | None:
+    """The text PDFium gives for the entry ``key`` of the document information dictionary, or
+    None when it gives none or more than ``MAX_PROPERTY_UNITS`` UTF-16 units."""
+    tag = key.encode("ascii") + b"\0"
+    # The size in bytes of the value in UTF-16LE with its two-byte terminator, asked first so that
+    # a value over the bound is never copied out of PDFium.
+    size = pdfium_c.FPDF_GetMetaText(document, tag, None, 0)
+    if size <= 2 or size % 2 or size - 2 > 2 * MAX_PROPERTY_UNITS:
+        return None
+    buffer = ctypes.create_string_buffer(size)
+    if pdfium_c.FPDF_GetMetaText(document, tag, buffer, size) != size:
+        return None
+    return buffer.raw[: size - 2].decode("utf-16-le", errors="replace")
+
+
+def _pages(data: bytes, limits: Limits) -> tuple[Page, ...]:
+    document = _open(data)
     try:
         count = len(document)
         if count < 1:
