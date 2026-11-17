@@ -106,6 +106,13 @@ TRANSLATED: dict[str, tuple[str, str, str]] = {
         "(Apache-2.0 WITH LLVM-exception), fast_float, simdutf and AGG, all permissive; the GPL "
         "text in ICU's file covers build scripts (autoconf exceptions), not the library.",
     ),
+    "sqlite-vec": (
+        "MIT License, Apache License, Version 2.0",
+        "MIT OR Apache-2.0",
+        "ADR 0019 records sqlite-vec 0.1.9 for the vectors in index.db (ADR 0004) under "
+        "MIT OR Apache-2.0, as the plan's licence table lists it; the wheel is one SQLite "
+        "extension built from sqlite-vec's own C source and bundles no other library.",
+    ),
 }
 
 CLASSIFIER_PREFIX = "License :: "

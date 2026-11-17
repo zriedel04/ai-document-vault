@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from functools import partial
+from pathlib import Path
 from typing import Annotated, Final, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -369,9 +371,12 @@ async def delete_document(
     sweep moves such a file to ``blobs/orphans/`` (``vault.storage.purge``)."""
     engine: Engine | None = request.app.state.engine
     store: BlobStore | None = request.app.state.blobs
-    if engine is None or store is None:
+    index_db: Path | None = request.app.state.index_db
+    if engine is None or store is None or index_db is None:
         raise HTTPException(status_code=503, detail="no vault is open")
-    result = await run_in_threadpool(purge_document, engine, store, document_id)
+    result = await run_in_threadpool(
+        partial(purge_document, index_db=index_db), engine, store, document_id
+    )
     if isinstance(result, DeleteRefusal):
         if result is DeleteRefusal.NOT_IN_TRASH:
             raise HTTPException(status_code=409, detail="the document is not in the trash")
@@ -383,6 +388,8 @@ async def delete_document(
         blobs_removed=metric(result.blobs_removed),
         blobs_kept=metric(result.blobs_kept),
         blobs_left=metric(result.blobs_left),
+        vectors_removed=metric(result.vectors_removed),
+        vectors_left=result.vectors_left,
     )
     return Response(status_code=204)
 

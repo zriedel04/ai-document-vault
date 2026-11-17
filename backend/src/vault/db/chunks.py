@@ -142,3 +142,11 @@ def write_chunks(
                 for chunk in checked
             ],
         )
+
+
+def chunk_entries(engine: Engine) -> set[tuple[int, str, str]]:
+    """Every chunk as (id, document id, version id): what a vector in ``index.db`` may stand for
+    (``vault.retrieval.vectors.sweep``)."""
+    with engine.connect() as connection:
+        rows = connection.execute(select(chunks.c.id, chunks.c.document_id, chunks.c.version_id))
+        return {(int(chunk), str(document), str(version)) for chunk, document, version in rows}

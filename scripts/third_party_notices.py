@@ -119,6 +119,12 @@ OVERRIDES: dict[str, tuple[str, str]] = {
         "author added to the upstream repository (github.com/theKashey/react-remove-scroll-bar, "
         "commit 7301c16, 2025-05-21).",
     ),
+    "python:sqlite-vec": (
+        "sqlite-vec.LICENSE",
+        "The package declares MIT and Apache-2.0 but its wheels (Linux and Windows) ship no licence "
+        "file. These are LICENSE-MIT and LICENSE-APACHE from the upstream repository "
+        "(github.com/asg017/sqlite-vec, tag v0.1.9), the release the lockfile pins.",
+    ),
 }
 
 HEADER = """# Third-party notices
