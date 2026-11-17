@@ -223,10 +223,7 @@ class TranslatedTest(unittest.TestCase):
                 self.assertEqual(len(licences.violations([other], strict=True)), 1)
 
     def test_every_translation_is_an_allowed_expression_from_an_accepted_adr(self) -> None:
-        # The ADR must choose the package; each licence of the expression must be named by the ADR
-        # or by the package's own row in the plan's licence table (section 21).
         decisions = SCRIPTS.parent / "docs" / "decisions"
-        plan = (SCRIPTS.parent / "docs" / "architecture.md").read_text(encoding="utf-8")
         for name, (field, expression, reason) in licences.TRANSLATED.items():
             with self.subTest(package=name):
                 self.assertEqual(name, licences.normalise(name))
@@ -238,11 +235,8 @@ class TranslatedTest(unittest.TestCase):
                 text = adr.read_text(encoding="utf-8")
                 self.assertIn("- Status: Accepted\n", text)
                 self.assertIn(name, text)
-                rows = [line for line in plan.splitlines() if line.startswith(f"| {name} | ")]
-                self.assertLessEqual(len(rows), 1)
-                licence_row = rows[0].split(" | ")[1] if rows else ""
                 for spdx in expression.split(" OR "):
-                    self.assertTrue(spdx in text or spdx in licence_row, spdx)
+                    self.assertIn(spdx, text)
 
 
 class EnvironmentTest(unittest.TestCase):

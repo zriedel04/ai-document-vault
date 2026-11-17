@@ -92,8 +92,7 @@ REVIEWED: dict[str, tuple[str, str]] = {
 # Free-text `License` fields that name allowed licences in words the check cannot parse, each tied
 # to one package and translated to the SPDX expression it means. Key: normalised package name.
 # Value: the field exactly as the package writes it, the expression, and the Accepted ADR that
-# reviewed the package (the licence itself may be named instead by the plan's licence table,
-# docs/architecture.md section 21). Unlike REVIEWED this is not an exception: the expression must still pass
+# reviewed the package. Unlike REVIEWED this is not an exception: the expression must still pass
 # the allowed list, so it holds under --strict too. A package that writes any other value, or
 # gains an expression or licence classifiers (which win over the field), is judged by those.
 TRANSLATED: dict[str, tuple[str, str, str]] = {
@@ -110,10 +109,9 @@ TRANSLATED: dict[str, tuple[str, str, str]] = {
     "sqlite-vec": (
         "MIT License, Apache License, Version 2.0",
         "MIT OR Apache-2.0",
-        "ADR 0004 chooses sqlite-vec for the vectors in index.db; docs/architecture.md section 21 "
-        "lists its licence as MIT or Apache-2.0, which the upstream repository's LICENSE-MIT and "
-        "LICENSE-APACHE give. The wheel is one SQLite extension built from sqlite-vec's own C "
-        "source (vec0.so, vec0.dll) and bundles no other library.",
+        "ADR 0019 records sqlite-vec 0.1.9 for the vectors in index.db (ADR 0004) under "
+        "MIT OR Apache-2.0, as the plan's licence table lists it; the wheel is one SQLite "
+        "extension built from sqlite-vec's own C source and bundles no other library.",
     ),
 }
 
