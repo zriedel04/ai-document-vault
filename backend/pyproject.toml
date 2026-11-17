@@ -15,6 +15,7 @@ dependencies = [
     "pypdfium2>=5.14",
     "python-docx>=1.2",
     "sqlalchemy>=2.0",
+    "sqlite-vec>=0.1.9",
     "uvicorn>=0.32",
 ]
 
@@ -59,6 +60,11 @@ plugins = ["pydantic.mypy"]
 # pypdfium2 ships no type information (no py.typed).
 [[tool.mypy.overrides]]
 module = ["pypdfium2", "pypdfium2.*"]
+ignore_missing_imports = true
+
+# sqlite-vec ships no type information either; only loadable_path() is used.
+[[tool.mypy.overrides]]
+module = ["sqlite_vec"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
