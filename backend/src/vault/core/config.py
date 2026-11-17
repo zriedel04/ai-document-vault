@@ -9,11 +9,13 @@ belong here (see ``config.example.toml``).
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from vault.ingest.extractors.text import FALLBACK_ENCODING, FALLBACK_ENCODINGS
@@ -120,6 +122,65 @@ class WorkerSettings(_Section):
         return self.model_dump()
 
 
+class RetrievalSettings(_Section):
+    """The numbers of hybrid retrieval (plan section 8, ADR 0008), tuned against the eval set.
+
+    ``keyword_candidates`` and ``vector_candidates`` are the plan's K_kw and K_vec (50 each): how
+    many hits of each list fusion reads. ``rrf_k`` is the k of Reciprocal Rank Fusion, a chunk's
+    score being the sum over the lists of ``1 / (rrf_k + rank)``; the plan gives no value, so the
+    default is 60, the value of the paper that introduced RRF (Cormack, Clarke and Buettcher, 2009).
+    ``max_chunks_per_document`` is the plan's M (step 6), default 3 as section 8's context
+    selection says. Used by ``vault.retrieval.fusion``.
+
+    Each is a whole number and nothing else: ``true``, ``60.0`` and ``"60"`` are refused, because
+    a TOML file can hold any of them by mistake. Environment variables can only hold text, so
+    ``AIVAULT_RETRIEVAL__RRF_K=60`` is read by :class:`_EnvironmentWholeNumbers`, which accepts the
+    plain decimal spelling only.
+    """
+
+    keyword_candidates: int = Field(default=50, ge=1, le=500, strict=True)
+    vector_candidates: int = Field(default=50, ge=1, le=500, strict=True)
+    rrf_k: int = Field(default=60, ge=0, le=1000, strict=True)
+    max_chunks_per_document: int = Field(default=3, ge=1, le=100, strict=True)
+
+
+# How an environment variable writes a whole number: ASCII digits, no sign, space or leading zero.
+# Use fullmatch, which a trailing newline does not pass.
+_DECIMAL: Final = re.compile(r"0|[1-9][0-9]{0,5}")
+# Sections whose numbers are strict whole numbers, read from environment text by _DECIMAL.
+_STRICT_SECTIONS: Final = ("retrieval",)
+
+
+def _whole_number_from_text(value: object) -> object:
+    if isinstance(value, str) and _DECIMAL.fullmatch(value):
+        return int(value)
+    return value  # anything else is left for the strict field to refuse
+
+
+class _EnvironmentWholeNumbers(PydanticBaseSettingsSource):
+    """The environment source, with the strict sections' decimal text read as whole numbers.
+
+    Only this source converts: the TOML file and values passed in code must hold real numbers.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        for name in _STRICT_SECTIONS:
+            section = values.get(name)
+            if isinstance(section, dict):
+                values[name] = {
+                    key: _whole_number_from_text(value) for key, value in section.items()
+                }
+        return values
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -134,6 +195,7 @@ class Settings(BaseSettings):
     frontend: FrontendSettings = FrontendSettings()
     processing: ProcessingSettings = ProcessingSettings()
     workers: WorkerSettings = WorkerSettings()
+    retrieval: RetrievalSettings = RetrievalSettings()
     logging: LoggingSettings = LoggingSettings()
 
     @classmethod
@@ -146,7 +208,7 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         # Environment first (it wins), then the values read from the TOML file.
-        return (env_settings, init_settings)
+        return (_EnvironmentWholeNumbers(env_settings), init_settings)
 
 
 def resolve_config_file(config_file: Path | None = None) -> tuple[Path, bool]:
