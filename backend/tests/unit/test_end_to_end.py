@@ -45,14 +45,14 @@ FILLER = " ".join(
 
 @dataclass(frozen=True)
 class Sample:
+    # The documents write their codes apart (``CSE 485``), hyphenated (``MAT-343``) and joined
+    # (``PHY121``).
     name: str
     data: bytes
     phrase: str  # a phrase only this document holds, on ``page``
     letters: str  # a course code only this document holds, on ``page``
     digits: str
     page: int
-    # Whether the document writes the code apart (``CSE 485``, ``MAT-343``) or joined (``PHY121``).
-    joined: bool = False
 
 
 def docx_bytes() -> bytes:
@@ -103,7 +103,6 @@ SAMPLES = (
         letters="PHY",
         digits="121",
         page=1,
-        joined=True,
     ),
     Sample(
         name="report.pdf",
@@ -120,14 +119,16 @@ PDF_PAGE_2 = "freight volumes rose"
 
 def code_queries(sample: Sample) -> list[str]:
     """The ways the plan's query prep writes a code (section 8: CSE 485 / CSE485), in upper and
-    lower case, and with a hyphen where the document writes the code apart."""
+    lower case, and with a hyphen or an underscore, each of which finds the code however the
+    document writes it (apart, joined or hyphenated)."""
     letters, digits = sample.letters, sample.digits
-    queries = [f"{letters} {digits}", f"{letters}{digits}", f"{letters.lower()}{digits}"]
-    if not sample.joined:
-        # A hyphen is not a token, so ``cse-485`` is the phrase ``cse 485``: it finds a code
-        # written apart, and not one written joined (``PHY121`` is one token).
-        queries.append(f"{letters.lower()}-{digits}")
-    return queries
+    return [
+        f"{letters} {digits}",
+        f"{letters}{digits}",
+        f"{letters.lower()}{digits}",
+        f"{letters.lower()}-{digits}",
+        f"{letters}_{digits}",
+    ]
 
 
 @dataclass
