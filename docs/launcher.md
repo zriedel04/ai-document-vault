@@ -106,7 +106,7 @@ The token is never printed. It is in the address handed to the browser, which ma
 - `backup` keeps every snapshot; the plan's retention (14 daily and 12 monthly) and the scheduled daily run are not part of it yet.
 - `restore` (section 17) is here before Phase 10 too. It queues no re-embedding, because nothing embeds yet and every other derived table (pages, chunks, the keyword index) is in `vault.db` and comes back with it. It takes `-To`, which the plan's line leaves out, because it never chooses a folder by itself.
 
-- `export` (section 17, Phase 10) is here early, laid out by original folder only, because collections and labels do not exist yet.
+- `export` (section 17, Phase 10) is here early, laid out by original folder only, because collections do not exist yet (folder labels are listed in the manifest).
 
 ## Tests
 
