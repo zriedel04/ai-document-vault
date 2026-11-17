@@ -579,6 +579,36 @@
         "title": "Label",
         "type": "object"
       },
+      "LabelChange": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 1020,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          }
+        },
+        "title": "LabelChange",
+        "type": "object"
+      },
       "LabelNode": {
         "properties": {
           "documents": {
@@ -670,6 +700,41 @@
           "name"
         ],
         "title": "Me",
+        "type": "object"
+      },
+      "NewLabel": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "collection",
+              "tag"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 1020,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "title": "NewLabel",
         "type": "object"
       },
       "Order": {
@@ -1502,6 +1567,120 @@
         ]
       }
     },
+    "/api/documents/{document_id}/labels/{label_id}": {
+      "delete": {
+        "description": "Take a collection or a tag off a document (the owner's own assignment; any other source's\nstays) and return the document as it now is. A document without it is returned unchanged. A\nfolder label is refused (409).",
+        "operationId": "unassign_label_api_documents__document_id__labels__label_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "label_id",
+            "required": true,
+            "schema": {
+              "title": "Label Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no such document; no such label"
+          },
+          "409": {
+            "description": "folder labels are kept by imports and cannot be changed here"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unassign Label",
+        "tags": [
+          "labels"
+        ]
+      },
+      "put": {
+        "description": "Put a document (in use or in the trash) in a collection or give it a tag, as the owner's\nown assignment (``source`` user, accepted), and return the document as it now is. Doing it\nagain changes nothing. A folder label is refused (409).",
+        "operationId": "assign_label_api_documents__document_id__labels__label_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "label_id",
+            "required": true,
+            "schema": {
+              "title": "Label Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no such document; no such label"
+          },
+          "409": {
+            "description": "folder labels are kept by imports and cannot be changed here"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Assign Label",
+        "tags": [
+          "labels"
+        ]
+      }
+    },
     "/api/documents/{document_id}/pages": {
       "get": {
         "description": "The extracted text of the document's current version (in use or in the trash, like the\ndetails), as plain text by page, with each page's headings. A window starts after ``offset``\npages and holds at most ``limit`` pages and about a million characters: a page that would pass\nthat is left for the next window, but the first page of a window is always sent whole.\n``next_offset`` says where the next window starts. A document whose text has not been\nextracted yet answers with ``extracted`` false and no pages, not a 404.",
@@ -1847,6 +2026,151 @@
           }
         },
         "summary": "Read Labels",
+        "tags": [
+          "labels"
+        ]
+      },
+      "post": {
+        "description": "Make a collection or a tag, at the top or under ``parent_id`` (a label of the same kind),\nand return it as the tree shows it. The name is cleaned as a folder name is (Unicode NFC;\ncontrol, bidirectional and invisible characters removed; white space collapsed; trailing dots\nand spaces dropped); a name that is then empty or longer than 255 characters is a 422. Names\nare compared as Windows compares them (``School`` and ``school`` are one name), and one kind\nholds one label of a name under each parent (409).",
+        "operationId": "create_label_api_labels_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewLabel"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabelNode"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no such parent label"
+          },
+          "409": {
+            "description": "a label goes only under a label of its own kind; a label of this kind and name is already there; labels nest at most 64 levels deep"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Label",
+        "tags": [
+          "labels"
+        ]
+      }
+    },
+    "/api/labels/{label_id}": {
+      "delete": {
+        "description": "Delete a collection or a tag and every assignment of it. The documents stay where they\nare. A label with labels under it is refused (409): delete or move those first. A folder\nlabel is refused (409).",
+        "operationId": "delete_label_api_labels__label_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "label_id",
+            "required": true,
+            "schema": {
+              "title": "Label Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no such label"
+          },
+          "409": {
+            "description": "folder labels are kept by imports and cannot be changed here; the label has labels under it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Label",
+        "tags": [
+          "labels"
+        ]
+      },
+      "patch": {
+        "description": "Rename a collection or a tag (``name``, cleaned as on creation), move it (``parent_id``: a\nlabel of the same kind, or null for the top), or both, and return it as the tree shows it.\nIts documents and the labels below it move with it. A move under the label itself or a label\nbelow it is refused (409), and so is a folder label (409): an import's folders are changed\nonly by the imports.",
+        "operationId": "change_label_api_labels__label_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "label_id",
+            "required": true,
+            "schema": {
+              "title": "Label Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LabelChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabelNode"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no such label; no such parent label"
+          },
+          "409": {
+            "description": "folder labels are kept by imports and cannot be changed here; a label goes only under a label of its own kind; a label of this kind and name is already there; a label cannot go under itself or a label below it; labels nest at most 64 levels deep"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Label",
         "tags": [
           "labels"
         ]

@@ -52,6 +52,7 @@ import {
 import { DEFAULT_SEARCH } from "./documents-search";
 import { isImageType } from "./image-limits";
 import { ImageView } from "./ImageView";
+import { OwnerLabels } from "./OwnerLabels";
 import { PdfViewer } from "./PdfViewer";
 import { TextView } from "./TextView";
 
@@ -509,6 +510,8 @@ function Details({
           </Field>
         </SimpleGrid>
       </Card>
+
+      <OwnerLabels document={document} onDocument={setDocument} />
 
       <Title order={3}>Imports</Title>
       <Text size="sm" c="dimmed">
