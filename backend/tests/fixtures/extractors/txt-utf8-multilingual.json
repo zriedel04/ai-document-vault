@@ -1,0 +1,20 @@
+{
+  "fixture": "txt-utf8-multilingual",
+  "about": "UTF-8 without a mark: right-to-left, CJK, combining marks, a character outside the BMP, Windows line breaks",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 276,
+  "input_sha256": "e8299f40a38616a38a9938d16eefb287208b934869a6a0b9fa998137c19f9558",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "utf-8",
+    "pages": [
+      {
+        "number": 1,
+        "text": "Notes in several scripts\nHebrew (right to left): שלום עולם\nArabic (right to left): مرحبا بالعالم\nChinese: 文档库, Japanese: 履歴書と職務経歴書, Korean: 한국어 문서\nCombining marks: Café and Tiếng Việt\nOutside the BMP: 𠀋\n",
+        "headings": []
+      }
+    ]
+  }
+}

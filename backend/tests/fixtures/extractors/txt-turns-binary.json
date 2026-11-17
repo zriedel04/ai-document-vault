@@ -1,0 +1,13 @@
+{
+  "fixture": "txt-turns-binary",
+  "about": "A readable head followed by binary bytes (NUL among them)",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 11824,
+  "input_sha256": "2c0418b32df23d5c2f67bef96a07d15325012f2550605e48e784f2d9cd49133a",
+  "error": {
+    "class": "NotTextError",
+    "reason": null
+  }
+}

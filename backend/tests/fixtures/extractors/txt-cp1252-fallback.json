@@ -1,0 +1,20 @@
+{
+  "fixture": "txt-cp1252-fallback",
+  "about": "Western accents in Windows-1252 without a mark, with the default fallback",
+  "type": "txt",
+  "entry": "text",
+  "option": "cp1252",
+  "input_bytes": 27,
+  "input_sha256": "a3ec93249d2a8f7428057085145e3cfd908f645c31bc51915b043e592367642e",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "cp1252",
+    "pages": [
+      {
+        "number": 1,
+        "text": "crème brûlée, naïve façade\n",
+        "headings": []
+      }
+    ]
+  }
+}

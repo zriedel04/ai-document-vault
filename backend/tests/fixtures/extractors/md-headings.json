@@ -1,0 +1,63 @@
+{
+  "fixture": "md-headings",
+  "about": "ATX and setext headings in several scripts, front matter, and heading lines that are not section headings (code, block quote, list item)",
+  "type": "md",
+  "entry": "markdown",
+  "option": "cp1252",
+  "input_bytes": 442,
+  "input_sha256": "12ea0b58261994b9fd57f342edcc20406613d4e003c27ce7d5bf08cc9966a030",
+  "result": {
+    "extractor": "text-1",
+    "encoding": "utf-8",
+    "pages": [
+      {
+        "number": 1,
+        "text": "---\ntitle: Front matter is skipped\n---\n# Field guide\n\nOpening paragraph.\n\n## שלום עולם\n\nمرحبا بالعالم\n\n履歴書と職務経歴書\n=========\n\nText under a setext heading.\n\n### Café and Tiếng Việt ###\n\n```\n# not a heading inside a code fence\n```\n\n> # not a section heading inside a block quote\n\n- # nor inside a list item\n\n    # nor in an indented code block\n\nSetext with a lazy\nsecond line\n---\n\n###### Level six\n",
+        "headings": [
+          {
+            "level": 1,
+            "title": "Field guide",
+            "start": 39,
+            "end": 52,
+            "text_at_offsets": "# Field guide"
+          },
+          {
+            "level": 2,
+            "title": "שלום עולם",
+            "start": 74,
+            "end": 86,
+            "text_at_offsets": "## שלום עולם"
+          },
+          {
+            "level": 1,
+            "title": "履歴書と職務経歴書",
+            "start": 103,
+            "end": 122,
+            "text_at_offsets": "履歴書と職務経歴書\n========="
+          },
+          {
+            "level": 3,
+            "title": "Café and Tiếng Việt",
+            "start": 154,
+            "end": 186,
+            "text_at_offsets": "### Café and Tiếng Việt ###"
+          },
+          {
+            "level": 2,
+            "title": "Setext with a lazy second line",
+            "start": 346,
+            "end": 380,
+            "text_at_offsets": "Setext with a lazy\nsecond line\n---"
+          },
+          {
+            "level": 6,
+            "title": "Level six",
+            "start": 382,
+            "end": 398,
+            "text_at_offsets": "###### Level six"
+          }
+        ]
+      }
+    ]
+  }
+}

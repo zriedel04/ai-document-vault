@@ -1,0 +1,13 @@
+{
+  "fixture": "docx-truncated",
+  "about": "The headings DOCX cut in half (no central directory)",
+  "type": "docx",
+  "entry": "docx",
+  "option": null,
+  "input_bytes": 2214,
+  "input_sha256": "b040145325a569860e02817aa9bcfdf44f18aa72841708bdac3a7cd99216c2c1",
+  "error": {
+    "class": "NotDocxError",
+    "reason": "unreadable_archive"
+  }
+}
