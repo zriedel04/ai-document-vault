@@ -213,8 +213,12 @@ def test_a_missing_name_is_refused_before_anything_is_stored(
     """The header is required in the API schema, so a generated client cannot leave it out."""
     response = send(client, TEXT, None)
     assert response.status_code == 422
-    missing = {"type": "missing", "loc": ["header", "x-vault-filename"], "msg": "Field required"}
-    assert response.json()["detail"] == [missing | {"input": None}]
+    missing = {
+        "type": "missing",
+        "loc": ["header", "x-vault-filename"],
+        "msg": "a required value is missing",
+    }
+    assert response.json()["detail"] == [missing]
     assert rows(engine, blobs) == []
     assert staged(app) == []
 

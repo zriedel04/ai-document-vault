@@ -10,7 +10,17 @@ from pathlib import Path
 import anyio
 from fastapi import FastAPI
 
-from vault.api import documents, health, imports, labels, processing, search, session, shutdown
+from vault.api import (
+    documents,
+    errors,
+    health,
+    imports,
+    labels,
+    processing,
+    search,
+    session,
+    shutdown,
+)
 from vault.core.config import Settings, load_settings
 from vault.core.headers import SecurityHeadersMiddleware
 from vault.core.logging import configure_logging, log_event, metric
@@ -145,6 +155,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         redoc_url=None,
         lifespan=lifespan,
     )
+    # Before any route: a refused request is answered in fixed text, never with its own values.
+    errors.install(app)
     app.state.settings = settings
     app.state.token = token
     app.state.engine = engine

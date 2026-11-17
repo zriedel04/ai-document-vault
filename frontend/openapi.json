@@ -385,6 +385,9 @@
             "type": "array"
           }
         },
+        "required": [
+          "detail"
+        ],
         "title": "HTTPValidationError",
         "type": "object"
       },
@@ -1180,24 +1183,11 @@
         "type": "object"
       },
       "ValidationError": {
+        "description": "One refused part of the request: where, and whether it was missing or not valid.",
         "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
           "loc": {
             "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
+              "type": "string"
             },
             "title": "Location",
             "type": "array"
@@ -1207,6 +1197,10 @@
             "type": "string"
           },
           "type": {
+            "enum": [
+              "missing",
+              "invalid"
+            ],
             "title": "Error Type",
             "type": "string"
           }
