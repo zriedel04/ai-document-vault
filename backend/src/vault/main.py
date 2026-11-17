@@ -101,8 +101,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         pending = metadata_stage.queue_pending(engine, queue)
         log_event(logger, "metadata.queued", jobs=metric(pending))
         importer = Importer(engine, blobs)
-        # Only extraction (of the types with an extractor), DOCX file properties and chunking
-        # have handlers so far; jobs of the other stages and types wait in the queue.
+        # Only extraction (of the types with an extractor), DOCX and PDF file properties and
+        # chunking have handlers so far; jobs of the other stages and types wait in the queue.
         options = settings.processing
         workers = WorkerPool(
             queue,

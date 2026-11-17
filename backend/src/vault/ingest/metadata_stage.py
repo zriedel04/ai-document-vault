@@ -1,6 +1,7 @@
 """The metadata stage (``docs/architecture.md`` section 7, step 9): the properties a file states
-about itself become the document's ``file_properties`` fields. So far a DOCX's core properties
-(title, author, created, modified); PDF properties arrive with the PDF extractor.
+about itself become the document's ``file_properties`` fields: a DOCX's core properties and a
+PDF's document information dictionary (its ``Info``; XMP metadata is not read), each the title,
+author, created and modified.
 
 A ``metadata`` job names a document and, as its input, the SHA-256 of the bytes whose properties it
 reads (the cache key the plan gives this step). The importer queues it with the ``extract`` job for
@@ -13,15 +14,16 @@ that version still holds those bytes; otherwise it ends without changing anythin
    runs on it (``BlobChangedError``), so a blob edited in place is never read as the bytes its name
    gives.
 2. The reader for the type (``READERS``) runs in the sandbox (``vault.jobs.sandbox``) with the
-   configured limits: the DOCX is parsed only there, never in the server. Nothing is locked
-   meanwhile.
+   configured limits: the DOCX or PDF is parsed only there, never in the server. Nothing is
+   locked meanwhile.
 3. The answer is untrusted (a child that a hostile file took over writes its own answer), so every
    value is judged here and not in the child: names are cleaned as folder labels are (``clean``:
    NFC, control, bidirectional and invisible characters removed, white space collapsed) and cut to
-   ``MAX_FIELD_CHARS``; dates must be W3CDTF exactly (``parse_w3cdtf``) and are stored in one
-   form. A value that is empty after cleaning, or a date that is malformed or out of range, is left
-   out; it never fails the job, since a file's properties are optional and the rest of the file
-   may be fine.
+   ``MAX_FIELD_CHARS``; dates must be exactly the format's own (W3CDTF for a DOCX,
+   ``parse_w3cdtf``; a PDF date, ``parse_pdf_date``) and are stored in one form, the same for
+   both formats (``_stored_date``). A value that is empty after cleaning, or a date that is
+   malformed, out of range or ambiguous, is left out; it never fails the job, since a file's
+   properties are optional and the rest of the file may be fine.
 4. Under the write lock (``BEGIN IMMEDIATE``), the document's current version is read again. A
    document that no longer holds these bytes ends the job as stale. Otherwise the values replace
    the document's file properties, recorded against that version (the values come from the bytes
@@ -29,7 +31,7 @@ that version still holds those bytes; otherwise it ends without changing anythin
    same transaction (``vault.jobs.queue.Completion``). The document's state is left alone: it
    follows the extract and chunk stages.
 
-A type with no reader (TXT, Markdown, images; PDF for now) has no properties: its job, which only
+A type with no reader (TXT, Markdown, images) has no properties: its job, which only
 a hand edit or a later reader could queue, stores none and ends.
 
 How each failure ends the attempt (ADR 0005: a failed job marks the document Failed once its
@@ -37,9 +39,10 @@ attempts are used up), by the rule ``vault.ingest.setup_failures`` holds for eve
 the sandbox, the same as the extraction stage's:
 
 - every sandbox failure that the document can cause (``DOCUMENT_FAILURES``: a timeout, the memory
-  cap, a crash, a reader that raised because the file is not a readable DOCX, an answer that
-  cannot be read) and the checks above raise, and the worker records the failed attempt by the
-  error's class name only; the queue retries it within the job's attempts;
+  cap, a crash, a reader that raised because the file is not a readable DOCX or PDF or is a PDF
+  that needs a password, an answer that cannot be read) and the checks above raise, and the
+  worker records the failed attempt by the error's class name only; the queue retries it within
+  the job's attempts;
 - a sandbox that cannot run at all (``SETUP_FAILURES``: an entry point the allowlist refuses, a
   child that cannot be started or limited on this system) is a failure of the setup, not a result
   about the document: the job is given back without using an attempt (``JobQueue.defer``, through
@@ -67,7 +70,7 @@ from vault.db.engine import read_snapshot, write_transaction
 from vault.db.fields import FileProperties, replace_file_properties
 from vault.db.schema import MAX_FIELD_CHARS, document_versions, documents, jobs
 from vault.db.schema import blobs as blob_rows
-from vault.ingest.extractors import CoreProperties
+from vault.ingest.extractors import CoreProperties, PdfProperties
 from vault.ingest.path_metadata import clean
 from vault.ingest.setup_failures import run_deferring_setup
 from vault.jobs import sandbox
@@ -79,12 +82,14 @@ from vault.storage.blobs import BlobStore
 METADATA_STAGE: Final = "metadata"
 # The sandbox entry point that reads each type's properties, by the blob's canonical extension
 # (``vault.ingest.validate.EXTENSIONS``).
-READERS: Final[Mapping[str, str]] = MappingProxyType({"docx": "docx_properties"})
+READERS: Final[Mapping[str, str]] = MappingProxyType(
+    {"docx": "docx_properties", "pdf": "pdf_properties"}
+)
 EXTENSIONS: Final = frozenset(READERS)
 # Rounds of snapshot and decision before a version that keeps appearing fails the attempt.
 MAX_ROUNDS: Final = 2
 # The longest date text read; the longest W3CDTF with a time is 25 characters without a fraction
-# of a second, so this leaves 39 digits for one.
+# of a second, so this leaves 39 digits for one, and the longest PDF date is 23 characters.
 MAX_DATE_CHARS: Final = 64
 # The largest time zone offset W3CDTF's parent, XML Schema's dateTime, allows.
 MAX_OFFSET: Final = timedelta(hours=14)
@@ -99,6 +104,22 @@ _W3CDTF: Final = re.compile(
     r"(?:T(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2})"
     r"(?::(?P<second>[0-9]{2})(?:\.[0-9]+)?)?"
     r"(?P<zone>Z|[+-][0-9]{2}:[0-9]{2}))?)?)?"
+)
+# A PDF date (ISO 32000-1, 7.9.4): ``D:``, a year, then optionally the month, day, hour, minute and
+# second, each only after the one before it, and a zone only after an hour (a zone on a day alone
+# says nothing). The zone is ``Z`` or ``+`` / ``-`` with the hours, then optionally an apostrophe,
+# the minutes and a closing apostrophe (written by PDF 1.7 producers, left out in PDF 2.0); after
+# ``Z`` only a zero offset may follow (``Z00'00'``, as macOS writes). ASCII digits only, nothing
+# before or after, no white space. Always ``fullmatch``.
+_PDF_DATE: Final = re.compile(
+    r"D:(?P<year>[0-9]{4})"
+    r"(?:(?P<month>[0-9]{2})"
+    r"(?:(?P<day>[0-9]{2})"
+    r"(?:(?P<hour>[0-9]{2})"
+    r"(?:(?P<minute>[0-9]{2})(?P<second>[0-9]{2})?)?"
+    r"(?P<zone>Z(?:00(?:'(?:00'?)?)?)?"
+    r"|(?P<sign>[+-])(?P<zone_hours>[0-9]{2})(?:'(?:(?P<zone_minutes>[0-9]{2})'?)?)?)?"
+    r")?)?)?"
 )
 # XML white space, which XML Schema's date types ignore at either end of a value.
 _XML_SPACE: Final = " \t\r\n"
@@ -164,23 +185,79 @@ def parse_w3cdtf(raw: str) -> str | None:
     found = _W3CDTF.fullmatch(text)
     if found is None:
         return None
-    year = int(found["year"])
-    if found["month"] is None:
-        return f"{year:04d}" if year >= 1 else None
-    month = int(found["month"])
-    if found["day"] is None:
-        return f"{year:04d}-{month:02d}" if year >= 1 and 1 <= month <= 12 else None
-    day = int(found["day"])
+    if found["hour"] is None:
+        return _stored_date(found["year"], found["month"], found["day"], None)
+    offset = _offset(found["zone"])
+    if offset is None:
+        return None
+    clock = (int(found["hour"]), int(found["minute"]), int(found["second"] or 0), offset)
+    return _stored_date(found["year"], found["month"], found["day"], clock)
+
+
+def parse_pdf_date(raw: str) -> str | None:
+    """The PDF date in ``raw`` (``D:YYYYMMDDHHmmSSOHH'mm'``) as the vault stores it, or None
+    unless ``raw`` is one exactly (``_PDF_DATE``), in the forms ``parse_w3cdtf`` stores.
+
+    A year (``D:2026``), a month (``D:202603``) or a day (``D:20260304``) is kept as such
+    (``2026``, ``2026-03``, ``2026-03-04``). A time is stored in UTC to the second, a missing
+    minute or second being zero as the standard says, but only with its zone: the standard says a
+    time without one has an unknown relation to UTC, so it is ambiguous and left out (the day
+    alone is not kept either, since the zone could move it). Refused besides: a zone after a day
+    alone, a zone ``Z`` with an offset other than zero, everything ``parse_w3cdtf`` refuses (a
+    value out of range, the year 0000, a zone over 14 hours, a time that UTC moves outside the
+    years 0001 to 9999), white space or anything else before or after, and ``D:`` left out."""
+    if len(raw) > MAX_DATE_CHARS:
+        return None
+    found = _PDF_DATE.fullmatch(raw)
+    if found is None:
+        return None
+    if found["hour"] is None:
+        return _stored_date(found["year"], found["month"], found["day"], None)
+    if found["zone"] is None:
+        return None  # a local time with no stated relation to UTC
+    if found["sign"] is None:
+        offset: timedelta | None = timedelta(0)  # Z, perhaps with a zero offset after it
+    else:
+        offset = _offset(f"{found['sign']}{found['zone_hours']}:{found['zone_minutes'] or '00'}")
+    if offset is None:
+        return None
+    clock = (
+        int(found["hour"]),
+        int(found["minute"] or 0),
+        int(found["second"] or 0),
+        offset,
+    )
+    return _stored_date(found["year"], found["month"], found["day"], clock)
+
+
+def _stored_date(
+    year_text: str,
+    month_text: str | None,
+    day_text: str | None,
+    clock: tuple[int, int, int, timedelta] | None,
+) -> str | None:
+    """The one stored form of a date that a format's grammar has matched, for every format, or
+    None when it is out of range: a year, a month or a day as written, or, with ``clock`` (the
+    hour, minute, second and offset, given only with a day), the time in UTC to the second."""
+    year = int(year_text)
+    if year < 1:
+        return None
+    if month_text is None:
+        return f"{year:04d}"
+    month = int(month_text)
+    if not 1 <= month <= 12:
+        return None
+    if day_text is None:
+        return f"{year:04d}-{month:02d}"
+    day = int(day_text)
     try:
         datetime(year, month, day)  # only the calendar is checked here
     except ValueError:
         return None
-    if found["hour"] is None:
+    if clock is None:
         return f"{year:04d}-{month:02d}-{day:02d}"
-    hour, minute = int(found["hour"]), int(found["minute"])
-    second = int(found["second"] or 0)
-    offset = _offset(found["zone"])
-    if offset is None or hour > 23 or minute > 59 or second > 59:
+    hour, minute, second, offset = clock
+    if hour > 23 or minute > 59 or second > 59:
         return None
     try:
         utc = datetime(year, month, day, hour, minute, second, tzinfo=timezone(offset)).astimezone(
@@ -210,18 +287,25 @@ def _offset(zone: str) -> timedelta | None:
 
 def properties_from(result: object) -> FileProperties:
     """The values to store from a reader's answer, each judged as the module says, or
-    ``PropertiesResultError`` when the answer is not a ``CoreProperties`` of strings."""
-    if type(result) is not CoreProperties:
+    ``PropertiesResultError`` when the answer is not a ``CoreProperties`` or ``PdfProperties``
+    of strings. Names are judged the same for both; each date by its own format's grammar."""
+    parse_date: Callable[[str], str | None]
+    if type(result) is CoreProperties:
+        raw = (result.title, result.creator, result.created, result.modified)
+        parse_date = parse_w3cdtf
+    elif type(result) is PdfProperties:
+        raw = (result.title, result.author, result.created, result.modified)
+        parse_date = parse_pdf_date
+    else:
         raise PropertiesResultError
-    raw = (result.title, result.creator, result.created, result.modified)
     if not all(value is None or type(value) is str for value in raw):
         raise PropertiesResultError
-    title, creator, created, modified = raw
+    title, author, created, modified = raw
     return FileProperties(
         title=None if title is None else clean_text(title),
-        author=None if creator is None else clean_text(creator),
-        created=None if created is None else parse_w3cdtf(created),
-        modified=None if modified is None else parse_w3cdtf(modified),
+        author=None if author is None else clean_text(author),
+        created=None if created is None else parse_date(created),
+        modified=None if modified is None else parse_date(modified),
     )
 
 

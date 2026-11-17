@@ -1,5 +1,6 @@
-"""The metadata stage: a DOCX's core properties, read in the sandbox and judged in the server,
-become the document's ``file_properties`` fields and its title."""
+"""The metadata stage: a DOCX's core properties and a PDF's document information dictionary, read
+in the sandbox and judged in the server, become the document's ``file_properties`` fields and its
+title."""
 
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from tests.unit import pdf_builder
 from tests.unit.test_docx_extractor import build, members_of, replace_member
 from tests.unit.test_setup_failures import SETUP_KINDS
 from vault.api.documents import FieldSource
@@ -40,7 +42,7 @@ from vault.db.schema import (
     jobs,
 )
 from vault.ingest import metadata_stage
-from vault.ingest.extractors import CoreProperties
+from vault.ingest.extractors import CoreProperties, PdfProperties
 from vault.ingest.extractors.docx import NotDocxError, read_properties
 from vault.ingest.importer import Importer, ImportRequest, Outcome
 from vault.ingest.metadata_stage import (
@@ -48,6 +50,7 @@ from vault.ingest.metadata_stage import (
     BlobChangedError,
     PropertiesResultError,
     clean_text,
+    parse_pdf_date,
     parse_w3cdtf,
     properties_from,
     queue_pending,
@@ -193,6 +196,133 @@ def test_the_date_rule_never_raises_on_random_text() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("raw", "stored"),
+    [
+        ("D:2026", "2026"),
+        ("D:202603", "2026-03"),
+        ("D:20260304", "2026-03-04"),
+        ("D:20240229", "2024-02-29"),
+        ("D:0042", "0042"),
+        ("D:2026030405Z", "2026-03-04T05:00:00Z"),  # minutes and seconds default to zero
+        ("D:202603040506Z", "2026-03-04T05:06:00Z"),
+        ("D:20260304050607Z", "2026-03-04T05:06:07Z"),
+        ("D:20260304050607Z00'00'", "2026-03-04T05:06:07Z"),  # as macOS writes it
+        ("D:20260304050607Z00'00", "2026-03-04T05:06:07Z"),
+        ("D:20260304050607Z00'", "2026-03-04T05:06:07Z"),
+        ("D:20260304050607Z00", "2026-03-04T05:06:07Z"),
+        ("D:20260304050607+02'00'", "2026-03-04T03:06:07Z"),  # PDF 1.7
+        ("D:20260304050607+02'00", "2026-03-04T03:06:07Z"),  # PDF 2.0
+        ("D:20260304050607+02'", "2026-03-04T03:06:07Z"),
+        ("D:20260304050607+02", "2026-03-04T03:06:07Z"),
+        ("D:20260304050607+05'30'", "2026-03-03T23:36:07Z"),
+        ("D:20260304233000-01'00'", "2026-03-05T00:30:00Z"),
+        ("D:20260304050607-00'00'", "2026-03-04T05:06:07Z"),
+        ("D:20261231230000-14'00'", "2027-01-01T13:00:00Z"),
+        ("D:00010101000000Z", "0001-01-01T00:00:00Z"),
+    ],
+)
+def test_a_pdf_date_is_stored_in_one_form(raw: str, stored: str) -> None:
+    assert parse_pdf_date(raw) == stored
+
+
+@pytest.mark.parametrize(
+    ("pdf", "w3cdtf"),
+    [
+        ("D:2026", "2026"),
+        ("D:202603", "2026-03"),
+        ("D:20260304", "2026-03-04"),
+        ("D:20260304050607+02'00'", "2026-03-04T05:06:07+02:00"),
+        ("D:202603040506Z", "2026-03-04T05:06Z"),
+        ("D:20261231230000-14'00'", "2026-12-31T23:00:00-14:00"),
+    ],
+)
+def test_a_pdf_date_is_stored_as_the_same_date_in_w3cdtf_is(pdf: str, w3cdtf: str) -> None:
+    assert parse_pdf_date(pdf) == parse_w3cdtf(w3cdtf)
+    assert parse_pdf_date(pdf) is not None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "D:",
+        "D:26",
+        "D:20260",  # a month of one digit
+        "D:2026030",
+        "2026",  # D: left out
+        "20260304050607Z",
+        "d:20260304",
+        "D 20260304",
+        " D:20260304",
+        "D:20260304 ",
+        "D:20260304\n",
+        "D:20260304\r",
+        "D:20260304\r\n",
+        "D:20260304\t",
+        "D:20260304\x00",  # a C string's terminator
+        "D:20260304\u00a0",
+        "D:0000",
+        "D:000001",
+        "D:00000101",
+        "D:202600",
+        "D:202613",
+        "D:20260229",
+        "D:20260431",
+        "D:20260300",
+        "D:20260304050607",  # a local time: its relation to UTC is unknown
+        "D:202603040506",
+        "D:2026030405",
+        "D:20260304Z",  # a zone on a day alone
+        "D:20260304+01'00'",
+        "D:2026Z",
+        "D:20260304240000Z",
+        "D:20260304056000Z",
+        "D:20260304050660Z",  # a leap second
+        "D:20260304050607z",
+        "D:20260304050607Z05'00'",  # Z with an offset
+        "D:20260304050607Z00'30'",
+        "D:20260304050607ZZ",
+        "D:20260304050607+15'00'",
+        "D:20260304050607+14'01'",
+        "D:20260304050607+05'60'",
+        "D:20260304050607+0530",  # no apostrophe between the hours and the minutes
+        "D:20260304050607+5'30'",
+        "D:20260304050607+05'3'",
+        "D:20260304050607+05''",
+        "D:20260304050607+05'30''",
+        "D:20260304050607+05:30",
+        "D:20260304050607.5Z",
+        "D:2026030405060Z",  # a second of one digit
+        "D:202603040506071Z",
+        "D:99991231230000-02'00'",  # UTC is in the year 10000
+        "D:00010101003000+01'00'",  # UTC is in the year 0
+        "D:\u0662\u0660\u0662\u0666",  # Arabic-Indic digits
+        "D:\uff12\uff10\uff12\uff16",  # fullwidth digits
+        "D:20260304050607Z" + "0" * 60,  # longer than MAX_DATE_CHARS
+        "2026-03-04T05:06:07Z",  # W3CDTF is not a PDF date
+        "Tuesday",
+        CANARY,
+    ],
+)
+def test_anything_else_is_refused_as_a_pdf_date(raw: str) -> None:
+    assert parse_pdf_date(raw) is None
+
+
+def test_the_pdf_date_rule_never_raises_on_random_text() -> None:
+    """It is run on what a hostile file wrote: every string gives a value or None."""
+    alphabet = "0123456789D:Z+-'\n \x00z\u0660"
+    chance = random.Random(20261117)  # noqa: S311 - test inputs, not secrets
+    for _ in range(20_000):
+        text = "D:" * chance.randrange(0, 2) + "".join(
+            chance.choice(alphabet) for _ in range(chance.randrange(0, 26))
+        )
+        result = parse_pdf_date(text)
+        assert result is None or re.fullmatch(
+            r"[0-9]{4}(-[0-9]{2}(-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)?)?", result
+        )
+
+
 # --- names ---------------------------------------------------------------------------------------
 
 
@@ -234,6 +364,30 @@ def test_an_answer_is_judged_on_the_server_side() -> None:
     assert properties_from(NONE) == FileProperties()
 
 
+def test_a_pdf_answer_is_judged_on_the_server_side_by_the_same_rules() -> None:
+    raw = PdfProperties(
+        title=" Lab\u202e report ",
+        author="\x00",
+        created="D:20260304050607+01'00'",
+        modified="2026-03-04",  # W3CDTF is not a PDF date
+    )
+    assert properties_from(raw) == FileProperties(
+        title="Lab report", author=None, created="2026-03-04T04:06:07Z", modified=None
+    )
+    assert properties_from(
+        PdfProperties(title="x" * 1000, author=None, created=None, modified="D:2026")
+    ) == FileProperties(title="x" * MAX_FIELD_CHARS, modified="2026")
+    # Each format's dates by its own grammar only: a DOCX date in the PDF form is refused too.
+    assert (
+        properties_from(CoreProperties(title=None, creator=None, created="D:2026", modified=None))
+        == FileProperties()
+    )
+    assert (
+        properties_from(PdfProperties(title=None, author=None, created=None, modified=None))
+        == FileProperties()
+    )
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -243,6 +397,8 @@ def test_an_answer_is_judged_on_the_server_side() -> None:
         FileProperties(title="x"),
         CoreProperties(title=1, creator=None, created=None, modified=None),  # type: ignore[arg-type]
         CoreProperties(title=None, creator=b"x", created=None, modified=None),  # type: ignore[arg-type]
+        PdfProperties(title=None, author=None, created=1, modified=None),  # type: ignore[arg-type]
+        PdfProperties(title=None, author=None, created=None, modified=b"D:2026"),  # type: ignore[arg-type]
     ],
 )
 def test_an_answer_of_another_shape_is_refused(answer: object) -> None:
@@ -555,11 +711,14 @@ def test_replacing_the_properties_replaces_every_field(vault: Vault) -> None:
 # --- the stage ------------------------------------------------------------------------------------
 
 
-def test_a_docx_gets_a_metadata_job_and_a_text_file_does_not(vault: Vault) -> None:
+def test_a_docx_and_a_pdf_get_a_metadata_job_and_a_text_file_does_not(vault: Vault) -> None:
     docx_id, _ = vault.add(build())
+    pdf_id, _ = vault.add(pdf_document(), name="Scan_3.pdf")
     text_id, _ = vault.add(b"Plain notes\n", name="notes.txt")
     markdown_id, _ = vault.add(b"# Notes\n", name="notes.md")
     assert vault.stages(docx_id) == ["extract", "metadata"]
+    assert vault.stages(pdf_id) == ["extract", "metadata"]
+    assert metadata_stage.READERS == {"docx": "docx_properties", "pdf": "pdf_properties"}
     assert vault.stages(text_id) == ["extract"]
     assert vault.stages(markdown_id) == ["extract"]
 
@@ -867,3 +1026,129 @@ def test_the_start_up_queues_them(tmp_path: Path) -> None:
         assert count == 1
     finally:
         again.state.engine.dispose()
+
+
+# --- PDF ------------------------------------------------------------------------------------------
+
+
+def pdf_document(info: dict[str, bytes] | None = None, **options: Any) -> bytes:
+    return pdf_builder.build([pdf_builder.text_stream(["Body text"])], info=info, **options)
+
+
+def test_the_properties_of_a_pdf_are_stored_and_give_the_title(
+    vault: Vault,
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    data = pdf_document(
+        {
+            "Title": b"\xfe\xff" + f"Lab report {CANARY} \u00e9".encode("utf-16-be"),
+            "Author": b"Sam Example \x84 \x93nal",  # PDFDocEncoding: an em dash, "fi"
+            "CreationDate": b"D:20260304050607+01'00'",
+            "ModDate": b"D:20260305080000Z00'00'",
+        }
+    )
+    document_id, _ = vault.add(data, name="Lab_report_3.pdf")
+
+    with caplog.at_level(logging.DEBUG):
+        assert vault.run() is Completion.RECORDED
+
+    assert vault.job(document_id) == ("done", None, 1)
+    body = client.get(f"/api/documents/{document_id}").json()
+    assert body["title"] == {
+        "value": f"Lab report {CANARY} \u00e9",
+        "source": "file_properties",
+    }
+    assert body["file_properties"] == {
+        "title": f"Lab report {CANARY} \u00e9",
+        "author": "Sam Example \u2014 \ufb01nal",
+        "created": "2026-03-04T04:06:07Z",
+        "modified": "2026-03-05T08:00:00Z",
+    }
+    assert body["state"] == "processing"  # the stage leaves the state to extract and chunk
+    out, err = capfd.readouterr()
+    for text in (caplog.text, out, err):
+        assert CANARY not in text
+        assert "Sam Example" not in text
+
+
+def test_malformed_pdf_properties_are_left_out_and_the_job_still_ends(vault: Vault) -> None:
+    data = pdf_document(
+        {
+            "Title": b"\x7f\x9f\xad",  # undefined codes only, which PDFium gives as U+0000
+            "Author": b"Sam\tExample\r\n",
+            "CreationDate": b"D:20260304050607",  # no zone: ambiguous
+            "ModDate": b"D:20260304\n",
+        }
+    )
+    document_id, _ = vault.add(data, name="Scan.pdf")
+    assert vault.run() is Completion.RECORDED
+    assert vault.job(document_id) == ("done", None, 1)
+    assert vault.fields(document_id) == {"author": "Sam Example"}
+
+
+def test_a_pdf_without_properties_stores_none(vault: Vault) -> None:
+    document_id, _ = vault.add(pdf_document(), name="Scan.pdf")
+    assert vault.run() is Completion.RECORDED
+    assert vault.job(document_id) == ("done", None, 1)
+    assert vault.fields(document_id) == {}
+
+
+def test_a_pdf_with_an_owner_password_only_has_its_properties_read(vault: Vault) -> None:
+    document_id, _ = vault.add(
+        pdf_document({"Title": b"Restricted"}, user_password=b""), name="Scan.pdf"
+    )
+    assert vault.run() is Completion.RECORDED
+    assert vault.fields(document_id) == {"title": "Restricted"}
+
+
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        pytest.param(
+            pdf_document({"Title": CANARY.encode()}, user_password=b"secret"),
+            "SandboxChildError",
+            id="needs a password",
+        ),
+        pytest.param(
+            # Accepted by the validator, which reads the head, but PDFium cannot open it.
+            b"%PDF-1.4\n" + CANARY.encode() + b"\n%%EOF\n",
+            "SandboxChildError",
+            id="cannot be opened",
+        ),
+    ],
+)
+def test_a_pdf_that_cannot_be_opened_fails_the_attempt_by_class_name(
+    vault: Vault, caplog: pytest.LogCaptureFixture, data: bytes, error: str
+) -> None:
+    document_id, _ = vault.add(data, name="Scan.pdf")
+    with vault.engine.begin() as connection:
+        connection.execute(update(jobs).values(max_attempts=1))
+    with caplog.at_level(logging.DEBUG):
+        assert vault.run() is None
+    assert vault.job(document_id) == ("failed", error, 1)
+    assert vault.state(document_id) == "failed"
+    assert vault.fields(document_id) == {}
+    assert CANARY not in caplog.text
+
+
+def test_pdfs_from_before_their_reader_are_queued_once(vault: Vault) -> None:
+    pdf_id, sha256 = vault.add(pdf_document({"Title": b"Old"}), name="Old.pdf")
+    with vault.engine.begin() as connection:
+        connection.execute(
+            delete(jobs).where(jobs.c.stage == METADATA_STAGE, jobs.c.document_id == pdf_id)
+        )
+    assert vault.stages(pdf_id) == ["extract"]
+    assert queue_pending(vault.engine, vault.queue) == 1
+    assert queue_pending(vault.engine, vault.queue) == 0
+    assert vault.stages(pdf_id) == ["extract", "metadata"]
+    assert vault.run() is Completion.RECORDED
+    assert vault.fields(pdf_id) == {"title": "Old"}
+    with vault.engine.connect() as connection:
+        queued: str = connection.execute(
+            select(jobs.c.input_hash).where(
+                jobs.c.document_id == pdf_id, jobs.c.stage == METADATA_STAGE
+            )
+        ).scalar_one()
+    assert queued == sha256

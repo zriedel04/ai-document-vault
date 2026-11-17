@@ -218,7 +218,8 @@ def test_every_sample_went_through_every_stage(run: Run) -> None:
         ).all()
     seen = {(row.document_id, row.stage) for row in stages}
     for sample in SAMPLES:
-        expected = {"extract", "chunk"} | ({"metadata"} if sample.name.endswith(".docx") else set())
+        has_reader = sample.name.endswith((".docx", ".pdf"))  # metadata_stage.READERS
+        expected = {"extract", "chunk"} | ({"metadata"} if has_reader else set())
         assert {stage for document, stage in seen if document == run.ids[sample.name]} == expected
     assert len(stored_pages(run.engine, run.ids["report.pdf"])) == 3
     assert len(stored_chunks(run.engine, run.ids["syllabus.txt"])) > 1  # overlap is exercised
