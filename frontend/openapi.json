@@ -580,6 +580,7 @@
         "type": "object"
       },
       "LabelChange": {
+        "additionalProperties": false,
         "properties": {
           "name": {
             "anyOf": [
@@ -703,6 +704,7 @@
         "type": "object"
       },
       "NewLabel": {
+        "additionalProperties": false,
         "properties": {
           "kind": {
             "enum": [

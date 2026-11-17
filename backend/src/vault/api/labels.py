@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine
 
 from vault.api.documents import DocumentDetail, LabelKind, _detail
+from vault.api.models import RequestBody
 from vault.core.logging import log_event, metric
 from vault.core.security import LocalUser, current_user
 from vault.db.labels import (
@@ -77,14 +78,14 @@ class LabelTree(BaseModel):
     items: list[LabelNode]
 
 
-class NewLabel(BaseModel):
+class NewLabel(RequestBody):
     kind: OwnerKind
     name: str = Field(min_length=1, max_length=MAX_NAME_INPUT)
     # A label of the same kind to put it under, or None (left out) for the top of the tree.
     parent_id: str | None = None
 
 
-class LabelChange(BaseModel):
+class LabelChange(RequestBody):
     # The new name; left out (or null) keeps the name.
     name: str | None = Field(default=None, min_length=1, max_length=MAX_NAME_INPUT)
     # The new parent, a label of the same kind, or null for the top; left out keeps the parent.

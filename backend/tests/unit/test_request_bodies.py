@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from typing import Annotated, Any, get_args
 
 import pytest
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 from starlette.routing import Route
 
+from vault.api.labels import LabelChange, NewLabel
 from vault.api.models import RequestBody
 from vault.api.search import SearchRequest
 
@@ -30,6 +32,8 @@ SAMPLES: dict[type[BaseModel], dict[str, Any]] = {
         "imported_from": "2026-03-01T05:00:00Z",
         "imported_to": None,
     },
+    NewLabel: {"kind": "collection", "name": "Receipts", "parent_id": None},
+    LabelChange: {"name": "Receipts 2026", "parent_id": None},
 }
 
 
@@ -174,21 +178,36 @@ def test_the_walk_finds_every_way_to_accept_extra_keys() -> None:
     ]
 
 
+# The status each body route answers a sample with; a route not named here answers 200.
+CREATED: dict[type[BaseModel], int] = {NewLabel: 201}
+
+
+@dataclass(frozen=True)
+class BodyRoute:
+    method: str
+    path: str
+    sample: dict[str, Any]
+    status: int
+
+
 @pytest.fixture(params=list(SAMPLES), ids=[model.__name__ for model in SAMPLES])
-def body_route(app: FastAPI, request: pytest.FixtureRequest) -> tuple[str, dict[str, Any]]:
+def body_route(client: TestClient, app: FastAPI, request: pytest.FixtureRequest) -> BodyRoute:
     model = request.param
     paths = [where for where, found in body_routes(app).items() if found is model]
     assert len(paths) == 1
     method, path = paths[0].split(" ", 1)
-    assert method == "POST"
-    return path, SAMPLES[model]
+    if "{label_id}" in path:
+        # A route on one label needs a label to exist, made through the API.
+        made = client.post("/api/labels", json={"kind": "tag", "name": "Sample"})
+        assert made.status_code == 201
+        path = path.replace("{label_id}", made.json()["id"])
+    assert "{" not in path, path
+    return BodyRoute(method, path, SAMPLES[model], CREATED.get(model, 200))
 
 
-def test_a_known_payload_still_passes(
-    client: TestClient, body_route: tuple[str, dict[str, Any]]
-) -> None:
-    path, sample = body_route
-    assert client.post(path, json=sample).status_code == 200
+def test_a_known_payload_still_passes(client: TestClient, body_route: BodyRoute) -> None:
+    response = client.request(body_route.method, body_route.path, json=body_route.sample)
+    assert response.status_code == body_route.status, response.text
 
 
 @pytest.mark.parametrize(
@@ -207,11 +226,12 @@ def test_a_known_payload_still_passes(
 def test_an_unknown_key_is_refused_without_its_name_or_value(
     client: TestClient,
     caplog: pytest.LogCaptureFixture,
-    body_route: tuple[str, dict[str, Any]],
+    body_route: BodyRoute,
     extra: dict[str, Any],
 ) -> None:
-    path, sample = body_route
-    response = client.post(path, json={**sample, **extra})
+    response = client.request(
+        body_route.method, body_route.path, json={**body_route.sample, **extra}
+    )
     assert_private(response, caplog)
     assert response.json() == {"detail": [{"loc": ["body"], **INVALID}]}
     for key in extra:
