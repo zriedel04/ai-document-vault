@@ -764,7 +764,10 @@ export interface components {
             /** Snippet */
             snippet: components["schemas"]["Segment"][];
         };
-        /** SearchRequest */
+        /**
+         * SearchRequest
+         * @description A search; an unknown key (a misspelt filter) is refused, never ignored.
+         */
         SearchRequest: {
             /** Imported From */
             imported_from?: string | null;
