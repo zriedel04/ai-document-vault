@@ -1,4 +1,14 @@
-import { MAX_PAGE, ORDERS, type Order, SORT_KEYS, type SortKey } from "../api/documents";
+import {
+  DOCUMENT_TYPES,
+  type DocumentType,
+  FILTER_STATES,
+  type FilterState,
+  MAX_PAGE,
+  ORDERS,
+  type Order,
+  SORT_KEYS,
+  type SortKey,
+} from "../api/documents";
 import { isLabelId } from "../api/labels";
 import type { SearchHit } from "../api/search";
 
@@ -14,6 +24,13 @@ export interface DocumentsSearch {
    * the address, never a label's name.
    */
   label?: string;
+  /** Only documents of these types, in `DOCUMENT_TYPES` order; left out for every type. */
+  type?: DocumentType[];
+  /**
+   * Only documents in these states, in `FILTER_STATES` order (in the trash, the state each had
+   * when it went there); left out for every state.
+   */
+  state?: FilterState[];
 }
 
 export const DEFAULT_SEARCH: DocumentsSearch = {
@@ -25,6 +42,26 @@ export const DEFAULT_SEARCH: DocumentsSearch = {
 
 function oneOf<T extends string>(values: readonly T[], value: unknown, fallback: T): T {
   return values.find((item) => item === value) ?? fallback;
+}
+
+/**
+ * The values of a list in the address that are all among `values`: each one once, in the order of
+ * `values`. Anything else (not a list, a value the list does not know, a list of nothing) gives
+ * none, so the filter falls back to every value; no token outside `values` is ever kept.
+ */
+function someOf<T extends string>(values: readonly T[], value: unknown): T[] {
+  if (!Array.isArray(value) || value.length === 0) return [];
+  const given: unknown[] = value;
+  if (!given.every((item) => values.some((known) => known === item))) return [];
+  return values.filter((known) => given.includes(known));
+}
+
+/** The type and state filters as the address holds them: left out when they keep every value. */
+function filters(
+  type: DocumentType[],
+  state: FilterState[],
+): Pick<DocumentsSearch, "type" | "state"> {
+  return { ...(type.length ? { type } : {}), ...(state.length ? { state } : {}) };
 }
 
 /**
@@ -44,13 +81,45 @@ export function parseDocumentsSearch(search: Record<string, unknown>): Documents
         : DEFAULT_SEARCH.page,
     trash: search.trash === true,
     ...(isLabelId(search.label) ? { label: search.label } : {}),
+    ...filters(someOf(DOCUMENT_TYPES, search.type), someOf(FILTER_STATES, search.state)),
   };
 }
 
-/** The same list filtered by another label, or by none (`null`), from its first page. */
+/** The same list, with its other filters, filtered by another label or by none (`null`). */
 export function withLabel(search: DocumentsSearch, label: string | null): DocumentsSearch {
-  const rest = { sort: search.sort, order: search.order, trash: search.trash, page: 1 };
+  const rest = {
+    sort: search.sort,
+    order: search.order,
+    trash: search.trash,
+    page: 1,
+    ...filters(search.type ?? [], search.state ?? []),
+  };
   return label === null ? rest : { ...rest, label };
+}
+
+/**
+ * The same list, with its label, filtered by other types and states (each in its list's order,
+ * each once; none for every value), from its first page.
+ */
+export function withFilters(
+  search: DocumentsSearch,
+  type: readonly string[],
+  state: readonly string[],
+): DocumentsSearch {
+  const rest = {
+    sort: search.sort,
+    order: search.order,
+    trash: search.trash,
+    page: 1,
+    ...(search.label === undefined ? {} : { label: search.label }),
+  };
+  return {
+    ...rest,
+    ...filters(
+      DOCUMENT_TYPES.filter((known) => type.includes(known)),
+      FILTER_STATES.filter((known) => state.includes(known)),
+    ),
+  };
 }
 
 /**

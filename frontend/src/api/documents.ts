@@ -1,5 +1,5 @@
 import type { Api } from "./client";
-import type { components } from "./schema";
+import type { components, operations } from "./schema";
 
 export type DocumentItem = components["schemas"]["DocumentItem"];
 export type DocumentList = components["schemas"]["DocumentList"];
@@ -25,6 +25,32 @@ export type Order = components["schemas"]["Order"];
 // Every value of each, in one list, so a link or a control can check what it was given.
 export const SORT_KEYS = ["added", "name", "size"] as const satisfies readonly SortKey[];
 export const ORDERS = ["asc", "desc"] as const satisfies readonly Order[];
+
+type ListParams = NonNullable<
+  operations["read_documents_api_documents_get"]["parameters"]["query"]
+>;
+/** A type the list filters by: a canonical extension, as the backend stores it. */
+export type DocumentType = NonNullable<ListParams["type"]>[number];
+/** A state the list filters by: one of a document in use (the trash is its own tab). */
+export type FilterState = NonNullable<ListParams["state"]>[number];
+/**
+ * Every value of each, in the order the page offers them. A test compares each list with the enum
+ * in `openapi.json`, so a value the backend adds is not left out.
+ */
+export const DOCUMENT_TYPES = [
+  "pdf",
+  "docx",
+  "txt",
+  "md",
+  "png",
+  "jpg",
+] as const satisfies readonly DocumentType[];
+export const FILTER_STATES = [
+  "processing",
+  "searchable",
+  "ready",
+  "failed",
+] as const satisfies readonly FilterState[];
 
 /** Documents on one page of the list; the backend allows 1 to 100. */
 export const PAGE_SIZE = 50;

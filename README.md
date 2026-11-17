@@ -22,7 +22,7 @@ Pre-alpha. There is nothing to use day to day yet. The plan has phases 0 to 11 p
 - the content-addressed blob store, with exact-duplicate handling that is safe under concurrent imports;
 - the import of one file, recording a document, its version and where it came from, through `POST /api/imports/upload` and an **Import** page that takes several dropped or chosen files;
 - the persistent job queue with retries, and a worker pool that starts with the server;
-- a document library with sorting and paging, a page for each document, **Download original**, **Move to trash**, **Restore** and **Delete permanently**.
+- a document library with sorting, paging and type, state and label filters, a page for each document, **Download original**, **Move to trash**, **Restore** and **Delete permanently**.
 
 **Phase 2, extraction and keyword search: mostly built.** Done:
 
