@@ -137,5 +137,47 @@ def test_start_up_stops_when_the_temporary_folder_is_a_link(vault_dir: Any, tmp_
     assert (outside / "original.txt").read_bytes() == b"keep me"
 
 
+def test_start_up_empties_a_damaged_index_and_leaves_vault_db(vault_dir: Any) -> None:
+    create_app(vault_settings(vault_dir)).state.engine.dispose()
+    vault_db = (vault_dir / "vault.db").read_bytes()
+    (vault_dir / "index.db").write_bytes(b"synthetic damage " * 512)
+    app = create_app(vault_settings(vault_dir))
+    app.state.engine.dispose()
+    assert not (vault_dir / "index.db").exists()
+    assert (vault_dir / "vault.db").read_bytes() == vault_db
+    assert app.state.index_db == vault_dir / "index.db"
+
+
+def test_start_up_rebuilds_an_index_whose_meta_table_has_another_shape(vault_dir: Any) -> None:
+    import sqlite3
+
+    create_app(vault_settings(vault_dir)).state.engine.dispose()
+    connection = sqlite3.connect(vault_dir / "index.db")
+    connection.execute("CREATE TABLE index_meta (key TEXT, wrong_column TEXT)")
+    connection.commit()
+    connection.close()
+    create_app(vault_settings(vault_dir)).state.engine.dispose()
+    assert not (vault_dir / "index.db").exists()
+
+
+def test_start_up_stops_when_a_link_is_where_the_index_belongs(
+    vault_dir: Any, tmp_path: Any
+) -> None:
+    import os
+
+    from vault.retrieval.vectors import IndexPathError
+
+    create_app(vault_settings(vault_dir)).state.engine.dispose()
+    outside = tmp_path / "elsewhere.db"
+    outside.write_bytes(b"keep me")
+    try:
+        os.symlink(outside, vault_dir / "index.db")
+    except (OSError, NotImplementedError):
+        pytest.skip("this system cannot make symbolic links here")
+    with pytest.raises(IndexPathError):
+        create_app(vault_settings(vault_dir))
+    assert outside.read_bytes() == b"keep me"
+
+
 def test_without_a_vault_there_is_no_blob_store() -> None:
     assert create_app(Settings()).state.blobs is None

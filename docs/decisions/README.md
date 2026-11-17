@@ -40,3 +40,4 @@ Each file here records one decision: the context, what was decided, the alternat
 | [0016](0016-local-api-token-delivery.md) | Local API token: bearer header only, handed to the page in the address fragment | Accepted |
 | [0017](0017-project-licence.md) | Project licence: Apache-2.0 | Accepted |
 | [0018](0018-markdown-parsing-with-markdown-it-py.md) | Markdown parsing with markdown-it-py | Accepted |
+| [0019](0019-sqlite-vec-licence.md) | sqlite-vec licence: MIT OR Apache-2.0 | Accepted |

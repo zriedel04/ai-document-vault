@@ -35,6 +35,7 @@ from vault.db.fields import FileProperties, replace_file_properties
 from vault.db.pages import PageText, replace_pages
 from vault.db.schema import (
     blobs,
+    chunks,
     document_versions,
     documents,
     import_sources,
@@ -45,6 +46,8 @@ from vault.ingest import importer as importer_module
 from vault.ingest.chunking.structural_v1 import CHUNKER_VERSION, chunk_pages
 from vault.ingest.importer import Importer, ImportRequest, Outcome
 from vault.main import create_app
+from vault.retrieval import vectors
+from vault.retrieval.vectors import ChunkVector, VectorIndex
 from vault.storage.blobs import ORPHAN_FOLDER, BlobNotFoundError, BlobStore
 from vault.storage.purge import Purged, purge_document, remove_unused_blob
 
@@ -56,6 +59,7 @@ BODY = b"Rent is due on the first of each month.\n"
 SHA = hashlib.sha256(BODY).hexdigest()
 # A synthetic word that only the chunks of the document made by ``trashed_with_everything`` hold.
 MARKER = "zanzibarquokka"
+VECTOR_MODEL = "synthetic/vectors@1"
 
 
 class Vault:
@@ -64,6 +68,7 @@ class Vault:
     def __init__(self, app: FastAPI, folder: Path) -> None:
         self.engine: Engine = app.state.engine
         self.store: BlobStore = app.state.blobs
+        self.index_db: Path = app.state.index_db
         self.folder = folder
 
     def importer(self, engine: Engine | None = None) -> Importer:
@@ -113,6 +118,24 @@ class Vault:
         pages_in = [PageText(1, page_text)]
         replace_pages(self.engine, version_id, pages_in, "text-1", None)
         replace_chunks(self.engine, version_id, chunk_pages(pages_in), CHUNKER_VERSION)
+
+    def add_vectors(self, document_id: str) -> int:
+        """A synthetic vector in ``index.db`` for each of the document's chunks."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(chunks.c.id, chunks.c.version_id).where(chunks.c.document_id == document_id)
+            ).all()
+        with VectorIndex.open(self.index_db, VECTOR_MODEL, 3) as index:
+            return index.put(
+                [
+                    ChunkVector(chunk, document_id, version, [1.0, chunk, 0.5])
+                    for chunk, version in rows
+                ]
+            )
+
+    def vector_documents(self) -> list[str]:
+        with VectorIndex.open(self.index_db, VECTOR_MODEL, 3) as index:
+            return sorted(document for _, document, _ in index.entries())
 
     def search(self, query: str) -> list[str]:
         """The documents whose chunks match an FTS5 query, one entry per matching chunk."""
@@ -331,6 +354,70 @@ def test_the_delete_logs_counts_and_no_name_id_or_hash(
         assert not any(private in line for line in lines)
 
 
+# --- vectors in index.db ------------------------------------------------------------------------
+
+
+def test_the_delete_removes_the_documents_vectors_and_keeps_the_others(
+    client: TestClient, vault: Vault
+) -> None:
+    document_id = trashed_with_everything(vault)
+    other = vault.add(b"Synthetic other note.\n", "Other.txt")
+    vault.add_chunks(other, "Synthetic other note.")
+    assert vault.add_vectors(document_id) >= 1
+    assert vault.add_vectors(other) >= 1
+
+    assert client.delete(f"{URL}/{document_id}").status_code == 204
+
+    assert set(vault.vector_documents()) == {other}
+
+
+def test_a_refused_delete_keeps_the_vectors(client: TestClient, vault: Vault) -> None:
+    document_id = vault.add()
+    vault.add_chunks(document_id, "Rent is due.")
+    stored = vault.add_vectors(document_id)
+    assert client.delete(f"{URL}/{document_id}").status_code == 409
+    assert vault.vector_documents() == [document_id] * stored
+
+
+def test_a_vault_without_an_index_gets_none_from_a_delete(client: TestClient, vault: Vault) -> None:
+    document_id = trashed_with_everything(vault)
+    assert client.delete(f"{URL}/{document_id}").status_code == 204
+    assert not vault.index_db.exists()
+
+
+def test_vectors_a_failed_step_left_go_at_the_next_start(
+    vault: Vault, vault_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id = trashed_with_everything(vault)
+    other = vault.add(b"Synthetic other note.\n", "Other.txt")
+    vault.add_chunks(other, "Synthetic other note.")
+    vault.add_vectors(document_id)
+    vault.add_vectors(other)
+
+    def busy(_path: Path, _document_id: str) -> int:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(vectors, "remove_document", busy)
+    result = purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db)
+    assert isinstance(result, Purged)
+    assert result.vectors_left
+    assert document_id in vault.vector_documents()
+    monkeypatch.undo()
+    vault.engine.dispose()
+
+    restart(vault_dir)
+
+    assert set(vault.vector_documents()) == {other}
+
+
+def test_the_delete_counts_the_vectors_it_removed(vault: Vault) -> None:
+    document_id = trashed_with_everything(vault)
+    stored = vault.add_vectors(document_id)
+    result = purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db)
+    assert isinstance(result, Purged)
+    assert (result.vectors_removed, result.vectors_left) == (stored, False)
+
+
 # --- what goes and what stays ------------------------------------------------------------------
 
 
@@ -455,7 +542,9 @@ def test_a_purge_counts_each_blob_outcome(vault: Vault, monkeypatch: pytest.Monk
         raise BlobNotFoundError
 
     monkeypatch.setattr(vault.store, "delete", gone)
-    assert purge_document(vault.engine, vault.store, document_id) == Purged(0, 0, 1)
+    assert purge_document(
+        vault.engine, vault.store, document_id, index_db=vault.index_db
+    ) == Purged(0, 0, 1)
 
 
 # --- races -------------------------------------------------------------------------------------
@@ -542,7 +631,7 @@ def test_a_restore_first_makes_the_delete_a_refusal(vault: Vault) -> None:
     document_id = vault.add()
     vault.trash(document_id)
     assert restore(vault.engine, document_id)
-    result = purge_document(vault.engine, vault.store, document_id)
+    result = purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db)
     assert result is DeleteRefusal.NOT_IN_TRASH
     assert vault.store.find(SHA) is not None
 
@@ -550,7 +639,9 @@ def test_a_restore_first_makes_the_delete_a_refusal(vault: Vault) -> None:
 def test_a_delete_first_makes_the_restore_find_nothing(vault: Vault) -> None:
     document_id = vault.add()
     vault.trash(document_id)
-    assert isinstance(purge_document(vault.engine, vault.store, document_id), Purged)
+    assert isinstance(
+        purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db), Purged
+    )
     assert not restore(vault.engine, document_id)
 
 
@@ -558,7 +649,10 @@ def test_an_import_that_lifts_the_document_out_of_the_trash_first_is_kept(vault:
     document_id = vault.add()
     vault.trash(document_id)
     assert vault.add(name="Lease copy.txt") == document_id  # back in use
-    assert purge_document(vault.engine, vault.store, document_id) is DeleteRefusal.NOT_IN_TRASH
+    assert (
+        purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db)
+        is DeleteRefusal.NOT_IN_TRASH
+    )
     assert vault.store.find(SHA) is not None
 
 
@@ -599,7 +693,7 @@ def test_a_delete_racing_a_restore_never_loses_a_live_blob(vault: Vault, db_engi
         document_id = vault.add()
         vault.trash(document_id)
         deleted, restored = race(
-            lambda: purge_document(vault.engine, vault.store, document_id),  # noqa: B023
+            lambda: purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db),  # noqa: B023
             lambda: restore(db_engine, document_id),  # noqa: B023
         )
         assert not isinstance(deleted, Exception)
@@ -612,7 +706,10 @@ def test_a_delete_racing_a_restore_never_loses_a_live_blob(vault: Vault, db_engi
             assert restored is True
             assert vault.store.find(SHA) is not None
             vault.trash(document_id)
-            assert isinstance(purge_document(vault.engine, vault.store, document_id), Purged)
+            assert isinstance(
+                purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db),
+                Purged,
+            )
         every_recorded_blob_has_its_file(vault)
 
 
@@ -624,7 +721,7 @@ def test_a_delete_racing_an_import_of_the_same_bytes_never_loses_its_blob(
         vault.trash(document_id)
         request = vault.request(name="Lease again.txt")
         deleted, imported = race(
-            lambda: purge_document(vault.engine, vault.store, document_id),  # noqa: B023
+            lambda: purge_document(vault.engine, vault.store, document_id, index_db=vault.index_db),  # noqa: B023
             lambda: vault.importer(db_engine).import_file(request),  # noqa: B023
         )
         assert not isinstance(deleted, Exception), deleted
@@ -641,7 +738,9 @@ def test_a_delete_racing_an_import_of_the_same_bytes_never_loses_its_blob(
         assert vault.store.verify(SHA)
         # Leave the vault empty for the next round.
         vault.trash(live[0])
-        assert isinstance(purge_document(vault.engine, vault.store, live[0]), Purged)
+        assert isinstance(
+            purge_document(vault.engine, vault.store, live[0], index_db=vault.index_db), Purged
+        )
         assert vault.store.find(SHA) is None
 
 
