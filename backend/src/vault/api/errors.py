@@ -91,7 +91,11 @@ def _entry(loc: Sequence[Any], kind: str, names: dict[str, frozenset[str]]) -> V
     where: list[str] = []
     if place is not None:
         where.append(place)
-        if len(loc) > 1 and isinstance(loc[1], str) and loc[1] in names.get(place, ()):
+        # An unknown top-level key is the client's own name even when it spells one the route
+        # declares elsewhere (``body``, the parameter's name, is not a key of a body that is one
+        # model). An unknown key deeper down still names the declared field that holds it.
+        declared = not (kind == "extra_forbidden" and len(loc) == 2)
+        if declared and len(loc) > 1 and isinstance(loc[1], str) and loc[1] in names.get(place, ()):
             where.append(loc[1])
     fixed: Kind = "missing" if kind == "missing" else "invalid"
     return ValidationError(loc=where, msg=MESSAGES[fixed], type=fixed)
