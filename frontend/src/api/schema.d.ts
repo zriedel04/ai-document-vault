@@ -493,10 +493,11 @@ export interface components {
         };
         /**
          * FileProperties
-         * @description What the current version's bytes say about themselves (a DOCX's core properties), each
-         *     cleaned as untrusted text, or null when the file does not say it or says it in a form the
-         *     vault does not take. ``created`` and ``modified`` are W3CDTF: a year, a month, a day, or a
-         *     time in UTC to the second (``2026-03-04T05:06:07Z``).
+         * @description What the current version's bytes say about themselves (a DOCX's core properties, a PDF's
+         *     document information dictionary), each cleaned as untrusted text, or null when the file does
+         *     not say it or says it in a form the vault does not take. ``created`` and ``modified`` are in
+         *     W3CDTF's forms, whichever format the file states them in: a year, a month, a day, or a time
+         *     in UTC to the second (``2026-03-04T05:06:07Z``).
          */
         FileProperties: {
             /** Author */
@@ -511,7 +512,7 @@ export interface components {
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
+            detail: components["schemas"]["ValidationError"][];
         };
         /** Heading */
         Heading: {
@@ -800,18 +801,20 @@ export interface components {
             outcome: components["schemas"]["Outcome"];
             reason?: components["schemas"]["Reason"] | null;
         };
-        /** ValidationError */
+        /**
+         * ValidationError
+         * @description One refused part of the request: where, and whether it was missing or not valid.
+         */
         ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>;
-            /** Input */
-            input?: unknown;
             /** Location */
-            loc: (string | number)[];
+            loc: string[];
             /** Message */
             msg: string;
-            /** Error Type */
-            type: string;
+            /**
+             * Error Type
+             * @enum {string}
+             */
+            type: "missing" | "invalid";
         };
     };
     responses: never;
