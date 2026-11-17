@@ -28,11 +28,11 @@ Pre-alpha. There is nothing to use day to day yet. The plan has phases 0 to 11 p
 
 - extractors for TXT, Markdown, DOCX and the text layer of PDFs, run by the extraction stage in a sandboxed child process with a timeout and a memory cap;
 - the pages table, chunker v1 and an FTS5 keyword index, filled by the chunk stage;
-- keyword search (`POST /api/search`) and a **Search** page with highlighted snippets, type and label filters and paging;
+- keyword search (`POST /api/search`) and a **Search** page with highlighted snippets, type, label and import-date filters and paging;
 - a PDF viewer with **Go to page** that opens at a result's page, and a text view for the other types;
 - deterministic metadata: each import folder becomes a label, and a DOCX's own title, author and dates are read by the metadata stage; the document page shows the labels and file properties.
 
-Left in Phase 2: PDF file properties, PDF headings (which wait on ADR 0015, below) and the import-date filter. The phase is done when a search over the owner's own sample set finds the right documents and pages.
+Left in Phase 2: PDF file properties and PDF headings (which wait on ADR 0015, below). The phase is done when a search over the owner's own sample set finds the right documents and pages.
 
 **Built ahead of its phase:** pause, resume and retry of background processing, an image viewer for PNG and JPEG (without text until OCR), `vault.ps1` `check`, `backup`, `restore` and `export`, and `python -m vault.eval`, which scores keyword search on the public evaluation set.
 

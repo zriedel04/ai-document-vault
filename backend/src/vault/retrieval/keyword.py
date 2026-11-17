@@ -20,9 +20,11 @@ otherwise), which bounds the work one request can ask of the index.
 
 ``search`` runs the expression against ``chunks_fts`` within the scope (plan section 8, step 1:
 documents not in the trash, only the chunks of each document's current version, and the optional
-type and label filters, in the same statement, so the count, the ranking and the pages all see
-the filtered set; a label keeps the documents that carry it or a label below it, by the rule the
-document list uses, ``vault.db.labels.UNDER_LABEL_SQL``), ranks the
+type, label and import date filters, in the same statement, so the count, the ranking and the
+pages all see the filtered set; a label keeps the documents that carry it or a label below it, by
+the rule the document list uses, ``vault.db.labels.UNDER_LABEL_SQL``, and the import date is the
+document's ``created_at``, when its bytes first entered the vault, between two inclusive instants
+in UTC), ranks the
 chunks by BM25 over the text, title and section path, and returns one result per document: its
 best chunk, with a snippet of that chunk's text and the number of the document's chunks that match.
 A document scores as its best chunk does, and results are sorted by that score, then by document
@@ -50,9 +52,10 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Final
 
-from sqlalchemy import Engine, bindparam, text
+from sqlalchemy import BindParameter, DateTime, Engine, bindparam, text
 
 from vault.db.engine import read_snapshot
 from vault.db.labels import UNDER_LABEL_SQL, check_label
@@ -158,6 +161,11 @@ class SearchQuery:
     extensions: tuple[str, ...] = ()
     # Only documents that carry this label or one below it (vault.db.labels); None for all.
     label_id: str | None = None
+    # Only documents first imported (``documents.created_at``) at or after ``imported_from`` and
+    # at or before ``imported_to``, both inclusive and naive UTC as the database stores times;
+    # None leaves that side open.
+    imported_from: datetime | None = None
+    imported_to: datetime | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.limit <= MAX_PAGE:
@@ -165,6 +173,17 @@ class SearchQuery:
             raise ValueError(msg)
         if self.offset < 0:
             msg = "offset must not be negative"
+            raise ValueError(msg)
+        for bound in (self.imported_from, self.imported_to):
+            if bound is not None and bound.tzinfo is not None:
+                msg = "import bounds must be naive UTC, as the database stores times"
+                raise ValueError(msg)
+        if (
+            self.imported_from is not None
+            and self.imported_to is not None
+            and self.imported_from > self.imported_to
+        ):
+            msg = "imported_from must not be after imported_to"
             raise ValueError(msg)
 
 
@@ -228,6 +247,8 @@ scoped AS (
         AND (:any_label OR chunks.document_id IN ("""
     + UNDER_LABEL_SQL
     + """))
+        AND (:imported_from IS NULL OR documents.created_at >= :imported_from)
+        AND (:imported_to IS NULL OR documents.created_at <= :imported_to)
 )
 """
 )
@@ -241,8 +262,15 @@ _PAGE_SQL = (
     ORDER BY score, document_id
     LIMIT :limit OFFSET :offset"""
 )
-_COUNT = text(_COUNT_SQL).bindparams(bindparam("extensions", expanding=True))
-_PAGE = text(_PAGE_SQL).bindparams(bindparam("extensions", expanding=True))
+# The bounds go through the column's own type, so they are written in the form the stored times
+# have (SQLite keeps them as text in one fixed-width format, compared as text).
+_SCOPE_PARAMS: Final[tuple[BindParameter[Any], ...]] = (
+    bindparam("extensions", expanding=True),
+    bindparam("imported_from", type_=DateTime()),
+    bindparam("imported_to", type_=DateTime()),
+)
+_COUNT = text(_COUNT_SQL).bindparams(*_SCOPE_PARAMS)
+_PAGE = text(_PAGE_SQL).bindparams(*_SCOPE_PARAMS)
 _SNIPPETS = text(
     "SELECT rowid AS chunk_id,"
     " snippet(chunks_fts, 0, :open, :close, :ellipsis, :tokens) AS snippet,"
@@ -299,6 +327,8 @@ def search(engine: Engine, query: SearchQuery) -> SearchPage:
         "extensions": list(query.extensions) or [""],
         "any_label": query.label_id is None,
         "label_id": query.label_id,
+        "imported_from": query.imported_from,
+        "imported_to": query.imported_to,
     }
     # A random marker per request: no text in a document can contain it by chance or by design.
     nonce = secrets.token_hex(16)
