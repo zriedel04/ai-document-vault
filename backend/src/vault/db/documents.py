@@ -58,6 +58,7 @@ from vault.db.labels import (
 )
 from vault.db.schema import (
     JOB_STAGES,
+    LIVE_STATES,
     TRASHED,
     blobs,
     chunks,
@@ -69,10 +70,15 @@ from vault.db.schema import (
     jobs,
     pages,
 )
+from vault.ingest.validate import MIME_TYPES
 from vault.jobs.queue import retryable
 
 MAX_PAGE: Final = 100
 DEFAULT_PAGE: Final = 50
+# The values the type and state filters take: the canonical extensions the importer stores, and
+# the states of a document in use (a document in the trash is filtered by the state it had).
+EXTENSIONS: Final = frozenset(extension for extension, _kind in MIME_TYPES)
+FILTER_STATES: Final = frozenset(LIVE_STATES)
 
 
 class SortKey(StrEnum):
@@ -95,6 +101,12 @@ class ListQuery:
     in_trash: bool = False
     # Only the documents that carry this label or one below it (vault.db.labels); None for all.
     label_id: str | None = None
+    # Only the documents whose current version has one of these canonical extensions
+    # (``EXTENSIONS``); empty for every type.
+    extensions: tuple[str, ...] = ()
+    # Only the documents in one of these states (``FILTER_STATES``), or in the trash the documents
+    # that had one of them when they went there (``state_before_trash``); empty for every state.
+    states: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not 1 <= self.limit <= MAX_PAGE:
@@ -102,6 +114,13 @@ class ListQuery:
             raise ValueError(msg)
         if self.offset < 0:
             msg = "offset must not be negative"
+            raise ValueError(msg)
+        # Fixed text: the values may come from an address.
+        if not set(self.extensions) <= EXTENSIONS:
+            msg = "unknown document type"
+            raise ValueError(msg)
+        if not set(self.states) <= FILTER_STATES:
+            msg = "unknown document state"
             raise ValueError(msg)
 
 
@@ -133,7 +152,8 @@ def _utc(value: datetime) -> datetime:
 
 def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
     """One page of the list. Raises ``vault.db.labels.UnknownLabelError`` when ``query.label_id``
-    names no label."""
+    names no label. The label, type and state filters are part of the one statement that pages
+    and counts, so ``total`` counts the filtered documents."""
     ranked = (
         select(
             import_sources.c.document_id,
@@ -161,6 +181,11 @@ def list_documents(engine: Engine, query: ListQuery) -> DocumentPage:
             .columns(column("document_id", String))
         )
         where = where & documents.c.id.in_(under_label)
+    if query.extensions:
+        where = where & blobs.c.ext.in_(sorted(set(query.extensions)))
+    if query.states:
+        state = documents.c.state_before_trash if query.in_trash else documents.c.state
+        where = where & state.in_(sorted(set(query.states)))
     base = (
         select(
             documents.c.id,

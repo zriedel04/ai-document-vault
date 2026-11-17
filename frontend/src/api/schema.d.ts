@@ -20,6 +20,13 @@ export interface paths {
          *     ``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that
          *     label or a label below it. An id that names no label, or is not an id at all, is a 404 whose
          *     message does not repeat it.
+         *
+         *     ``type`` (a canonical extension, as ``POST /api/search`` takes it) and ``state`` (a state of a
+         *     document in use) may each repeat, and keep the documents that match any of their values; left
+         *     out, they keep every type or state. In the trash, ``state`` is the state a document had when
+         *     it went there, the one a restore brings back. A value the list does not take is a 422 whose
+         *     message does not repeat it. Every filter is applied in the statement that pages and counts,
+         *     so ``total`` counts only the documents that pass them all.
          */
         get: operations["read_documents_api_documents_get"];
         put?: never;
@@ -323,7 +330,10 @@ export interface paths {
          *     message does not repeat it. ``label`` keeps only the documents that carry that label or one
          *     below it, in the same statement as the rest of the scope, so ``total`` and the pages count
          *     the filtered documents; an id that names no label is a 404 whose message does not repeat
-         *     it. Nothing here is logged.
+         *     it. ``imported_from`` and ``imported_to`` keep the documents first imported at or between
+         *     those instants (``parse_instant``), in the same statement; a bound that is not an instant
+         *     with an offset, or a start after the end, is a 422 whose message names the field and not
+         *     the value. Nothing here is logged.
          */
         post: operations["search_documents_api_search_post"];
         delete?: never;
@@ -669,6 +679,10 @@ export interface components {
         };
         /** SearchRequest */
         SearchRequest: {
+            /** Imported From */
+            imported_from?: string | null;
+            /** Imported To */
+            imported_to?: string | null;
             /** Label */
             label?: string | null;
             /**
@@ -819,6 +833,8 @@ export interface operations {
                 offset?: number;
                 trash?: boolean;
                 label?: string | null;
+                type?: ("pdf" | "docx" | "png" | "jpg" | "txt" | "md")[];
+                state?: ("processing" | "searchable" | "ready" | "failed")[];
             };
             header?: never;
             path?: never;
@@ -1328,7 +1344,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The query cannot be searched */
+            /** @description The query or the import dates cannot be searched */
             422: {
                 headers: {
                     [name: string]: unknown;

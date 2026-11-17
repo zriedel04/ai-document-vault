@@ -19,7 +19,10 @@ import { type SyntheticEvent, useEffect, useState } from "react";
 
 import { ERROR_TEXT, fileName } from "../api/documents";
 import {
+  FIRST_IMPORT_DAY,
+  LAST_IMPORT_DAY,
   MAX_SEARCH_PAGE,
+  RANGE_ERROR_TEXT,
   SEARCH_ERROR_TEXT,
   SEARCH_PAGE_SIZE,
   SEARCH_TYPES,
@@ -28,6 +31,7 @@ import {
   type SearchType,
   type Segment,
   TYPE_LABEL,
+  importedRange,
 } from "../api/search";
 import { useSessionState } from "../api/session-context";
 import { useSearchResults } from "../api/useSearch";
@@ -55,8 +59,9 @@ export function Highlighted({ segments }: { segments: readonly Segment[] }) {
 /**
  * Keyword search over the vault. The query is kept in this component's state only: it never goes
  * in the address, the browser's history or a log (plan section 8), and it is gone when the page is
- * left. The type and label filters are kept the same way. The form has no action and its field no name, so even a native submission would carry no
- * query, and the browser is asked not to remember what was typed.
+ * left. The type, label and import date filters are kept the same way. The form has no action
+ * and its field no name, so even a native submission would carry no query, and the browser is
+ * asked not to remember what was typed.
  */
 export function Search() {
   const { state: session } = useSessionState();
@@ -64,7 +69,11 @@ export function Search() {
   const [query, setQuery] = useState<string | null>(null);
   const [types, setTypes] = useState<SearchType[]>([]);
   const [label, setLabel] = useState<string | null>(null);
+  // The days as the date fields give them ("YYYY-MM-DD"), "" for an open side.
+  const [firstDay, setFirstDay] = useState("");
+  const [lastDay, setLastDay] = useState("");
   const [page, setPage] = useState(1);
+  const range = importedRange(firstDay, lastDay);
   const [run, setRun] = useState(0);
 
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
@@ -119,14 +128,65 @@ export function Search() {
           }}
         />
       )}
-      {query === null ? null : session.status === "signed-in" ? (
-        <Results query={{ query, types, label, page }} run={run} onPage={setPage} />
+      <Group align="flex-start">
+        <DayField label="Imported from" value={firstDay} onChange={setFirstDay} onPage={setPage} />
+        <DayField label="Imported to" value={lastDay} onChange={setLastDay} onPage={setPage} />
+      </Group>
+      {query === null ? null : "error" in range ? (
+        <Alert color="yellow" title="Search not run">
+          <Text size="sm">{RANGE_ERROR_TEXT[range.error]}</Text>
+        </Alert>
+      ) : session.status === "signed-in" ? (
+        <Results
+          query={{
+            query,
+            types,
+            label,
+            importedFrom: range.from,
+            importedTo: range.to,
+            page,
+          }}
+          run={run}
+          onPage={setPage}
+        />
       ) : session.status === "loading" ? (
         <Loader aria-label="Checking access" />
       ) : (
         <Text>{ERROR_TEXT[session.status === "unreachable" ? "unreachable" : "needs-token"]}</Text>
       )}
     </Stack>
+  );
+}
+
+/**
+ * One side of the import date filter: a day in this computer's time zone, which the request
+ * turns into the first or last instant of that day (`importedRange`). Empty leaves the side open.
+ */
+function DayField({
+  label,
+  value,
+  onChange,
+  onPage,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  onPage: (page: number) => void;
+}) {
+  return (
+    <TextInput
+      label={label}
+      description="A day in this computer's time zone."
+      type="date"
+      min={FIRST_IMPORT_DAY}
+      max={LAST_IMPORT_DAY}
+      value={value}
+      onChange={(event) => {
+        onChange(event.currentTarget.value);
+        onPage(1);
+      }}
+      w={200}
+    />
   );
 }
 
