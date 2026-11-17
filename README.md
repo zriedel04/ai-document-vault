@@ -52,7 +52,7 @@ Browser (React)  --HTTP/JSON-->  vault-server (FastAPI, 127.0.0.1:8765)
                                    blobs/     originals, content-addressed, read-only
                                    vault.db   SQLite: documents, versions, jobs, labels,
                                               pages, chunks, FTS5 keyword index
-                                   index.db   SQLite + sqlite-vec (planned, Phase 4)
+                                   index.db   SQLite + sqlite-vec vector store (no embeddings yet)
 ```
 
 | Decision | Why, in one line | Record |
@@ -60,7 +60,7 @@ Browser (React)  --HTTP/JSON-->  vault-server (FastAPI, 127.0.0.1:8765)
 | Local-first | Extraction, OCR, search and embeddings will run locally. A cloud model will be used to answer questions, and will receive only the question, recent turns and the retrieved passages. Later, if you enable it, it may also receive a document's opening section once to suggest metadata. Every call will go through one egress gate, which refuses or drops passages from documents and labels marked local-only | [ADR 0001](docs/decisions/0001-local-first-design.md), [ADR 0010](docs/decisions/0010-cloud-models-receive-only-retrieved-context.md) |
 | Local web app, React + FastAPI, bound to `127.0.0.1` | One process serves the API and the built UI to the browser; the server refuses to listen on anything but a loopback address | [ADR 0002](docs/decisions/0002-local-web-app.md) |
 | Native Windows, no Docker or WSL2 | Docker and WSL2 add a virtual machine, slow file access and unreliable folder-change events, for a single-machine app that needs none of that | [ADR 0003](docs/decisions/0003-native-windows.md) |
-| Two SQLite files instead of PostgreSQL | `vault.db` (WAL mode) holds what cannot be rebuilt; `index.db` holds vectors that can. FTS5 keyword search is built; sqlite-vec for vectors is planned for Phase 4 | [ADR 0004](docs/decisions/0004-sqlite-instead-of-postgresql.md) |
+| Two SQLite files instead of PostgreSQL | `vault.db` (WAL mode) holds what cannot be rebuilt; `index.db` holds vectors that can. FTS5 keyword search is built; the sqlite-vec vector store is built and the embedding stage waits for the model (ADR 0013) | [ADR 0004](docs/decisions/0004-sqlite-instead-of-postgresql.md) |
 | In-process job queue instead of Redis and Celery | A `jobs` table and worker threads survive restarts and need no extra services | [ADR 0005](docs/decisions/0005-in-process-job-queue.md) |
 | Content-addressed blobs | Each original is stored once under its SHA-256, read-only, so the same file imported twice is one document with two sources | [ADR 0006](docs/decisions/0006-content-addressed-storage.md) |
 | Hybrid retrieval with Reciprocal Rank Fusion (planned) | Keyword search finds codes and names, vector search finds meaning; RRF merges the two lists by rank, because their scores are not comparable | [ADR 0007](docs/decisions/0007-hybrid-retrieval.md), [ADR 0008](docs/decisions/0008-reciprocal-rank-fusion.md) |
