@@ -3,6 +3,7 @@ import {
   Anchor,
   Badge,
   Button,
+  Checkbox,
   Group,
   Loader,
   NativeSelect,
@@ -18,10 +19,13 @@ import { Link } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import { NO_LABEL_TEXT } from "../api/labels";
+import { TYPE_LABEL } from "../api/search";
 import { useSessionState } from "../api/session-context";
 import {
+  DOCUMENT_TYPES,
   type DocumentItem,
   ERROR_TEXT,
+  FILTER_STATES,
   type Order,
   PAGE_SIZE,
   SORT_KEYS,
@@ -33,7 +37,7 @@ import {
 } from "../api/documents";
 import { type ListError, useDocumentList } from "../api/useDocuments";
 import { LabelFilter } from "../components/LabelFilter";
-import { type DocumentsSearch, withLabel } from "./documents-search";
+import { type DocumentsSearch, withFilters, withLabel } from "./documents-search";
 
 const SORT_LABEL: Record<SortKey, string> = {
   added: "Date added",
@@ -47,13 +51,14 @@ const LIST_ERROR_TEXT: Record<ListError, string> = { ...ERROR_TEXT, "no-label": 
 
 interface Props {
   search: DocumentsSearch;
-  /** Show another sort, order, page or tab; the route puts it in the address. */
+  /** Show another sort, order, page, tab or filter; the route puts it in the address. */
   onSearch: (search: DocumentsSearch) => void;
 }
 
 /**
  * The document library: one page of documents in use, or of the trash, sorted by the backend, and
- * optionally only those under one label (the label or any label below it).
+ * optionally only those under one label (the label or any label below it), of some types and in
+ * some states. In the trash, a state is the one a document had when it went there.
  */
 export function Documents({ search, onSearch }: Props) {
   const { state: session } = useSessionState();
@@ -99,6 +104,40 @@ export function Documents({ search, onSearch }: Props) {
             }}
           />
         )}
+      </Group>
+      <Group align="flex-start" gap="xl">
+        <Checkbox.Group
+          label="Type"
+          description="None checked shows every type."
+          value={search.type ?? []}
+          onChange={(values) => {
+            onSearch(withFilters(search, values, search.state ?? []));
+          }}
+        >
+          <Group mt="xs">
+            {DOCUMENT_TYPES.map((type) => (
+              <Checkbox key={type} value={type} label={TYPE_LABEL[type]} />
+            ))}
+          </Group>
+        </Checkbox.Group>
+        <Checkbox.Group
+          label="State"
+          description={
+            search.trash
+              ? "The state each had before the trash. None checked shows every state."
+              : "None checked shows every state."
+          }
+          value={search.state ?? []}
+          onChange={(values) => {
+            onSearch(withFilters(search, search.type ?? [], values));
+          }}
+        >
+          <Group mt="xs">
+            {FILTER_STATES.map((state) => (
+              <Checkbox key={state} value={state} label={STATE_LABEL[state]} />
+            ))}
+          </Group>
+        </Checkbox.Group>
       </Group>
       {session.status === "signed-in" ? (
         <DocumentPage search={search} onSearch={onSearch} />
@@ -156,6 +195,26 @@ function DocumentPage({ search, onSearch }: Props) {
   }
   const { items, total } = state.data;
   if (total === 0) {
+    if (search.type !== undefined || search.state !== undefined) {
+      return (
+        <Stack gap="xs" align="flex-start">
+          <Text c="dimmed">
+            {search.trash
+              ? "No document in the trash matches these filters."
+              : "No document in the library matches these filters."}
+          </Text>
+          <Button
+            size="xs"
+            variant="light"
+            onClick={() => {
+              onSearch(withFilters(search, [], []));
+            }}
+          >
+            Clear type and state
+          </Button>
+        </Stack>
+      );
+    }
     if (search.label !== undefined) {
       return (
         <Text c="dimmed">

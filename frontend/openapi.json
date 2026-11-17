@@ -1205,7 +1205,7 @@
   "paths": {
     "/api/documents": {
       "get": {
-        "description": "One page of documents in use (or, with ``trash``, of the trash), sorted by when they were\nadded, their name or their size, newest first unless ``order`` says otherwise. ``total``\ncounts every document the list holds, so the page can show how many pages there are.\n\n``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that\nlabel or a label below it. An id that names no label, or is not an id at all, is a 404 whose\nmessage does not repeat it.",
+        "description": "One page of documents in use (or, with ``trash``, of the trash), sorted by when they were\nadded, their name or their size, newest first unless ``order`` says otherwise. ``total``\ncounts every document the list holds, so the page can show how many pages there are.\n\n``label`` (a label's id, from ``GET /api/labels``) keeps only the documents that carry that\nlabel or a label below it. An id that names no label, or is not an id at all, is a 404 whose\nmessage does not repeat it.\n\n``type`` (a canonical extension, as ``POST /api/search`` takes it) and ``state`` (a state of a\ndocument in use) may each repeat, and keep the documents that match any of their values; left\nout, they keep every type or state. In the trash, ``state`` is the state a document had when\nit went there, the one a restore brings back. A value the list does not take is a 422 whose\nmessage does not repeat it. Every filter is applied in the statement that pages and counts,\nso ``total`` counts only the documents that pass them all.",
         "operationId": "read_documents_api_documents_get",
         "parameters": [
           {
@@ -1274,6 +1274,46 @@
                 }
               ],
               "title": "Label"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "enum": [
+                  "pdf",
+                  "docx",
+                  "png",
+                  "jpg",
+                  "txt",
+                  "md"
+                ],
+                "type": "string"
+              },
+              "title": "Type",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "enum": [
+                  "processing",
+                  "searchable",
+                  "ready",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "title": "State",
+              "type": "array"
             }
           }
         ],
