@@ -1,6 +1,6 @@
 # Frontend
 
-The React app (Vite, TypeScript, Mantine, TanStack Router, as in the stack table of `docs/architecture.md`) that the backend serves in normal use. It has the shell (navigation, light and dark mode, a typed API client that shows the backend's health), the Documents section, the Import page and the Search page; the other sections are placeholders until their features arrive.
+The React app (Vite, TypeScript, Mantine, TanStack Router, as in the stack table of `docs/architecture.md`) that the backend serves in normal use. It has the shell (navigation, light and dark mode, a typed API client), the Dashboard (the backend's health, access and background processing with **Pause** and **Resume**), the Documents section, the Import page and the Search page; Ask and Settings are placeholders until their features arrive.
 
 ## Commands
 
