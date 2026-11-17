@@ -105,6 +105,11 @@ def test_codes_match_with_and_without_the_space() -> None:
     assert build_match("CSE 485") == '(("CSE" AND "485") OR "CSE485")'
     assert build_match("(CSE485),") == '("CSE485" OR "CSE 485")'
     assert build_match("CSE 485 exam") == '(("CSE" AND "485") OR "CSE485") AND "exam"'
+    # A mark between the letters and the digits: the code joined and apart, and the word as typed
+    # (a mark SQLite's tables do not know is part of the token, and the word must find itself).
+    assert build_match("CSE-485") == '("CSE-485" OR "CSE485" OR "CSE 485")'
+    assert build_match("(cse_485),") == '("cse_485" OR "cse485" OR "cse 485")'
+    assert build_match("CSE-485-01") == '"CSE-485-01"'
     # A phrase or a prefix is taken as typed.
     assert build_match('CSE "485"') == '"CSE" AND "485"'
     assert build_match("CSE 48*") == '"CSE" AND "48"*'
@@ -227,6 +232,26 @@ def test_course_codes_match_with_or_without_a_space(
     assert sorted(found(client, "cse 485")) == sorted([spaced, joined, apart])
     # A phrase is taken as typed: the words together, which a joined code is not.
     assert found(client, '"CSE 485"') == [spaced]
+
+
+# Every way a document or a query writes a code: the tokenizer splits on anything that is not a
+# letter or digit, so all but the joined form index as the two words ``cse`` and ``485``.
+CODE_FORMS = ("CSE 485", "CSE485", "CSE-485", "CSE_485", "CSE/485", "CSE.485", "CSE\u2013485")
+
+
+def test_every_written_form_of_a_code_finds_every_other(
+    client: TestClient,
+    library: Library,
+) -> None:
+    documents = {
+        form: add(library, f"form-{number}.txt", f"Notes for {form}, week two.")
+        for number, form in enumerate(CODE_FORMS)
+    }
+    add(library, "other.txt", "CSE 486 and CSE486 and CSE-486 meet elsewhere.")
+    expected = sorted(documents.values())
+    for form in CODE_FORMS:
+        for query in (form, form.lower(), f"({form}),"):
+            assert sorted(found(client, query)) == expected, query
 
 
 def test_every_term_must_match(client: TestClient, library: Library) -> None:

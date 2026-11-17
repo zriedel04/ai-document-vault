@@ -11,7 +11,10 @@ quoted string, so no input can be an FTS5 operator, a column filter or a syntax 
 - A word ending in ``*`` is a prefix: ``partit*`` finds ``partitioning``.
 - Course and other codes match with and without the space (plan section 8, step 2): ``CSE485``
   finds ``CSE485`` and ``CSE 485``, and ``CSE 485`` finds both too. A word of letters followed by
-  a word of digits counts as one term.
+  a word of digits counts as one term. A code written with a mark between its letters and digits
+  (``CSE-485``, ``CSE_485``, ``CSE/485``) is read as the code too, so it finds the joined form as
+  well; the tokenizer splits at the mark, so a document that writes it so is found as ``CSE 485``
+  is, and every written form of a code finds every other.
 - Words with no letter or digit (``-``, ``&``) are dropped, because the tokenizer drops them too.
   A query left with no term matches nothing and is not run.
 
@@ -69,7 +72,8 @@ ELLIPSIS: Final = "…"
 
 _LETTERS = re.compile(r"[^\W\d_]+")
 _DIGITS = re.compile(r"\d+")
-_CODE = re.compile(r"([^\W\d_]+)(\d+)")
+# Letters, then digits, joined or with marks between them (``CSE485``, ``CSE-485``, ``CSE_485``).
+_CODE = re.compile(r"([^\W\d_]+)[\W_]*(\d+)")
 # Leading and trailing characters that are neither letters nor digits ("CSE485," or "(485").
 _EDGES = re.compile(r"^[\W_]+|[\W_]+$")
 
@@ -130,7 +134,11 @@ def build_match(query: str) -> str | None:
         code = _CODE.fullmatch(bare)
         if code:
             letters, digits = code.groups()
-            terms.append(f"({_string(bare)} OR {_string(f'{letters} {digits}')})")
+            # The word as typed stays one of the forms: SQLite's tables do not know every mark
+            # Python does (a character newer than them is part of a token), and such a word must
+            # still find itself.
+            forms = dict.fromkeys((bare, letters + digits, f"{letters} {digits}"))
+            terms.append("(" + " OR ".join(_string(form) for form in forms) + ")")
             continue
         if _LETTERS.fullmatch(bare) and position < len(pieces):
             following, following_phrase = pieces[position]
