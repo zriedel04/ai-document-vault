@@ -89,7 +89,8 @@ def test_a_window_value_on_a_document_is_never_echoed(
         ({"query": "a", "offset": 1_000_000_001}, [["body", "offset"]]),
         ({"query": "a", "offset": 1.5}, [["body", "offset"]]),
         ({"query": "a", "types": [CANARY] * 11}, [["body", "types"]]),
-        ({CANARY: CANARY}, [["body", "query"]]),
+        # A missing field and an unknown key: the key is never named.
+        ({CANARY: CANARY}, [["body", "query"], ["body"]]),
         ([CANARY], [["body"]]),
         (CANARY, [["body"]]),
         ({"query": 12, "label": [CANARY]}, [["body", "query"], ["body", "label"]]),
@@ -100,8 +101,10 @@ def test_body_values_and_keys_are_never_echoed(
 ) -> None:
     response = client.post("/api/search", json=body)
     assert_private(response, caplog)
-    kind = MISSING if body == {CANARY: CANARY} else INVALID
-    assert response.json() == {"detail": [{"loc": loc, **kind} for loc in locs]}
+    # Only the field the code declares can be missing; the rest are invalid.
+    kinds = [MISSING if body == {CANARY: CANARY} and len(loc) == 2 else INVALID for loc in locs]
+    expected = [{"loc": loc, **kind} for loc, kind in zip(locs, kinds, strict=True)]
+    assert response.json() == {"detail": expected}
 
 
 @pytest.mark.parametrize(
@@ -120,13 +123,13 @@ def test_a_body_that_is_not_json_is_never_echoed(
     assert response.json() == {"detail": [{"loc": ["body"], **INVALID}]}
 
 
-def test_an_unknown_body_field_is_ignored_and_never_echoed(
+def test_an_unknown_body_field_is_refused_and_never_echoed(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """``test_request_bodies.py`` checks this for every body route."""
     response = client.post("/api/search", json={"query": "a", CANARY: CANARY})
-    assert response.status_code == 200
-    assert CANARY not in response.text
-    assert CANARY not in server_log(caplog)
+    assert_private(response, caplog)
+    assert response.json() == {"detail": [{"loc": ["body"], **INVALID}]}
 
 
 def test_a_missing_header_names_only_the_header(
