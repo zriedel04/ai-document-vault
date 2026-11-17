@@ -1,7 +1,9 @@
 """Synthetic PDFs for the PDF extractor's tests, written byte by byte.
 
 Small and fully controlled: pages with text in a standard font (Helvetica, no font file), pages
-with no text layer, an optional ``ToUnicode`` map (to give PDFium any characters), a page tree that
+with no text layer, an optional ``ToUnicode`` map (to give PDFium any characters), an optional
+font encoding with glyph names PDFium does not know (glyphs with no Unicode mapping), pages of any
+size, a page tree that
 claims more pages than it holds, and the standard security handler (revision 2, RC4 with a 40-bit
 key, ISO 32000-1 section 7.6.3), with a user password or an owner password only.
 """
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from collections.abc import Sequence
 
 # The padding string of the standard security handler (ISO 32000-1, 7.6.3.3, algorithm 2).
 _PAD: bytes = bytes.fromhex("28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A")
@@ -67,16 +70,22 @@ def build(
     security_filter: str = "Standard",
     to_unicode: bytes | None = None,
     claimed_pages: int | None = None,
+    unknown_glyphs: range | None = None,
+    sizes: Sequence[tuple[float, float]] | None = None,
 ) -> bytes:
     """A PDF with one page per item of ``pages``: a content stream, or None for a page with no
     content at all. ``user_password`` encrypts the file (``b""`` for an owner password only);
-    ``claimed_pages`` is the page count the page tree claims."""
+    ``claimed_pages`` is the page count the page tree claims. ``unknown_glyphs`` gives the font an
+    encoding that names each of those one-byte codes with a glyph name PDFium does not know
+    (``/g1``, ``/g2`` ...), so PDFium has no Unicode for them and gives their raw codes. ``sizes``
+    is each page's width and height in points (US Letter, 612 by 792, by default)."""
     objects: dict[int, bytes] = {}
     streams: dict[int, bytes] = {}
     catalog, tree, font = 1, 2, 3
     next_id = 4
     kids: list[int] = []
-    for content in pages:
+    for position, content in enumerate(pages):
+        width, height = (612, 792) if sizes is None else sizes[position]
         page_id, next_id = next_id, next_id + 1
         kids.append(page_id)
         resources = ""
@@ -85,13 +94,16 @@ def build(
             streams[content_id] = content
             resources = f"/Resources << /Font << /F1 {font} 0 R >> >> /Contents {content_id} 0 R "
         objects[page_id] = (
-            f"<< /Type /Page /Parent {tree} 0 R /MediaBox [0 0 612 792] {resources}>>".encode()
-        )
+            f"<< /Type /Page /Parent {tree} 0 R /MediaBox [0 0 {width} {height}] {resources}>>"
+        ).encode()
     objects[catalog] = f"<< /Type /Catalog /Pages {tree} 0 R >>".encode()
     count = len(pages) if claimed_pages is None else claimed_pages
     kid_list = " ".join(f"{kid} 0 R" for kid in kids)
     objects[tree] = f"<< /Type /Pages /Kids [{kid_list}] /Count {count} >>".encode()
     font_entries = "/Type /Font /Subtype /Type1 /BaseFont /Helvetica"
+    if unknown_glyphs is not None:
+        names = " ".join(f"/g{number}" for number in range(1, len(unknown_glyphs) + 1))
+        font_entries += f" /Encoding << /Differences [{unknown_glyphs.start} {names}] >>"
     if to_unicode is not None:
         map_id, next_id = next_id, next_id + 1
         streams[map_id] = to_unicode
