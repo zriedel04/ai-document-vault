@@ -28,10 +28,13 @@ def advisory(ghsa: str = GHSA, name: str = "picomatch", vulnerable: str = "<=4.0
     }
 
 
-def report(vulnerabilities: dict[str, list[object]]) -> dict:
+def report(vulnerabilities: dict[str, list[object]], **nodes: list[str]) -> dict:
     return {
         "auditReportVersion": 2,
-        "vulnerabilities": {name: {"via": via} for name, via in vulnerabilities.items()},
+        "vulnerabilities": {
+            name: {"via": via, "nodes": nodes.get(name, [f"node_modules/{name}"])}
+            for name, via in vulnerabilities.items()
+        },
     }
 
 
@@ -112,6 +115,45 @@ class Exemption(unittest.TestCase):
         failures, _ = run(lockfile=runtime)
         self.assertIn("not development-only", failures[0])
 
+    def test_an_aliased_runtime_copy_fails(self) -> None:
+        aliased = {
+            "lockfileVersion": 3,
+            "packages": DEV_LOCK["packages"]
+            | {"node_modules/runtime-glob": {"name": "picomatch", "version": "4.0.7"}},
+        }
+        failures, _ = run(lockfile=aliased)
+        self.assertIn("not development-only", failures[0])
+
+    def test_an_aliased_dev_copy_is_a_copy_too(self) -> None:
+        aliased = {
+            "lockfileVersion": 3,
+            "packages": {"node_modules/glob": {"name": "picomatch", "dev": True}},
+        }
+        data = report({"picomatch": [advisory()]}, picomatch=["node_modules/glob"])
+        self.assertEqual(run(data, aliased)[0], [])
+
+    def test_a_folder_named_like_the_package_that_installs_another_is_not_a_copy(self) -> None:
+        renamed = {
+            "lockfileVersion": 3,
+            "packages": {
+                "node_modules/picomatch": {"dev": True},
+                "node_modules/a/node_modules/picomatch": {"name": "other"},
+            },
+        }
+        self.assertEqual(run(report({"picomatch": [advisory()]}), renamed)[0], [])
+
+    def test_every_path_npm_reports_must_be_a_listed_copy(self) -> None:
+        data = report(
+            {"picomatch": [advisory()]},
+            picomatch=["node_modules/picomatch", "node_modules/runtime-glob"],
+        )
+        failures, _ = run(data)
+        self.assertIn("does not list as this package", failures[0])
+
+    def test_the_project_itself_is_not_a_copy(self) -> None:
+        own = {"packages": {"": {"name": "picomatch"}, "node_modules/picomatch": {"dev": True}}}
+        self.assertEqual(run(report({"picomatch": [advisory()]}), own)[0], [])
+
     def test_a_package_missing_from_the_lock_fails(self) -> None:
         failures, _ = run(lockfile={"packages": {"node_modules/picomatchx": {"dev": True}}})
         self.assertIn("not in the lock file", failures[0])
@@ -140,6 +182,10 @@ class Unreadable(unittest.TestCase):
             report({"x": [42]}),
             report({"x": ["not-listed"]}),
             report({"x": [{"url": f"https://github.com/advisories/{GHSA}"}]}),
+            report({"picomatch": [advisory()]}, picomatch=[]),
+            {"auditReportVersion": 2, "vulnerabilities": {"picomatch": {"via": [advisory()]}}},
+            report({"picomatch": [advisory()]}, picomatch=[7]),
+            report({"other": [advisory()]}),
         ):
             with self.subTest(data=data), self.assertRaises(audit.AuditError):
                 run(data)
@@ -162,7 +208,13 @@ class Unreadable(unittest.TestCase):
                 run(latest=latest)
 
     def test_an_unreadable_lock_file_is_refused(self) -> None:
-        for lockfile in (None, {}, {"packages": []}):
+        for lockfile in (
+            None,
+            {},
+            {"packages": []},
+            {"packages": {"node_modules/picomatch": {"name": 7, "dev": True}}},
+            {"packages": {"node_modules/picomatch": {"name": "", "dev": True}}},
+        ):
             with self.subTest(lockfile=lockfile), self.assertRaises(audit.AuditError):
                 run(lockfile=lockfile)
 

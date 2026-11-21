@@ -8,7 +8,9 @@ only while all of these are true:
 - the advisory is for the package the exemption names;
 - the exemption has not expired (UTC date; an expired exemption fails and must be reviewed again);
 - every copy of that package in frontend/package-lock.json is development-only, so it never reaches
-  the built app;
+  the built app. A copy is found by the package it installs (the entry's `name`, which npm writes
+  for an alias such as `"glob": "npm:picomatch@4"`), not by its folder, and every path npm reports
+  for the package must be one of those copies;
 - no fixed release exists: the newest published version of the package is still inside the
   advisory's vulnerable range. Once a fix is published the exemption stops applying and the build
   fails until the lock file is updated, so an exemption cannot outlive the reason for it.
@@ -133,6 +135,19 @@ def read_report(report: object) -> dict[str, list[object]]:
     return result
 
 
+def read_nodes(report: Mapping[str, object]) -> dict[str, list[str]]:
+    """The installed paths (`nodes`) npm reports for each vulnerable package."""
+    vulnerabilities = report["vulnerabilities"]
+    assert isinstance(vulnerabilities, dict)  # checked by read_report
+    result: dict[str, list[str]] = {}
+    for name, entry in vulnerabilities.items():
+        nodes = entry.get("nodes")
+        if not isinstance(nodes, list) or not nodes or not all(isinstance(n, str) for n in nodes):
+            raise AuditError(f"entry {name!r} has no list of installed paths")
+        result[name] = nodes
+    return result
+
+
 def read_advisory(item: Mapping[str, object]) -> Advisory:
     url, name, severity, vulnerable = (item.get(k) for k in ("url", "name", "severity", "range"))
     if not all(isinstance(v, str) for v in (url, name, severity, vulnerable)):
@@ -144,22 +159,43 @@ def read_advisory(item: Mapping[str, object]) -> Advisory:
     return Advisory(match[1], name, str(severity), str(vulnerable))
 
 
-def lock_copies(lock: object, package: str) -> list[bool]:
-    """Whether each copy of `package` in a package-lock.json (version 2 or 3) is development-only."""
+def installed_name(path: str, info: object) -> str | None:
+    """The real name of the package a lock entry installs: its `name` field, else its folder.
+
+    npm writes `name` when it differs from the folder, as for an alias (`"glob": "npm:picomatch@4"`
+    installs picomatch at `node_modules/glob`), so a copy is found by what it is, not where it sits.
+    """
+    if isinstance(info, dict) and "name" in info:
+        name = info["name"]
+        if not isinstance(name, str) or not name:
+            raise AuditError(f"lock entry {path!r} has an unreadable name")
+        return name
+    marker = "node_modules/"
+    if marker not in path:
+        return None
+    return path.rsplit(marker, 1)[1]
+
+
+def lock_copies(lock: object, package: str) -> dict[str, bool]:
+    """Each copy of `package` in a package-lock.json (version 2 or 3): its path and whether it is
+    development-only. The root entry (`""`) is the project itself and is not a copy."""
     if not isinstance(lock, dict) or not isinstance(lock.get("packages"), dict):
         raise AuditError("not a package-lock.json with a packages table")
-    copies: list[bool] = []
+    copies: dict[str, bool] = {}
     for path, info in lock["packages"].items():
-        if isinstance(path, str) and (path == f"node_modules/{package}" or path.endswith(
-            f"/node_modules/{package}"
-        )):
-            copies.append(isinstance(info, dict) and info.get("dev") is True)
+        if not isinstance(path, str):
+            raise AuditError("the lock file has a path that is not text")
+        if path == "":
+            continue
+        if installed_name(path, info) == package:
+            copies[path] = isinstance(info, dict) and info.get("dev") is True
     return copies
 
 
 def excuse(
     advisory: Advisory,
     *,
+    nodes: Sequence[str],
     lock: object,
     latest: Callable[[str], str],
     today: date,
@@ -175,8 +211,10 @@ def excuse(
     copies = lock_copies(lock, advisory.package)
     if not copies:
         return "the package is not in the lock file"
-    if not all(copies):
+    if not all(copies.values()):
         return "a copy of the package is not development-only"
+    if not set(nodes) <= set(copies):
+        return "npm reports a copy the lock file does not list as this package"
     newest = latest(advisory.package)
     if not in_range(newest, advisory.vulnerable):
         return f"version {newest} is outside the vulnerable range {advisory.vulnerable}: update"
@@ -192,6 +230,8 @@ def check(
 ) -> tuple[list[str], list[str]]:
     """Failures, and notices for the advisories excused. Raises AuditError on unreadable input."""
     vias = read_report(report)
+    assert isinstance(report, dict)
+    nodes = read_nodes(report)
     advisories: dict[str, Advisory] = {}
     direct: dict[str, list[str]] = {name: [] for name in vias}
     depends: dict[str, list[str]] = {name: [] for name in vias}
@@ -213,7 +253,9 @@ def check(
     excused: set[str] = set()
     for advisory_id in sorted(advisories):
         advisory = advisories[advisory_id]
-        why = excuse(advisory, lock=lock, latest=latest, today=today)
+        if advisory.package not in nodes:
+            raise AuditError(f"no report entry for {advisory.package!r}, which {advisory_id} names")
+        why = excuse(advisory, nodes=nodes[advisory.package], lock=lock, latest=latest, today=today)
         label = f"{advisory_id} ({advisory.severity}) in {advisory.package} {advisory.vulnerable}"
         if why is None:
             excused.add(advisory_id)
