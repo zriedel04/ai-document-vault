@@ -35,10 +35,10 @@ export function Document(props: DocumentProps) {
         setState("error");
         return;
       }
-      // Only numPages is read by the viewer.
-      onLoadSuccess?.({ numPages: script.pages } as Parameters<
-        NonNullable<typeof onLoadSuccess>
-      >[0]);
+      // Only numPages is read by the viewer, so the stand-in document is a plain object that has
+      // it, and not a PDF.js PDFDocumentProxy (which cannot be built without PDF.js running).
+      const loaded: unknown = { numPages: script.pages };
+      onLoadSuccess?.(loaded as Parameters<NonNullable<typeof onLoadSuccess>>[0]);
       setState("ok");
     });
     return () => {
