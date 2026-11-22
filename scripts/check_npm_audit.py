@@ -11,9 +11,11 @@ only while all of these are true:
   the built app. A copy is found by the package it installs (the entry's `name`, which npm writes
   for an alias such as `"glob": "npm:picomatch@4"`), not by its folder, and every path npm reports
   for the package must be one of those copies;
-- no fixed release exists: the newest published version of the package is still inside the
-  advisory's vulnerable range. Once a fix is published the exemption stops applying and the build
-  fails until the lock file is updated, so an exemption cannot outlive the reason for it.
+- no fixed release exists: every published release of the package (`npm view <package> versions`,
+  not only the version the `latest` tag points at, since a fix can be published under another tag)
+  that is not older than the oldest installed copy is still inside the advisory's vulnerable range.
+  Prereleases do not count as a fix. Once a fix is published the exemption stops applying and the
+  build fails until the lock file is updated, so an exemption cannot outlive the reason for it.
 
 A package npm marks vulnerable only because it depends on an excused package is excused with it;
 one that depends on anything else is not. Anything the script cannot read (an audit report of
@@ -22,7 +24,7 @@ understand, a lookup that fails) fails the build: nothing is assumed to be fine.
 
 Standard library only. Usage (run from the repository root; it calls npm in frontend/):
     python scripts/check_npm_audit.py
-Tests pass the audit report, lock file, latest versions and date in directly.
+Tests pass the audit report, lock file, published versions and date in directly.
 """
 
 from __future__ import annotations
@@ -67,6 +69,12 @@ ADVISORY_URL = re.compile(
     r"https://github\.com/advisories/(GHSA(?:-[23456789cfghjmpqrvwx]{4}){3})", re.ASCII
 )
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", re.ASCII)
+# A prerelease (`4.0.8-beta.1`) or a release with build metadata, which is not counted as a fix.
+PRERELEASE = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?",
+    re.ASCII,
+)
 COMPARATOR = re.compile(r"(<=|>=|<|>|=)?(.+)", re.ASCII)
 
 
@@ -192,12 +200,48 @@ def lock_copies(lock: object, package: str) -> dict[str, bool]:
     return copies
 
 
+def copy_versions(lock: object, paths: Sequence[str]) -> list[tuple[int, int, int]]:
+    """The installed version of each listed lock entry; one that is not a release version fails."""
+    assert isinstance(lock, dict) and isinstance(lock.get("packages"), dict)  # read by lock_copies
+    versions = []
+    for path in paths:
+        info = lock["packages"][path]
+        version = info.get("version") if isinstance(info, dict) else None
+        if not isinstance(version, str):
+            raise AuditError(f"lock entry {path!r} has no version")
+        versions.append(parse_version(version))
+    return versions
+
+
+def fixed_release(
+    published: Sequence[str], vulnerable: str, oldest: tuple[int, int, int]
+) -> str | None:
+    """A published release, not older than `oldest`, that is outside the vulnerable range.
+
+    Every published version is judged, whatever tag it carries. A prerelease does not count; any
+    version that is neither a release nor a prerelease is refused, so nothing is assumed.
+    """
+    if not published:
+        raise AuditError("the registry lists no published version")
+    fixes = []
+    for version in published:
+        if VERSION.fullmatch(version) is None:
+            if PRERELEASE.fullmatch(version) is None:
+                raise AuditError(f"not a published version: {version!r}")
+            continue
+        if parse_version(version) >= oldest and not in_range(version, vulnerable):
+            fixes.append(parse_version(version))
+    if not fixes:
+        return None
+    return ".".join(str(part) for part in max(fixes))
+
+
 def excuse(
     advisory: Advisory,
     *,
     nodes: Sequence[str],
     lock: object,
-    latest: Callable[[str], str],
+    published: Callable[[str], Sequence[str]],
     today: date,
 ) -> str | None:
     """None if the advisory is a current exemption, otherwise why it fails the build."""
@@ -215,9 +259,10 @@ def excuse(
         return "a copy of the package is not development-only"
     if not set(nodes) <= set(copies):
         return "npm reports a copy the lock file does not list as this package"
-    newest = latest(advisory.package)
-    if not in_range(newest, advisory.vulnerable):
-        return f"version {newest} is outside the vulnerable range {advisory.vulnerable}: update"
+    oldest = min(copy_versions(lock, list(copies)))
+    fix = fixed_release(published(advisory.package), advisory.vulnerable, oldest)
+    if fix is not None:
+        return f"version {fix} is outside the vulnerable range {advisory.vulnerable}: update"
     return None
 
 
@@ -225,7 +270,7 @@ def check(
     report: object,
     lock: object,
     *,
-    latest: Callable[[str], str],
+    published: Callable[[str], Sequence[str]],
     today: date,
 ) -> tuple[list[str], list[str]]:
     """Failures, and notices for the advisories excused. Raises AuditError on unreadable input."""
@@ -255,7 +300,7 @@ def check(
         advisory = advisories[advisory_id]
         if advisory.package not in nodes:
             raise AuditError(f"no report entry for {advisory.package!r}, which {advisory_id} names")
-        why = excuse(advisory, nodes=nodes[advisory.package], lock=lock, latest=latest, today=today)
+        why = excuse(advisory, nodes=nodes[advisory.package], lock=lock, published=published, today=today)
         label = f"{advisory_id} ({advisory.severity}) in {advisory.package} {advisory.vulnerable}"
         if why is None:
             excused.add(advisory_id)
@@ -291,11 +336,17 @@ def _npm(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def npm_latest(package: str) -> str:
-    result = _npm("view", package, "version")
+def npm_published(package: str) -> list[str]:
+    """Every version of `package` the registry lists, whatever dist-tag it was published under."""
+    result = _npm("view", package, "versions", "--json")
     if result.returncode != 0:
         raise AuditError(f"npm view {package} failed")
-    return result.stdout.strip()
+    versions = json.loads(result.stdout)
+    if isinstance(versions, str):  # npm prints a single version as a string, not a list
+        versions = [versions]
+    if not isinstance(versions, list) or not all(isinstance(v, str) for v in versions):
+        raise AuditError(f"npm view {package} gave no list of versions")
+    return versions
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -307,7 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = json.loads(result.stdout)
         lock = json.loads((FRONTEND / "package-lock.json").read_text(encoding="utf-8"))
         failures, notices = check(
-            report, lock, latest=npm_latest, today=datetime.now(UTC).date()
+            report, lock, published=npm_published, today=datetime.now(UTC).date()
         )
     except (AuditError, OSError, ValueError) as error:
         print(f"npm audit check could not run: {error}", file=sys.stderr)
