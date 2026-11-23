@@ -18,11 +18,16 @@ What the text holds:
 - Characters that are not text are removed: control characters other than tab and line feed (a
   broken font map can give them, and NUL cannot be stored), and the noncharacters U+FFFE and U+FFFF.
   A UTF-16 unit that is half of a pair is replaced by U+FFFD, so the text is always storable.
-- A page with no text layer, or whose text is only white space, is stored with empty text. That is
-  the mark for the OCR stage of Phase 3 (plan section 7: "a PDF page is OCRed only if its text layer
-  is empty or obviously garbage"): it looks for a PDF page whose ``text`` is ``""``. No new field is
-  added for it; the "obviously garbage" half of the rule needs the page area, which arrives with
-  that stage.
+- A page with no text layer, or whose text is only white space, is stored with empty text.
+- Each page also carries its measurements for the OCR decision (``Page.layer``, a ``PageLayer``):
+  its width and height in points (``FPDF_GetPageWidthF`` and ``HeightF``; the rule uses only
+  their product, the area, which a rotation does not change; each taken between 3 and 14,400
+  points, ``text_layer.side``), and how many of its glyphs PDFium flags as having no Unicode
+  mapping (``FPDFText_HasUnicodeMapError``) while their character reads as a letter, number or
+  mark (``text_layer.is_readable``), at most the readable characters of the stored text. The
+  extraction stage decides from them and the text whether the page needs OCR
+  (``vault.ingest.text_layer``, plan section 7: "a PDF page is OCRed only if its text layer is
+  empty or obviously garbage"); nothing here runs OCR.
 
 Refused, each with an error class of its own and fixed text, never the file's name or content, and
 without the library's exception attached (its message is not kept):
@@ -78,16 +83,19 @@ from __future__ import annotations
 
 import ctypes
 import re
+import sys
 import threading
 from typing import Final
 
 import pypdfium2
 import pypdfium2.raw as pdfium_c
 
-from vault.ingest.extractors import Extraction, ExtractionError, Page, PdfProperties
+from vault.ingest import text_layer
+from vault.ingest.extractors import Extraction, ExtractionError, Page, PageLayer, PdfProperties
 from vault.ingest.validate import DEFAULT_LIMITS, PDF_HEADER, Limits, Reason
 
-VERSION: Final = "pdf-1"
+# pdf-2 adds the measurements of each page's text layer (``Page.layer``); pdf-1 had none.
+VERSION: Final = "pdf-2"
 
 # PDFium's mark for a hyphen at a line end that joins the two halves of a word.
 SOFT_HYPHEN_MARK: Final = "￾"
@@ -215,9 +223,9 @@ def _pages(data: bytes, limits: Limits) -> tuple[Page, ...]:
         pages: list[Page] = []
         total = 0
         for index in range(count):
-            text = _page_text(document, index, limits.max_pdf_text_chars - total)
+            text, layer = _page_text(document, index, limits.max_pdf_text_chars - total)
             total += len(text)
-            pages.append(Page(index + 1, text))
+            pages.append(Page(index + 1, text, layer=layer))
         return tuple(pages)
     finally:
         # ``data`` is referenced until here: PDFium reads the bytes in place while the document is
@@ -225,21 +233,25 @@ def _pages(data: bytes, limits: Limits) -> tuple[Page, ...]:
         document.close()
 
 
-def _page_text(document: pypdfium2.PdfDocument, index: int, budget: int) -> str:
-    """The cleaned text of page ``index``, if it fits in ``budget`` characters."""
+def _page_text(document: pypdfium2.PdfDocument, index: int, budget: int) -> tuple[str, PageLayer]:
+    """The cleaned text of page ``index``, if it fits in ``budget`` characters, and the
+    measurements of its text layer."""
     try:
         page = document.get_page(index)
     except pypdfium2.PdfiumError:
         raise NotPdfError from None
     try:
+        width, height = page.get_size()
         try:
             textpage = page.get_textpage()
         except pypdfium2.PdfiumError:
             raise NotPdfError from None
         try:
-            if textpage.count_chars() > budget:
+            count = textpage.count_chars()
+            if count > budget:
                 raise PdfLimitError("text")
             raw = textpage.get_text_range(errors="replace")
+            unmapped = _unmapped(textpage, count)
         finally:
             textpage.close()
     finally:
@@ -247,7 +259,27 @@ def _page_text(document: pypdfium2.PdfDocument, index: int, budget: int) -> str:
     text = clean(raw)
     if len(text) > budget:
         raise PdfLimitError("text")
-    return text
+    layer = PageLayer(
+        width=text_layer.side(float(width)),
+        height=text_layer.side(float(height)),
+        # A glyph PDFium counts may not be in the text it returns (it drops some codes), so the
+        # count never goes past what the stored text holds: the stage refuses a larger one.
+        unmapped=min(unmapped, text_layer.counts(text)[1]),
+    )
+    return text, layer
+
+
+def _unmapped(textpage: pypdfium2.PdfTextPage, count: int) -> int:
+    """How many of the ``count`` characters PDFium flags as having no Unicode mapping while the
+    character it gives (the raw character code) reads as a letter, number or mark."""
+    unmapped = 0
+    for char_index in range(count):
+        if pdfium_c.FPDFText_HasUnicodeMapError(textpage.raw, char_index) != 1:
+            continue
+        code = pdfium_c.FPDFText_GetUnicode(textpage.raw, char_index)
+        if 0 < code <= sys.maxunicode and text_layer.is_readable(chr(code)):
+            unmapped += 1
+    return unmapped
 
 
 def clean(raw: str) -> str:

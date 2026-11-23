@@ -5,7 +5,8 @@ file and is the same on every system: the PDFs with ``pdf_builder``, the DOCX fi
 zips written member by member (fixed dates and attributes, so the bytes do not depend on the system,
 python-docx's template or zlib), and the text files as encoded strings. Each golden file in
 ``GOLDEN_DIR`` records one fixture's SHA-256 and what the product's extractor gives for it: its
-pages, text, headings and offsets, or the class of the error that refused it (and the validator's
+pages, text, headings and offsets (and for a PDF page its measurements and the OCR decision the
+extraction stage stores for it), or the class of the error that refused it (and the validator's
 reason, when the error carries one).
 
 The extractors run the way the extraction stage runs them: through the sandbox entry points
@@ -15,7 +16,7 @@ from the sandbox, so each fixture is also extracted in this process, which must 
 result, and gives the reason the golden file records.
 
 What a golden file records is what the current extractor versions (``text-1``, ``docx-1``,
-``pdf-1``) give, not what they should give: the PDF fixtures in particular record pdf-1's reading
+``pdf-2``) give, not what they should give: the PDF fixtures in particular record pdf-2's reading
 order across two columns, which ADR 0015 (Proposed) leaves to the owner's PDF spike.
 
 To regenerate the golden files after a deliberate change to a fixture or an extractor, run in
@@ -39,8 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from vault.db.pages import PageText
 from vault.ingest import extract_stage
-from vault.ingest.extractors import Extraction, ExtractionError
+from vault.ingest.extractors import Extraction, ExtractionError, Page
 from vault.ingest.extractors import docx as docx_extractor
 from vault.ingest.extractors import pdf as pdf_extractor
 from vault.ingest.extractors import text as text_extractor
@@ -480,6 +482,22 @@ def _pdf_non_english() -> bytes:
     )
 
 
+def _pdf_text_layers() -> bytes:
+    sentence = "The survey began in early spring, when the water was high."
+    return pdf_builder.build(
+        [
+            pdf_builder.text_stream([sentence, sentence]),
+            pdf_builder.text_stream(["ABCDEFGHIJ", "ABCDEFGHIJ"]),
+            pdf_builder.text_stream(["12"]),
+            None,
+            pdf_builder.text_stream(["A short label for a drawing"]),
+            pdf_builder.text_stream(["A short label for a drawing"]),
+        ],
+        unknown_glyphs=range(0x41, 0x4B),
+        sizes=[(612, 792)] * 4 + [(595, 842), (5000, 5000)],
+    )
+
+
 def _pdf_encrypted() -> bytes:
     return pdf_builder.build([pdf_builder.text_stream(["Secret"])], user_password=b"user")
 
@@ -671,6 +689,13 @@ FIXTURES: Final[tuple[Fixture, ...]] = (
         _pdf_pages,
     ),
     Fixture(
+        "pdf-text-layers",
+        "pdf",
+        "One page for each OCR decision: text, glyphs with no Unicode mapping (A to J), a page "
+        "number alone, no content, and one line on an A4 page and on a page of 5,000 points",
+        _pdf_text_layers,
+    ),
+    Fixture(
         "pdf-non-english",
         "pdf",
         "Hebrew in logical and visual order, CJK, a character outside the BMP and combining marks, "
@@ -728,29 +753,42 @@ FIXTURES: Final[tuple[Fixture, ...]] = (
 )
 
 
-def _extraction_json(extraction: Extraction) -> dict[str, object]:
+def _extraction_json(extraction: Extraction, stored: tuple[PageText, ...]) -> dict[str, object]:
     return {
         "extractor": extraction.extractor,
         "encoding": extraction.encoding,
         "pages": [
-            {
-                "number": page.number,
-                "text": page.text,
-                "headings": [
-                    {
-                        "level": heading.level,
-                        "title": heading.title,
-                        "start": heading.start,
-                        "end": heading.end,
-                        # The text the offsets point at, so a reviewer can read them.
-                        "text_at_offsets": page.text[heading.start : heading.end],
-                    }
-                    for heading in page.headings
-                ],
-            }
-            for page in extraction.pages
+            _page_json(page, kept) for page, kept in zip(extraction.pages, stored, strict=True)
         ],
     }
+
+
+def _page_json(page: Page, stored: PageText) -> dict[str, object]:
+    """A page as the golden file records it; a PDF page also with its measurements and the OCR
+    decision the stage stores for it (``vault.ingest.text_layer``)."""
+    result: dict[str, object] = {
+        "number": page.number,
+        "text": page.text,
+        "headings": [
+            {
+                "level": heading.level,
+                "title": heading.title,
+                "start": heading.start,
+                "end": heading.end,
+                # The text the offsets point at, so a reviewer can read them.
+                "text_at_offsets": page.text[heading.start : heading.end],
+            }
+            for heading in page.headings
+        ],
+    }
+    if page.layer is not None:
+        result["layer"] = {
+            "width": page.layer.width,
+            "height": page.layer.height,
+            "unmapped": page.layer.unmapped,
+        }
+        result["text_layer"] = stored.text_layer
+    return result
 
 
 def outcome(fixture: Fixture, data: bytes) -> dict[str, object]:
@@ -778,8 +816,8 @@ def outcome(fixture: Fixture, data: bytes) -> dict[str, object]:
     if not isinstance(result, Extraction) or result != direct:
         raise AssertionError(disagree)
     # Raises ExtractionResultError if the stage would refuse to store the result.
-    extract_stage._checked(result, fixture.extractor, fixture.fallback)
-    return {"result": _extraction_json(result)}
+    _name, _encoding, stored = extract_stage._checked(result, fixture.extractor, fixture.fallback)
+    return {"result": _extraction_json(result, stored)}
 
 
 def golden(fixture: Fixture) -> dict[str, object]:
