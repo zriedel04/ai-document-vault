@@ -9,8 +9,11 @@ of a document's current version at a time.
 
 What is stored is checked on the way in and again on the way out, because the database can be
 edited by hand: page numbers run 1, 2, 3 ... without a gap, a heading lies inside its page's text,
-in order and not overlapping another, the extractor is a name and a version (``text-1``), and the
-encoding is the canonical name of a Python codec (``utf-8``, ``cp1252``).
+in order and not overlapping another, the extractor is a name and a version (``text-1``), the
+encoding is the canonical name of a Python codec (``utf-8``, ``cp1252``), and each page of a PDF
+extractor (and only of one) records its OCR decision (``text_layer``, one of ``TEXT_LAYERS``):
+``empty`` exactly when its text is empty, and ``unjudged`` exactly for a page of text read by
+``pdf-1``, before the decision existed (``vault.ingest.text_layer``).
 
 Page text and heading titles are the document's own words. They are never logged, and no error
 here quotes them: messages name a page by its number and a heading by its position.
@@ -29,7 +32,7 @@ from sqlalchemy import Connection, Engine, delete, func, insert, select
 
 from vault.db import ids
 from vault.db.engine import read_snapshot
-from vault.db.schema import document_versions, documents, pages
+from vault.db.schema import TEXT_LAYERS, document_versions, documents, pages
 
 # The application's rule for an extractor's name: lower-case words joined by hyphens, then the
 # version, a whole number from 1 (the database checks a looser form of the same rule).
@@ -39,6 +42,10 @@ MAX_EXTRACTOR_LENGTH: Final = 40
 # Heading levels a page may store: 1 to 9, the range of the built-in DOCX styles `Heading 1` to
 # `Heading 9`, which covers Markdown's 1 to 6. A test ties every extractor's levels to this range.
 HEADING_LEVELS: Final = range(1, 10)
+# The extractor whose pages record the OCR decision, by name, and the version that stored pages of
+# text before the decision existed (``unjudged``).
+LAYERED_EXTRACTOR: Final = "pdf"
+UNJUDGED_EXTRACTOR: Final = "pdf-1"
 
 
 class VersionNotFoundError(LookupError):
@@ -64,11 +71,13 @@ class PageHeading:
 
 @dataclass(frozen=True)
 class PageText:
-    """One page: its number (from 1), its text and the headings in it."""
+    """One page: its number (from 1), its text, the headings in it, and for a PDF page the OCR
+    decision (``text_layer``, one of ``TEXT_LAYERS``; ``None`` for every other format)."""
 
     number: int
     text: str
     headings: tuple[PageHeading, ...] = ()
+    text_layer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,7 +149,27 @@ def _check_run(checked: tuple[PageText, ...], first: int) -> tuple[PageText, ...
             msg = f"The text of page {position} holds a NUL or a character that is not Unicode."
             raise ValueError(msg)
         _check_headings(page)
+        if page.text_layer is not None and (
+            page.text_layer not in TEXT_LAYERS or (page.text_layer == "empty") != (page.text == "")
+        ):
+            msg = f"The text layer of page {position} is unknown, or disagrees with its text."
+            raise ValueError(msg)
     return checked
+
+
+def check_text_layers(extractor: str, checked: tuple[PageText, ...]) -> None:
+    """Each page of a PDF extractor has a text layer, and no page of another extractor has one;
+    ``unjudged`` is the mark of a page of text read by ``pdf-1`` and of no other page."""
+    name = extractor.rsplit("-", 1)[0]
+    for page in checked:
+        if name != LAYERED_EXTRACTOR:
+            wrong = page.text_layer is not None
+        else:
+            unjudged = extractor == UNJUDGED_EXTRACTOR and page.text != ""
+            wrong = page.text_layer is None or (page.text_layer == "unjudged") != unjudged
+        if wrong:
+            msg = f"The text layer of page {page.number} does not fit the extractor."
+            raise ValueError(msg)
 
 
 def _check_headings(page: PageText) -> None:
@@ -206,6 +235,7 @@ def _rows(
     checked = check_pages(pages_in)
     check_extractor(extractor)
     check_encoding(encoding)
+    check_text_layers(extractor, checked)
     if not ids.is_ulid(version_id):
         raise VersionNotFoundError
     return [
@@ -219,6 +249,7 @@ def _rows(
             ),
             "extractor": extractor,
             "encoding": encoding,
+            "text_layer": page.text_layer,
         }
         for page in checked
     ]
@@ -261,9 +292,15 @@ def pages_of(connection: Connection, version_id: str) -> StoredPages | None:
             extractor=check_extractor(rows[0].extractor),
             encoding=check_encoding(rows[0].encoding),
             pages=check_pages(
-                [PageText(row.page_no, row.text, _headings_from_json(row.headings)) for row in rows]
+                [
+                    PageText(
+                        row.page_no, row.text, _headings_from_json(row.headings), row.text_layer
+                    )
+                    for row in rows
+                ]
             ),
         )
+        check_text_layers(result.extractor, result.pages)
     except PageDataError:
         raise
     except ValueError as error:
