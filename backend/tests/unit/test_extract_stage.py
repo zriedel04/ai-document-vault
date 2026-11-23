@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import stat
 import subprocess
@@ -47,7 +48,7 @@ from vault.ingest.extract_stage import (
     VersionChangedError,
     extract_document,
 )
-from vault.ingest.extractors import Extraction, Heading, Page
+from vault.ingest.extractors import Extraction, Heading, Page, PageLayer
 from vault.ingest.extractors import docx as docx_extractor
 from vault.ingest.extractors import pdf as pdf_extractor
 from vault.ingest.importer import ImportRequest
@@ -73,6 +74,7 @@ CANARY = "Patient diagnosis confidential Jane Roe"
 PRIVATE_NAME = "Jane Roe diagnosis.txt"
 LIMITS = SandboxLimits(timeout_seconds=60, memory_bytes=512 * MIB)
 WORKER = ids.new_ulid()
+A4_LAYER = PageLayer(595.0, 842.0, 0)
 
 
 @pytest.fixture
@@ -235,12 +237,12 @@ def test_a_pdf_file_is_extracted_with_its_empty_pages_and_queues_the_chunk_job(
     assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
     stored = read_pages(engine, version_of(engine, document_id))
     assert stored is not None
-    assert (stored.extractor, stored.encoding) == ("pdf-1", None)
-    # A page with no text layer, or only white space, is an empty page (the OCR stage's mark).
+    assert (stored.extractor, stored.encoding) == ("pdf-2", None)
+    # A page with no text layer, or only white space, is an empty page, marked for OCR.
     assert stored.pages == (
-        PageText(1, "Week 1\nRead chapter one."),
-        PageText(2, ""),
-        PageText(3, ""),
+        PageText(1, "Week 1\nRead chapter one.", text_layer="usable"),
+        PageText(2, "", text_layer="empty"),
+        PageText(3, "", text_layer="empty"),
     )
     # A PDF also has its metadata job, queued at import (vault.ingest.metadata_stage).
     by_stage = {row.stage: row for row in jobs_of(engine, document_id)}
@@ -257,7 +259,36 @@ def test_a_pdf_with_no_text_layer_at_all_is_stored_as_empty_pages(
     assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
     stored = read_pages(engine, version_of(engine, document_id))
     assert stored is not None
-    assert stored.pages == (PageText(1, ""), PageText(2, ""))
+    assert stored.pages == (
+        PageText(1, "", text_layer="empty"),
+        PageText(2, "", text_layer="empty"),
+    )
+
+
+def test_each_pdf_page_is_stored_with_its_ocr_decision(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    sentence = "The survey began in early spring, when the water was high."
+    data = build(
+        [
+            text_stream([sentence] * 2),
+            text_stream(["ABCDEFGHIJ"] * 3),  # glyphs with no Unicode mapping
+            text_stream(["12"]),  # a page number alone
+            None,
+        ],
+        unknown_glyphs=range(0x41, 0x4B),
+    )
+    document_id, _ = add(library, "mixed.pdf", data)
+    queue, job = claimed(engine, document_id)
+    assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert [(page.text_layer, page.text) for page in stored.pages] == [
+        ("usable", f"{sentence}\n{sentence}"),
+        ("unreadable", "ABCDEFGHIJ\nABCDEFGHIJ\nABCDEFGHIJ"),  # the text is kept
+        ("sparse", "12"),
+        ("empty", ""),
+    ]
 
 
 def test_the_stage_runs_the_pdf_extractor_with_the_sandboxs_default_answer_caps() -> None:
@@ -285,7 +316,9 @@ def test_the_largest_pdfs_the_extractor_takes_run_within_the_default_limits() ->
     assert sum(len(page.text) for page in result.pages) <= caps.max_pdf_text_chars
     small = build([text_stream(["Week 1"])])
     large = small + b"%" * (caps.max_bytes - len(small))
-    assert sandbox.run("pdf", large, limits) == Extraction("pdf-1", (Page(1, "Week 1"),))
+    assert sandbox.run("pdf", large, limits) == Extraction(
+        "pdf-2", (Page(1, "Week 1", layer=PageLayer(612.0, 792.0, 0)),)
+    )
     del large
     # A tenth of the timeout, so a slower machine still has room.
     assert time.monotonic() - started < limits.timeout_seconds / 10
@@ -547,11 +580,19 @@ def test_a_pdf_the_extractor_refuses_fails_the_attempt_by_class_name_only(
     "answer",
     [
         Extraction(
-            "pdf-1", (Page(1, "Week 1", (Heading(1, "Week 1", 0, 6),)),)
-        ),  # pdf-1 finds none
-        Extraction("pdf-1", (Page(1, "Week 1"),), "utf-8"),  # a PDF has no encoding
-        Extraction("pdf-2", (Page(1, "Week 1"),)),
+            "pdf-2", (Page(1, "Week 1", (Heading(1, "Week 1", 0, 6),), A4_LAYER),)
+        ),  # pdf-2 finds none
+        Extraction("pdf-2", (Page(1, "Week 1", layer=A4_LAYER),), "utf-8"),  # no encoding
+        Extraction("pdf-1", (Page(1, "Week 1", layer=A4_LAYER),)),  # an older version
+        Extraction("pdf-3", (Page(1, "Week 1", layer=A4_LAYER),)),
         Extraction("docx-1", (Page(1, "Week 1"),)),
+        # The measurements of the text layer: missing, impossible, or for another page's text.
+        Extraction("pdf-2", (Page(1, "Week 1"),)),
+        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(0.0, 842.0, 0)),)),
+        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(595.0, 842.0, 6)),)),
+        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(595.0, 842.0, -1)),)),
+        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(595.0, math.inf, 0)),)),
+        Extraction("pdf-2", (Page(1, None, layer=A4_LAYER),)),  # type: ignore[arg-type]
     ],
 )
 def test_a_pdf_answer_the_extractor_cannot_give_is_refused(
@@ -635,6 +676,7 @@ TEXT_PAGE = Page(1, "Week 1\n", (Heading(1, "Week 1", 0, 6),))
         Extraction("text-1", (Page(1, "x", (Heading(1, "x", 0, 9),)),), "utf-8"),
         Extraction("text-1", (Page(1, "x", (Heading(10, "x", 0, 1),)),), "utf-8"),
         Extraction("text-1", (Page(1, "a\x00b"),), "utf-8"),
+        Extraction("text-1", (Page(1, "x", layer=A4_LAYER),), "utf-8"),  # only a PDF has one
     ],
 )
 def test_an_answer_the_extractor_cannot_give_is_refused(

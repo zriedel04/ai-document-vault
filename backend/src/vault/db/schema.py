@@ -81,6 +81,9 @@ FIELD_SOURCES: Final = ("file_properties",)
 DATE_FIELDS: Final = ("created", "modified")
 # The longest stored value: the same bound as a label's name.
 MAX_FIELD_CHARS: Final = MAX_LABEL_CHARS
+# Whether a PDF page's text layer is usable or the page needs OCR (vault.ingest.text_layer, which
+# defines each value; ``unjudged`` marks a page of text stored by pdf-1, before the rule).
+TEXT_LAYERS: Final = ("usable", "empty", "sparse", "unreadable", "unjudged")
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:
@@ -270,8 +273,10 @@ jobs = Table(
 # has one. ``headings`` is a JSON array of ``[level, title, start, end]``, the offsets being
 # positions in ``text``; they are read with the page and never queried on their own, so they live
 # in the row. ``char_count`` is the plan's column, kept equal to the text's length by the database.
-# The plan's OCR columns (``ocr_used``, ``ocr_confidence``) and page size (``width``, ``height``)
-# arrive with the OCR and PDF extractors that fill them.
+# ``text_layer`` is the OCR decision for a page of a PDF (``vault.ingest.text_layer``): whether its
+# text layer is usable or the page needs OCR, and why; it is NULL for every other format. The plan's
+# OCR columns (``ocr_used``, ``ocr_confidence``) and page size (``width``, ``height``) arrive with
+# the OCR stage that fills them.
 pages = Table(
     "pages",
     metadata,
@@ -287,6 +292,7 @@ pages = Table(
     Column("headings", String, nullable=False),
     Column("extractor", String, nullable=False),
     Column("encoding", String, nullable=True),
+    Column("text_layer", String, nullable=True),
     CheckConstraint("page_no >= 1", name="page_no_positive"),
     CheckConstraint("char_count = length(text)", name="char_count_is_the_length"),
     CheckConstraint(
@@ -303,6 +309,17 @@ pages = Table(
         "encoding IS NULL OR (length(encoding) BETWEEN 1 AND 40"
         " AND encoding GLOB '[a-z]*' AND encoding NOT GLOB '*[^a-z0-9_-]*')",
         name="encoding_is_a_codec_name",
+    ),
+    # A looser net than vault.db.pages, which also requires a value on every page of a PDF
+    # extractor: migration 0008 added the column to a table with rows, and SQLite tests a new
+    # column's CHECK against them before any value is filled in. Written out (not built from
+    # TEXT_LAYERS) because the migration holds the same text, and a test compares the two.
+    CheckConstraint(
+        "text_layer IS NULL OR (text_layer IN ('usable', 'empty', 'sparse', 'unreadable',"
+        " 'unjudged') AND extractor GLOB 'pdf-[1-9]*' AND extractor NOT GLOB 'pdf-*[^0-9]*'"
+        " AND (text_layer = 'empty') = (text = '')"
+        " AND (text_layer = 'unjudged') = (extractor = 'pdf-1' AND text <> ''))",
+        name="text_layer_known",
     ),
 )
 
