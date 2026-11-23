@@ -12,7 +12,7 @@ import pypdfium2.raw as pdfium_c
 import pytest
 
 from tests.unit.pdf_builder import build, text_stream, to_unicode_map
-from vault.ingest.extractors import Extraction, ExtractionError, Page
+from vault.ingest.extractors import Extraction, ExtractionError, Page, PageLayer
 from vault.ingest.extractors import pdf as extractor
 from vault.ingest.extractors.pdf import (
     EmptyPdfError,
@@ -44,8 +44,11 @@ def test_one_page_per_pdf_page_in_order_with_the_version() -> None:
 
     result = extract(data)
 
+    letter = PageLayer(612.0, 792.0, 0)
     assert result == Extraction(
-        "pdf-1", (Page(1, "First page"), Page(2, "Second page")), encoding=None
+        "pdf-2",
+        (Page(1, "First page", layer=letter), Page(2, "Second page", layer=letter)),
+        encoding=None,
     )
     assert all(page.headings == () for page in result.pages)
 
@@ -351,11 +354,17 @@ def test_text_pdfium_adds_beyond_its_count_is_counted_too(monkeypatch: pytest.Mo
 )
 def test_the_largest_result_the_limits_allow_fits_the_sandbox_defaults(character: str) -> None:
     # The worst case for the sandbox's answer: every page there may be, the whole text cap
-    # spent on the character that costs the most, and every page number at its widest.
+    # spent on the character that costs the most, every page number at its widest, and each
+    # page's measurements at their longest (a side of 17 significant digits, every glyph counted).
     limits = DEFAULT_LIMITS
     per_page, rest = divmod(limits.max_pdf_text_chars, limits.max_pdf_pages)
+    side = 14_399.999999999998
     pages = tuple(
-        Page(number, character * (per_page + (1 if number <= rest else 0)))
+        Page(
+            number,
+            character * (size := per_page + (1 if number <= rest else 0)),
+            layer=PageLayer(side, side, size),
+        )
         for number in range(1, limits.max_pdf_pages + 1)
     )
     result = Extraction(extractor.VERSION, pages)
@@ -446,7 +455,10 @@ def test_it_runs_in_the_sandbox_as_the_pdf_entry_point() -> None:
 
     result = sandbox.run("pdf", data, SANDBOX_LIMITS)
 
-    assert result == Extraction("pdf-1", (Page(1, "In the child"), Page(2, "")))
+    letter = PageLayer(612.0, 792.0, 0)
+    assert result == Extraction(
+        "pdf-2", (Page(1, "In the child", layer=letter), Page(2, "", layer=letter))
+    )
 
 
 @pytest.mark.parametrize(
