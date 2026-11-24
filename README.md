@@ -26,7 +26,7 @@ Pre-alpha. There is nothing to use day to day yet. The plan has phases 0 to 11 p
 
 **Phase 2, extraction and keyword search: mostly built.** Done:
 
-- extractors for TXT, Markdown, DOCX and the text layer of PDFs, run by the extraction stage in a sandboxed child process with a timeout and a memory cap;
+- extractors for TXT, Markdown, DOCX and the text layer of PDFs, run by the extraction stage in a sandboxed child process with a timeout and a memory cap; when an extractor gets a new version, documents whose pages an older version wrote are extracted again, once, at the next start;
 - the pages table, chunker v1 and an FTS5 keyword index, filled by the chunk stage;
 - keyword search (`POST /api/search`) and a **Search** page with highlighted snippets, type, label and import-date filters and paging;
 - a PDF viewer with **Go to page** that opens at a result's page, and a text view for the other types;
