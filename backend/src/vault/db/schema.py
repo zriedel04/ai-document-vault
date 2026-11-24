@@ -397,7 +397,8 @@ chunks = Table(
 # Labels (section 6): collections, categories, courses, projects, tags, topics, people and
 # organisations in one table, nested through ``parent_id``. The plan's kinds get one more,
 # ``folder``: a folder an import came from, nested as it was on disk (``School`` > ``CSE485``), so
-# the owner's hierarchy is kept apart from the collections they make themselves later. ``name`` is
+# the owner's hierarchy is kept apart from the collections and tags they make themselves
+# (``vault.db.labels.OWNER_KINDS``). ``name`` is
 # the label as shown; ``name_key`` is the name as Windows compares folder names (each letter in its
 # simple upper case, ``vault.db.labels.name_key``), so ``School`` and ``school`` under the same
 # parent are one label, and the database keeps one label per kind, parent and key. The parent's
