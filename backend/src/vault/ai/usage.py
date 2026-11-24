@@ -3,8 +3,8 @@ section 9, "Usage tracking" and "Cost control"; Phase 5).
 
 The AI service calls :func:`record_call` once after every ``generate`` or finished ``stream``, with
 the request it sent, the provider's name, and either the :class:`LLMResponse` or the
-:class:`LLMError` it got. Nothing calls it yet: the AI service that will is a later change, and so
-are budgets (Phase 9), which read this table.
+:class:`LLMError` it got. Ask the Vault (:mod:`vault.answers.ask`) calls it for every answer call;
+budgets (Phase 9), which read this table, are a later change.
 
 **What a row holds.** The task and model from the request, the provider's name, the outcome
 (``ok``, or ``error`` with its :class:`ErrorKind`), the token counts from ``LLMResponse.usage``

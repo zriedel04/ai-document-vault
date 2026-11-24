@@ -9,7 +9,8 @@ and a provider adapter, so they are checked when they are built, not by each ada
   (:class:`SourceBlock`), not a pre-formatted string, so an adapter can use a provider's native
   document features; their labels are ``S1`` to ``Sn`` in order (ADR 0011), and nothing in a
   request names a database id: the server alone maps a label to a chunk. Which chunks may be in
-  ``sources`` at all is the egress gate's decision (ADR 0010), which comes with the AI service.
+  ``sources`` at all is the egress gate's decision (ADR 0010), which Ask the Vault applies
+  (:mod:`vault.answers.ask`).
 - **Response.** ``text``, ``structured``, ``usage`` (input, output and cached tokens, as the
   provider reports them), ``stop_reason``, ``provider_request_id`` and ``latency_ms``.
 - **Structured output.** A request with ``output_schema`` gets ``structured``: the JSON object

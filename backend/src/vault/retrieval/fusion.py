@@ -3,8 +3,9 @@
 ADR 0008 records the decision.
 
 Pure functions on ranked lists of chunk ids, with every number from ``[retrieval]``
-(:class:`vault.core.config.RetrievalSettings`). Nothing calls them yet: search is keyword only
-until vectors exist (ADR 0013 is Proposed).
+(:class:`vault.core.config.RetrievalSettings`). Ask the Vault (:mod:`vault.answers.ask`) calls them
+with an empty vector list, because retrieval is keyword only until vectors exist (ADR 0013 is
+Proposed); the Search page does not use them.
 
 :func:`fuse` (step 4) reads the first ``keyword_candidates`` distinct chunks of the keyword list
 and the first ``vector_candidates`` of the vector list (the plan's K_kw and K_vec), ranks each list
