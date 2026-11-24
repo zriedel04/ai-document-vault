@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from vault.ai.routing import AISettings
 from vault.ingest.extractors.text import FALLBACK_ENCODING, FALLBACK_ENCODINGS
 
 CONFIG_ENV_VAR = "AIVAULT_CONFIG"
@@ -132,6 +133,13 @@ class RetrievalSettings(_Section):
     ``max_chunks_per_document`` is the plan's M (step 6), default 3 as section 8's context
     selection says. Used by ``vault.retrieval.fusion``.
 
+    ``context_budget_tokens`` is the plan's budget B (steps 6 and 7): how many tokens of sources
+    context packing (``vault.retrieval.packing``) may give the answer model, counted with its
+    conservative estimate; the plan's example is 6,000 to 10,000, so the default is 8,000.
+    ``context_neighbor_chunks`` is how many chunks before and after each source packing may add
+    for context when budget is left over (step 6, "add neighbor chunk"); the plan names no number,
+    so the default is 1, and 0 turns it off.
+
     Each is a whole number and nothing else: ``true``, ``60.0`` and ``"60"`` are refused, because
     a TOML file can hold any of them by mistake. Environment variables can only hold text, so
     ``AIVAULT_RETRIEVAL__RRF_K=60`` is read by :class:`_EnvironmentWholeNumbers`, which accepts the
@@ -142,6 +150,8 @@ class RetrievalSettings(_Section):
     vector_candidates: int = Field(default=50, ge=1, le=500, strict=True)
     rrf_k: int = Field(default=60, ge=0, le=1000, strict=True)
     max_chunks_per_document: int = Field(default=3, ge=1, le=100, strict=True)
+    context_budget_tokens: int = Field(default=8000, ge=1000, le=200000, strict=True)
+    context_neighbor_chunks: int = Field(default=1, ge=0, le=3, strict=True)
 
 
 # How an environment variable writes a whole number: ASCII digits, no sign, space or leading zero.
@@ -181,6 +191,33 @@ class _EnvironmentWholeNumbers(PydanticBaseSettingsSource):
         return values
 
 
+class _EnvironmentRouteFlags(PydanticBaseSettingsSource):
+    """The environment source, with ``AIVAULT_AI__ROUTES__<TASK>__BATCH`` read as a boolean.
+
+    A route's ``batch`` is strict, so the TOML file and values passed in code must hold a real
+    boolean. Environment variables hold text: exactly ``true`` or ``false`` (TOML's spelling)
+    becomes the boolean, and anything else (``1``, ``yes``, ``True``) is left for the strict field
+    to refuse.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        ai = values.get("ai")
+        routes = ai.get("routes") if isinstance(ai, dict) else None
+        if isinstance(routes, dict):
+            for table in routes.values():
+                if isinstance(table, dict) and table.get("batch") in ("true", "false"):
+                    table["batch"] = table["batch"] == "true"
+        return values
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -196,6 +233,7 @@ class Settings(BaseSettings):
     processing: ProcessingSettings = ProcessingSettings()
     workers: WorkerSettings = WorkerSettings()
     retrieval: RetrievalSettings = RetrievalSettings()
+    ai: AISettings = AISettings()
     logging: LoggingSettings = LoggingSettings()
 
     @classmethod
@@ -208,7 +246,7 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         # Environment first (it wins), then the values read from the TOML file.
-        return (_EnvironmentWholeNumbers(env_settings), init_settings)
+        return (_EnvironmentRouteFlags(_EnvironmentWholeNumbers(env_settings)), init_settings)
 
 
 def resolve_config_file(config_file: Path | None = None) -> tuple[Path, bool]:

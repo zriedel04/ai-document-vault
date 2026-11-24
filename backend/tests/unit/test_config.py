@@ -189,7 +189,14 @@ def test_the_text_fallback_must_be_a_windows_code_page(tmp_path: Path, encoding:
         load_settings(config)
 
 
-RETRIEVAL_KEYS = ("keyword_candidates", "vector_candidates", "rrf_k", "max_chunks_per_document")
+RETRIEVAL_KEYS = (
+    "keyword_candidates",
+    "vector_candidates",
+    "rrf_k",
+    "max_chunks_per_document",
+    "context_budget_tokens",
+    "context_neighbor_chunks",
+)
 
 
 @pytest.fixture
@@ -207,7 +214,9 @@ def test_retrieval_defaults_are_the_plans() -> None:
         retrieval.vector_candidates,
         retrieval.rrf_k,
         retrieval.max_chunks_per_document,
-    ) == (50, 50, 60, 3)
+        retrieval.context_budget_tokens,
+        retrieval.context_neighbor_chunks,
+    ) == (50, 50, 60, 3, 8000, 1)
 
 
 @pytest.mark.usefixtures("_no_retrieval_environment")
@@ -215,7 +224,8 @@ def test_retrieval_values_from_the_file(tmp_path: Path) -> None:
     config = write(
         tmp_path / "c.toml",
         "[retrieval]\nkeyword_candidates = 1\nvector_candidates = 500\nrrf_k = 0\n"
-        "max_chunks_per_document = 100\n",
+        "max_chunks_per_document = 100\ncontext_budget_tokens = 200000\n"
+        "context_neighbor_chunks = 0\n",
     )
     retrieval = load_settings(config).retrieval
     assert (
@@ -223,7 +233,15 @@ def test_retrieval_values_from_the_file(tmp_path: Path) -> None:
         retrieval.vector_candidates,
         retrieval.rrf_k,
         retrieval.max_chunks_per_document,
-    ) == (1, 500, 0, 100)
+        retrieval.context_budget_tokens,
+        retrieval.context_neighbor_chunks,
+    ) == (1, 500, 0, 100, 200000, 0)
+    other = write(
+        tmp_path / "d.toml",
+        "[retrieval]\ncontext_budget_tokens = 1000\ncontext_neighbor_chunks = 3\n",
+    )
+    retrieval = load_settings(other).retrieval
+    assert (retrieval.context_budget_tokens, retrieval.context_neighbor_chunks) == (1000, 3)
 
 
 @pytest.mark.usefixtures("_no_retrieval_environment")
@@ -238,6 +256,13 @@ def test_retrieval_values_from_the_file(tmp_path: Path) -> None:
         ("rrf_k", "1001"),
         ("max_chunks_per_document", "0"),
         ("max_chunks_per_document", "101"),
+        ("context_budget_tokens", "999"),
+        ("context_budget_tokens", "200001"),
+        ("context_neighbor_chunks", "-1"),
+        ("context_neighbor_chunks", "4"),
+        ("context_budget_tokens", "8000.0"),
+        ("context_budget_tokens", '"8000"'),
+        ("context_neighbor_chunks", "true"),
         # Exactly a whole number: no boolean, float or text, even one that spells a valid number.
         ("rrf_k", "true"),
         ("rrf_k", "false"),
@@ -283,6 +308,10 @@ def test_retrieval_values_from_the_environment(
     )
     monkeypatch.setenv("AIVAULT_RETRIEVAL__RRF_K", "0")
     assert load_settings(config).retrieval.rrf_k == 0
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__CONTEXT_BUDGET_TOKENS", "120000")
+    monkeypatch.setenv("AIVAULT_RETRIEVAL__CONTEXT_NEIGHBOR_CHUNKS", "0")
+    retrieval = load_settings(config).retrieval
+    assert (retrieval.context_budget_tokens, retrieval.context_neighbor_chunks) == (120000, 0)
 
 
 @pytest.mark.usefixtures("_no_retrieval_environment")
