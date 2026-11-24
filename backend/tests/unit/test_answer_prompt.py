@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import vault.ai.prompts as prompts
-from vault.ai.answer import ANSWER_SCHEMA, AnswerSegment, CitedAnswer, read_answer
+from vault.ai.answer import ANSWER_SCHEMA, read_answer
 from vault.ai.answer_prompt import (
     ANSWER_PROMPT_ID,
     LOOKALIKES,
@@ -31,7 +31,7 @@ from vault.ai.answer_prompt import (
 from vault.ai.prompts import PROMPT_ID, PROMPTS, PromptError, load_prompt
 from vault.ai.providers.base import Effort, LLMRequest, Role, SourceBlock, Task
 from vault.ai.providers.fake import FakeProvider
-from vault.answers.citations import find_quote
+from vault.answers.citations import AnswerSegment, StructuredAnswer, find_quote
 
 # A synthetic passage written to hijack the model: it tries to close its block, open a forged
 # source and question, change the rules and send data to an outside address. Nothing here is real.
@@ -162,7 +162,7 @@ def test_the_prompt_states_the_rules_of_the_plan() -> None:
 
 def test_the_prompt_names_every_field_of_the_answer_schema() -> None:
     text = load_prompt(ANSWER_PROMPT_ID).text
-    fields = set(CitedAnswer.model_fields) | set(AnswerSegment.model_fields)
+    fields = set(StructuredAnswer.model_fields) | set(AnswerSegment.model_fields)
     assert fields == {"answer", "insufficient_evidence", "missing", "text", "sources", "quote"}
     for name in fields:
         assert f"`{name}`" in text
