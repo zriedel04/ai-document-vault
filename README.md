@@ -26,17 +26,17 @@ Pre-alpha. There is nothing to use day to day yet. The plan has phases 0 to 11 p
 
 **Phase 2, extraction and keyword search: mostly built.** Done:
 
-- extractors for TXT, Markdown, DOCX and the text layer of PDFs, run by the extraction stage in a sandboxed child process with a timeout and a memory cap;
+- extractors for TXT, Markdown, DOCX and the text layer of PDFs, with headings from DOCX styles, Markdown and a PDF's outline (bookmarks), run by the extraction stage in a sandboxed child process with a timeout and a memory cap;
 - the pages table, chunker v1 and an FTS5 keyword index, filled by the chunk stage;
 - keyword search (`POST /api/search`) and a **Search** page with highlighted snippets, type, label and import-date filters and paging;
 - a PDF viewer with **Go to page** that opens at a result's page, and a text view for the other types;
 - deterministic metadata: each import folder becomes a label, and a DOCX's or PDF's own title, author and dates are read by the metadata stage (for a PDF, its document information dictionary; XMP metadata is not read); the document page shows the labels and file properties.
 
-Left in Phase 2: PDF headings (which wait on ADR 0015, below). The phase is done when a search over the owner's own sample set finds the right documents and pages.
+The phase is done when a search over the owner's own sample set finds the right documents and pages.
 
 **Built ahead of its phase:** pause, resume and retry of background processing, an image viewer for PNG and JPEG (without text until OCR), `vault.ps1` `check`, `backup`, `restore` and `export`, and `python -m vault.eval`, which scores keyword search on the public evaluation set.
 
-**Waiting on the spikes.** The embedding model, the OCR engine and the PDF extraction approach are Proposed ([ADRs 0013 to 0015](docs/decisions/README.md)) until their spikes have run on the owner's PC. The PDF extractor is a first version on ADR 0015's proposal and finds no headings until pdfplumber is added for them; images and scanned PDFs are imported but hold no searchable text until the OCR stage (Phase 3); embeddings, semantic and hybrid search (Phase 4) and Ask the Vault (Phase 5) are not built. The full list of what has changed is in the [changelog](CHANGELOG.md).
+**Waiting on the spikes.** The embedding model, the OCR engine and the PDF extraction approach are Proposed ([ADRs 0013 to 0015](docs/decisions/README.md)) until their spikes have run on the owner's PC. The PDF extractor is a first version on ADR 0015's proposal and takes its headings from the outline, as the public PDF spike recommended, instead of pdfplumber's font sizes (a PDF without bookmarks has no headings); images and scanned PDFs are imported but hold no searchable text until the OCR stage (Phase 3); embeddings, semantic and hybrid search (Phase 4) and Ask the Vault (Phase 5) are not built. The full list of what has changed is in the [changelog](CHANGELOG.md).
 
 ## Architecture in brief
 
