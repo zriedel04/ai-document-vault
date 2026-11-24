@@ -1,1 +1,5 @@
-"""The AI service (``docs/architecture.md`` section 9). So far only the egress gate exists."""
+"""The AI service (plan section 9): provider-neutral types, the providers, the egress gate and,
+later, the router, prompts, citation validation and usage ledger.
+
+Only ``vault.ai.providers`` may import a provider SDK (ADR 0009, ADR 0010); a test enforces it.
+"""
