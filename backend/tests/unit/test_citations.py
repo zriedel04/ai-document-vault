@@ -57,11 +57,13 @@ def _source(chunk_id: int, text: str, page: int = 1) -> SentSource:
 SOURCES = SourceMap([_source(11, REQUIREMENTS, 4), _source(12, SYLLABUS), _source(13, GRADES)])
 
 
-def _segment(text: str, sources: list[str], quote: str) -> AnswerSegment:
+def _segment(text: str, sources: list[str], quote: str | None) -> AnswerSegment:
     return AnswerSegment(text=text, sources=sources, quote=quote)
 
 
-def _answer(*segments: AnswerSegment, flag: bool = False, missing: str = "") -> StructuredAnswer:
+def _answer(
+    *segments: AnswerSegment, flag: bool = False, missing: str | None = ""
+) -> StructuredAnswer:
     return StructuredAnswer(answer=list(segments), insufficient_evidence=flag, missing=missing)
 
 
@@ -687,6 +689,47 @@ def test_parse_answer_reads_the_plans_shape() -> None:
     assert answer.answer[0].sources == ["S1"]
 
 
+def test_parse_answer_reads_null_as_no_quote_and_no_note() -> None:
+    answer = parse_answer(
+        _json(answer=[{"text": "A claim.", "sources": ["S1"], "quote": None}], missing=None)
+    )
+    assert answer.answer[0].quote is None
+    assert answer.missing is None
+
+
+def test_a_null_quote_is_a_missing_quote() -> None:
+    result = validate_answer(
+        _answer(AnswerSegment(text="A claim.", sources=["S1"], quote=None)), SOURCES
+    )
+    (segment,) = result.segments
+    assert segment.status is SegmentStatus.UNVERIFIED
+    assert segment.quote is None
+    assert segment.citations[0].quote_span is None
+    assert _codes(result) == [(FindingCode.MISSING_QUOTE, 0, None)]
+
+
+def test_a_null_quote_on_an_uncited_segment_is_uncited() -> None:
+    result = validate_answer(
+        _answer(AnswerSegment(text="A claim.", sources=[], quote=None)), SOURCES
+    )
+    assert result.segments[0].status is SegmentStatus.UNCITED
+    assert _codes(result) == [(FindingCode.UNCITED_SEGMENT, 0, None)]
+
+
+def test_the_flag_with_a_null_note_is_reported() -> None:
+    result = validate_answer(_answer(flag=True, missing=None), SOURCES)
+    assert result.missing is None
+    assert result.insufficient_evidence is True
+    assert _codes(result) == [(FindingCode.MISSING_NOTE, None, None)]
+
+
+def test_a_null_note_without_the_flag_is_clean() -> None:
+    answer = _answer(_segment("The prototype is due.", ["S1"], "due October 15"), missing=None)
+    result = validate_answer(answer, SOURCES)
+    assert result.findings == ()
+    assert result.segments[0].status is SegmentStatus.SUPPORTED
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -696,12 +739,10 @@ def test_parse_answer_reads_the_plans_shape() -> None:
         _json(answer=[{"text": "t", "sources": "S1", "quote": ""}]),
         _json(answer=[{"text": "t", "sources": [1], "quote": ""}]),
         _json(answer=[{"text": 5, "sources": [], "quote": ""}]),
-        _json(answer=[{"text": "t", "sources": [], "quote": None}]),
         _json(answer={"text": "t"}),
         _json(insufficient_evidence="false"),
         _json(insufficient_evidence=0),
         _json(insufficient_evidence=None),
-        _json(missing=None),
         json.dumps({"answer": [], "insufficient_evidence": False}),
         json.dumps([]),
         "null",

@@ -49,6 +49,34 @@ context_budget_tokens = 8000
 # Chunks before and after each source added for context when the budget allows (0 to 3).
 context_neighbor_chunks = 1
 
+[pricing]
+# What each model costs, for the cost estimate of every AI call in the usage ledger (the AI
+# features that make calls are not built yet). One table per provider (anthropic, openai) and
+# model id; a model id with a dot needs quotes. Each price is US dollars per million tokens, a
+# number (not text) from 0 to 1000 with at most six decimal places: input is normal input tokens,
+# cached_input is input read from the provider's prompt cache, output is output tokens. All three
+# are required. A model with no table here has its cost recorded as unknown, never as zero.
+# Prices change: copy them from each provider's price page and keep them current. The figures
+# below are the plan's October 2026 input and output prices; the cached_input figures are
+# placeholders (a tenth of input) to replace with the provider's own. They are commented out so
+# that no stale price is used by accident.
+# [pricing.anthropic.claude-haiku-4-5]
+# input = 1
+# cached_input = 0.1
+# output = 5
+# [pricing.anthropic.claude-sonnet-5-5]
+# input = 2
+# cached_input = 0.2
+# output = 10
+# [pricing.anthropic.claude-opus-5-5]
+# input = 4
+# cached_input = 0.4
+# output = 20
+# [pricing.openai."gpt-5.6-luna"]
+# input = 0.20
+# cached_input = 0.02
+# output = 1.20
+
 # Model routing (plan section 9): features ask for a task, and these tables say which provider and
 # model serve it. Not used yet: nothing calls a model until Ask the Vault (Phase 5).
 # - Task names: answer, answer_deep, classify, query_rewrite. Any other name stops start-up.
