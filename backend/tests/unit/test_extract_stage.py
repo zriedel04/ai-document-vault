@@ -29,7 +29,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Connection, Engine, insert, select, update
 
 from tests.conftest import LOCAL
-from tests.unit.pdf_builder import build, text_stream
+from tests.unit.pdf_builder import Bookmark, build, text_stream
 from tests.unit.test_documents_api import Library
 from tests.unit.test_setup_failures import SETUP_KINDS
 from vault.core.config import ProcessingSettings, Settings
@@ -237,7 +237,7 @@ def test_a_pdf_file_is_extracted_with_its_empty_pages_and_queues_the_chunk_job(
     assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
     stored = read_pages(engine, version_of(engine, document_id))
     assert stored is not None
-    assert (stored.extractor, stored.encoding) == ("pdf-2", None)
+    assert (stored.extractor, stored.encoding) == ("pdf-3", None)
     # A page with no text layer, or only white space, is an empty page, marked for OCR.
     assert stored.pages == (
         PageText(1, "Week 1\nRead chapter one.", text_layer="usable"),
@@ -249,6 +249,24 @@ def test_a_pdf_file_is_extracted_with_its_empty_pages_and_queues_the_chunk_job(
     assert sorted(by_stage) == ["chunk", "extract", "metadata"]
     chunk = by_stage[CHUNK_STAGE]
     assert (chunk.status, chunk.input_hash) == ("queued", sha256)
+
+
+def test_a_pdf_outline_is_stored_as_headings(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    data = build(
+        [text_stream(["Week 1", "Read chapter one."]), text_stream(["Exercises", "Do two."])],
+        outline=[Bookmark(b"Week 1", page=0, kids=(Bookmark(b"Exercises", page=1),))],
+    )
+    document_id, _ = add(library, "week.pdf", data)
+    queue, job = claimed(engine, document_id)
+    assert extract_stage.handler(engine, queue, store, LIMITS)(job) is Completion.RECORDED
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert [page.headings for page in stored.pages] == [
+        (PageHeading(1, "Week 1", 0, 6),),
+        (PageHeading(2, "Exercises", 0, 9),),
+    ]
 
 
 def test_a_pdf_with_no_text_layer_at_all_is_stored_as_empty_pages(
@@ -317,7 +335,7 @@ def test_the_largest_pdfs_the_extractor_takes_run_within_the_default_limits() ->
     small = build([text_stream(["Week 1"])])
     large = small + b"%" * (caps.max_bytes - len(small))
     assert sandbox.run("pdf", large, limits) == Extraction(
-        "pdf-2", (Page(1, "Week 1", layer=PageLayer(612.0, 792.0, 0)),)
+        "pdf-3", (Page(1, "Week 1", layer=PageLayer(612.0, 792.0, 0)),)
     )
     del large
     # A tenth of the timeout, so a slower machine still has room.
@@ -327,7 +345,9 @@ def test_the_largest_pdfs_the_extractor_takes_run_within_the_default_limits() ->
 def test_every_heading_level_an_extractor_can_emit_can_be_stored() -> None:
     docx_levels = set(docx_extractor._HEADING_LEVELS.values())
     markdown_levels = set(range(1, 7))  # `#` to `######`, the CommonMark range (ADR 0018)
-    assert docx_levels | markdown_levels <= set(HEADING_LEVELS)
+    pdf_levels = set(range(1, pdf_extractor.MAX_OUTLINE_DEPTH + 1))  # the outline's depths
+    assert docx_levels | markdown_levels | pdf_levels <= set(HEADING_LEVELS)
+    assert max(HEADING_LEVELS) == pdf_extractor.MAX_OUTLINE_DEPTH  # every level stored is read
 
 
 def test_each_extractor_is_an_entry_point_with_the_version_its_extractor_writes() -> None:
@@ -579,20 +599,23 @@ def test_a_pdf_the_extractor_refuses_fails_the_attempt_by_class_name_only(
 @pytest.mark.parametrize(
     "answer",
     [
-        Extraction(
-            "pdf-2", (Page(1, "Week 1", (Heading(1, "Week 1", 0, 6),), A4_LAYER),)
-        ),  # pdf-2 finds none
-        Extraction("pdf-2", (Page(1, "Week 1", layer=A4_LAYER),), "utf-8"),  # no encoding
+        Extraction("pdf-3", (Page(1, "Week 1", layer=A4_LAYER),), "utf-8"),  # no encoding
         Extraction("pdf-1", (Page(1, "Week 1", layer=A4_LAYER),)),  # an older version
-        Extraction("pdf-3", (Page(1, "Week 1", layer=A4_LAYER),)),
+        # The version before headings, now refused like any older one, headings or not.
+        Extraction("pdf-2", (Page(1, "Week 1", (Heading(1, "Week 1", 0, 6),), A4_LAYER),)),
+        Extraction("pdf-2", (Page(1, "Week 1", layer=A4_LAYER),)),
+        Extraction("pdf-4", (Page(1, "Week 1", layer=A4_LAYER),)),
+        # A heading the page rules refuse: outside the text, at a level no page stores.
+        Extraction("pdf-3", (Page(1, "Week 1", (Heading(1, "Week 1", 0, 7),), A4_LAYER),)),
+        Extraction("pdf-3", (Page(1, "Week 1", (Heading(10, "Week 1", 0, 6),), A4_LAYER),)),
         Extraction("docx-1", (Page(1, "Week 1"),)),
         # The measurements of the text layer: missing, impossible, or for another page's text.
-        Extraction("pdf-2", (Page(1, "Week 1"),)),
-        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(0.0, 842.0, 0)),)),
-        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(595.0, 842.0, 6)),)),
-        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(595.0, 842.0, -1)),)),
-        Extraction("pdf-2", (Page(1, "Week 1", layer=PageLayer(595.0, math.inf, 0)),)),
-        Extraction("pdf-2", (Page(1, None, layer=A4_LAYER),)),  # type: ignore[arg-type]
+        Extraction("pdf-3", (Page(1, "Week 1"),)),
+        Extraction("pdf-3", (Page(1, "Week 1", layer=PageLayer(0.0, 842.0, 0)),)),
+        Extraction("pdf-3", (Page(1, "Week 1", layer=PageLayer(595.0, 842.0, 6)),)),
+        Extraction("pdf-3", (Page(1, "Week 1", layer=PageLayer(595.0, 842.0, -1)),)),
+        Extraction("pdf-3", (Page(1, "Week 1", layer=PageLayer(595.0, math.inf, 0)),)),
+        Extraction("pdf-3", (Page(1, None, layer=A4_LAYER),)),  # type: ignore[arg-type]
     ],
 )
 def test_a_pdf_answer_the_extractor_cannot_give_is_refused(

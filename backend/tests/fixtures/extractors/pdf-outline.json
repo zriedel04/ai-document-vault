@@ -1,0 +1,90 @@
+{
+  "fixture": "pdf-outline",
+  "about": "Headings from bookmarks: nested, a title without its section number, a title not on its page, a page with no text, a blank title, a GoTo action, a link to another file and a page past the end",
+  "type": "pdf",
+  "entry": "pdf",
+  "option": null,
+  "input_bytes": 2754,
+  "input_sha256": "127201353863eeef969127e0dd088e6d18760ca34a7d328fadab40a9a76d6d1e",
+  "result": {
+    "extractor": "pdf-3",
+    "encoding": null,
+    "pages": [
+      {
+        "number": 1,
+        "text": "Course notes\n1 Overview\nWhat the course covers.",
+        "headings": [
+          {
+            "level": 1,
+            "title": "Overview",
+            "start": 13,
+            "end": 23,
+            "text_at_offsets": "1 Overview"
+          }
+        ],
+        "layer": {
+          "width": 612.0,
+          "height": 792.0,
+          "unmapped": 0
+        },
+        "text_layer": "usable"
+      },
+      {
+        "number": 2,
+        "text": "1.1 Goals\nRead the syllabus.\n1.2 Schedule\nWeekly.",
+        "headings": [
+          {
+            "level": 2,
+            "title": "1.1 Goals",
+            "start": 0,
+            "end": 9,
+            "text_at_offsets": "1.1 Goals"
+          },
+          {
+            "level": 2,
+            "title": "1.2 Schedule (Дневник курса)",
+            "start": 10,
+            "end": 28,
+            "text_at_offsets": "Read the syllabus."
+          }
+        ],
+        "layer": {
+          "width": 612.0,
+          "height": 792.0,
+          "unmapped": 0
+        },
+        "text_layer": "usable"
+      },
+      {
+        "number": 3,
+        "text": "",
+        "headings": [],
+        "layer": {
+          "width": 612.0,
+          "height": 792.0,
+          "unmapped": 0
+        },
+        "text_layer": "empty"
+      },
+      {
+        "number": 4,
+        "text": "Appendix\nTables.",
+        "headings": [
+          {
+            "level": 1,
+            "title": "APPENDIX",
+            "start": 0,
+            "end": 8,
+            "text_at_offsets": "Appendix"
+          }
+        ],
+        "layer": {
+          "width": 612.0,
+          "height": 792.0,
+          "unmapped": 0
+        },
+        "text_layer": "usable"
+      }
+    ]
+  }
+}

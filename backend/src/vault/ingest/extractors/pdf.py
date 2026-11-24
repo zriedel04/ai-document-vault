@@ -4,8 +4,10 @@
 The library is the one ADR 0012 (Accepted) names for PDF text. Whether it extracts well enough on
 real documents is ADR 0015, which is still Proposed until the owner's PDF spike has run, so this
 module is the first extractor on that proposal, not a settled choice: if the spike sends the owner
-another way, this extractor gets a new version or a replacement. Heading detection (pdfplumber's
-font sizes, in the proposal) is not done here: a page has no headings for now.
+another way, this extractor gets a new version or a replacement. Headings come from the document's
+outline (its bookmarks), read through PDFium, and not from font sizes (pdfplumber's, in the
+proposal): the public PDF spike found font-size headings with a recall of 0.15 and recommended the
+outline instead (see "Headings" below).
 
 What the text holds:
 
@@ -28,6 +30,49 @@ What the text holds:
   extraction stage decides from them and the text whether the page needs OCR
   (``vault.ingest.text_layer``, plan section 7: "a PDF page is OCRed only if its text layer is
   empty or obviously garbage"); nothing here runs OCR.
+
+Headings, from the outline (ISO 32000-1, 12.3.3), read with PDFium's bookmark calls
+(``FPDFBookmark_GetFirstChild``, ``GetNextSibling``, ``GetTitle``, ``GetDest``, ``GetAction``):
+
+- Each bookmark is a heading at the level of its depth in the outline (a top-level bookmark is
+  level 1), on the page its destination names. A destination is the bookmark's ``Dest`` or the
+  destination of its ``GoTo`` action, as PDFium resolves it (a named destination included); a
+  bookmark with any other action (a link to another file, a web address, a script) or none, or
+  whose destination names no page of this document, is not a heading. Bookmarks deeper than
+  ``MAX_OUTLINE_DEPTH`` (9, the deepest level a page may store) are not read, and their text
+  falls in the section of their level-9 ancestor.
+- The title is the bookmark's own text, decoded from UTF-16 (a lone surrogate becomes U+FFFD),
+  with control characters and the noncharacters U+FFFE and U+FFFF turned into spaces and white
+  space collapsed to single spaces and trimmed. A bookmark whose title is blank after that, or
+  longer than ``MAX_TITLE_UNITS`` UTF-16 units (asked before it is copied out of PDFium), is not
+  a heading (left out, not cut); its children still are, at their own levels.
+- A bookmark names a page, not a place on it, so each heading is placed on a line of its page's
+  text (``place``). For each page, its bookmarks are taken in outline order. First, each is
+  matched to the first line after the previous match whose text, with white space collapsed and
+  case folded, is its title, or is its title once a section number in front of one of the two is
+  removed (``1.2 Results`` on the page and ``Results`` in the outline, as LaTeX writes them; a
+  number is digits with dots and an optional ``.``, ``)`` or ``:``, or one letter or a Roman
+  numeral with one of those marks, then a space). Then every bookmark gets a line: a matched one
+  its match, and one that matched nothing the line after the heading placed before it on the
+  page (the top of the page for the first), if that line comes before the next matched heading;
+  if none is left, the bookmark is not a heading. A heading spans its line without the white
+  space around it. So the section a page-level destination opens starts at the top of the page
+  when the title is not found, and the order of the headings on a page follows the outline. The
+  destination's position on the page (an ``XYZ`` top, say) is not used.
+- The pages are walked in order, so bookmarks whose pages are out of order in the outline become
+  headings in page order, and the chunker's section path follows the pages
+  (``vault.ingest.chunking.structural_v1``). A page with no text (a scan) has no line for a
+  heading, so its bookmarks are not headings until OCR gives it text.
+- An outline that cannot be read whole gives no headings at all rather than some of them, and the
+  text is read as for a PDF with no outline: one where a bookmark is reached twice (a loop, or a
+  bookmark under two parents), one with more than ``MAX_BOOKMARKS`` bookmarks read, or one whose
+  headings' titles hold more than ``MAX_TITLE_CHARS`` characters in all. The walk keeps its own
+  stack, so a deep or looping outline neither recurses nor runs without end. The caps keep the
+  headings of the largest answer inside the sandbox's caps beside the largest text, which a test
+  checks.
+
+Bookmark titles are the document's own words: nothing here logs them, and pypdfium2's own outline
+walker (``PdfDocument.get_toc``), which logs a warning on a loop or a deep outline, is not used.
 
 Refused, each with an error class of its own and fixed text, never the file's name or content, and
 without the library's exception attached (its message is not kept):
@@ -81,21 +126,31 @@ call into it within a process; the sandbox runs each extraction in a process of 
 
 from __future__ import annotations
 
+import bisect
 import ctypes
 import re
 import sys
 import threading
+from collections.abc import Sequence
 from typing import Final
 
 import pypdfium2
 import pypdfium2.raw as pdfium_c
 
 from vault.ingest import text_layer
-from vault.ingest.extractors import Extraction, ExtractionError, Page, PageLayer, PdfProperties
+from vault.ingest.extractors import (
+    Extraction,
+    ExtractionError,
+    Heading,
+    Page,
+    PageLayer,
+    PdfProperties,
+)
 from vault.ingest.validate import DEFAULT_LIMITS, PDF_HEADER, Limits, Reason
 
-# pdf-2 adds the measurements of each page's text layer (``Page.layer``); pdf-1 had none.
-VERSION: Final = "pdf-2"
+# pdf-2 added the measurements of each page's text layer (``Page.layer``); pdf-1 had none. pdf-3
+# adds the headings from the outline.
+VERSION: Final = "pdf-3"
 
 # PDFium's mark for a hyphen at a line end that joins the two halves of a word.
 SOFT_HYPHEN_MARK: Final = "￾"
@@ -116,6 +171,21 @@ PROPERTIES: Final = {
 }
 # The longest property value returned, in UTF-16 units; a longer one is None.
 MAX_PROPERTY_UNITS: Final = 65_536
+# The outline's caps (see the module): the deepest level read (the deepest a page may store,
+# ``vault.db.pages.HEADING_LEVELS``, which a test ties to it), the bookmarks read in all, the
+# longest title taken in UTF-16 units, and the characters of all the headings' titles.
+MAX_OUTLINE_DEPTH: Final = 9
+MAX_BOOKMARKS: Final = 10_000
+MAX_TITLE_UNITS: Final = 1_000
+MAX_TITLE_CHARS: Final = 300_000
+# What a title holds as a space: control characters and the two noncharacters PDFium can give.
+_TITLE_NOT_TEXT: Final = re.compile("[\x00-\x1f\x7f-\x9f\ufffe\uffff]")
+_LINE: Final = re.compile(r"[^\n]+")
+# A section number in front of a heading, as text or a title may carry it and the other not
+# (LaTeX writes "1.2 Results" on the page and "Results" in the outline), case folded: digits with
+# dots ("1", "1.2", "1.2."), or one letter or a Roman numeral with its mark ("a)", "iv."), so that
+# a word such as "did" or "a" is not taken for a number.
+_SECTION_NUMBER: Final = re.compile(r"[0-9]+(?:\.[0-9]+)*[.):]?|(?:[a-z]|[ivxlcdm]+)[.):]")
 
 
 class NotPdfError(ExtractionError):
@@ -220,12 +290,14 @@ def _pages(data: bytes, limits: Limits) -> tuple[Page, ...]:
             raise EmptyPdfError
         if count > limits.max_pdf_pages:
             raise PdfLimitError("pages")
+        bookmarks = outline(document, count)
         pages: list[Page] = []
         total = 0
         for index in range(count):
             text, layer = _page_text(document, index, limits.max_pdf_text_chars - total)
             total += len(text)
-            pages.append(Page(index + 1, text, layer=layer))
+            headings = place(text, bookmarks.get(index, ()))
+            pages.append(Page(index + 1, text, headings, layer=layer))
         return tuple(pages)
     finally:
         # ``data`` is referenced until here: PDFium reads the bytes in place while the document is
@@ -287,3 +359,171 @@ def clean(raw: str) -> str:
     are not text removed, and a page of only white space empty."""
     text = _NOT_TEXT.sub("", _LINE_BREAK.sub("\n", raw))
     return text if text.strip() else ""
+
+
+class _OutlineUnreadableError(Exception):
+    """The outline loops or is over a cap; it gives no headings."""
+
+
+def outline(document: pypdfium2.PdfDocument, count: int) -> dict[int, tuple[tuple[int, str], ...]]:
+    """The headings the outline of ``document`` (with ``count`` pages) gives, as (level, title) in
+    outline order, by the index of the page each is on; empty when it has none or cannot be read
+    whole (see the module)."""
+    try:
+        return _read_outline(document, count)
+    except _OutlineUnreadableError:
+        return {}
+
+
+def _read_outline(
+    document: pypdfium2.PdfDocument, count: int
+) -> dict[int, tuple[tuple[int, str], ...]]:
+    found: dict[int, list[tuple[int, str]]] = {}
+    seen: set[int] = set()
+    title_chars = 0
+    # A stack of (bookmark, level) still to read, so that the walk never recurses: the last
+    # pushed is read first, and a bookmark's next sibling is pushed before its first child.
+    stack = [(pdfium_c.FPDFBookmark_GetFirstChild(document.raw, None), 1)]
+    while stack:
+        bookmark, level = stack.pop()
+        if not bookmark:
+            continue
+        address = ctypes.cast(bookmark, ctypes.c_void_p).value
+        if address is None or address in seen:
+            raise _OutlineUnreadableError
+        seen.add(address)
+        if len(seen) > MAX_BOOKMARKS:
+            raise _OutlineUnreadableError
+        stack.append((pdfium_c.FPDFBookmark_GetNextSibling(document.raw, bookmark), level))
+        if level < MAX_OUTLINE_DEPTH:
+            stack.append((pdfium_c.FPDFBookmark_GetFirstChild(document.raw, bookmark), level + 1))
+        page = _destination_page(document, bookmark, count)
+        title = _bookmark_title(bookmark) if page is not None else None
+        if page is None or not title:
+            continue
+        title_chars += len(title)
+        if title_chars > MAX_TITLE_CHARS:
+            raise _OutlineUnreadableError
+        found.setdefault(page, []).append((level, title))
+    return {page: tuple(headings) for page, headings in found.items()}
+
+
+def _destination_page(document: pypdfium2.PdfDocument, bookmark: object, count: int) -> int | None:
+    """The index of the page of this document that ``bookmark`` goes to, or None."""
+    action = pdfium_c.FPDFBookmark_GetAction(bookmark)
+    # PDFium's GetDest also gives the destination of a GoToR action, a page of another file.
+    if action and pdfium_c.FPDFAction_GetType(action) != pdfium_c.PDFACTION_GOTO:
+        return None
+    destination = pdfium_c.FPDFBookmark_GetDest(document.raw, bookmark)
+    if not destination:
+        return None
+    index = pdfium_c.FPDFDest_GetDestPageIndex(document.raw, destination)
+    return index if 0 <= index < count else None
+
+
+def _bookmark_title(bookmark: object) -> str | None:
+    """The cleaned title of ``bookmark`` (see the module), or None when it is longer than
+    ``MAX_TITLE_UNITS`` UTF-16 units or cannot be read."""
+    # The size in bytes of the title in UTF-16LE with its two-byte terminator, asked first so that
+    # a title over the bound is never copied out of PDFium.
+    size = pdfium_c.FPDFBookmark_GetTitle(bookmark, None, 0)
+    if size <= 2 or size % 2 or size - 2 > 2 * MAX_TITLE_UNITS:
+        return None
+    buffer = ctypes.create_string_buffer(size)
+    if pdfium_c.FPDFBookmark_GetTitle(bookmark, buffer, size) != size:
+        return None
+    return clean_title(buffer.raw[: size - 2].decode("utf-16-le", errors="replace"))
+
+
+def clean_title(raw: str) -> str:
+    """A bookmark's title as a heading holds it: control characters and the noncharacters U+FFFE
+    and U+FFFF become spaces, and white space is collapsed to single spaces and trimmed."""
+    return " ".join(_TITLE_NOT_TEXT.sub(" ", raw).split())
+
+
+def place(text: str, bookmarks: Sequence[tuple[int, str]]) -> tuple[Heading, ...]:
+    """The headings of a page with ``text`` for its ``bookmarks`` (level, title) in outline order,
+    each on a line of the text (see the module).
+
+    Each title is looked up in an index of the lines rather than compared with every line, so a
+    page of the largest text with every bookmark the caps allow is placed in time proportional to
+    their sum, not their product."""
+    if not bookmarks:
+        return ()
+    lines = [
+        (start, end, " ".join(text[start:end].split()).casefold())
+        for match in _LINE.finditer(text)
+        for start, end in [_stripped(text, match.start(), match.end())]
+        if start < end
+    ]
+    # Line numbers in order by each line's key, and by its key without a section number: the
+    # three ways ``_same`` can hold.
+    by_key: dict[str, list[int]] = {}
+    by_unnumbered: dict[str, list[int]] = {}
+    for number, (_start, _end, key) in enumerate(lines):
+        by_key.setdefault(key, []).append(number)
+        bare = _unnumbered(key)
+        if bare is not None:
+            by_unnumbered.setdefault(bare, []).append(number)
+    matched: list[int | None] = []
+    after = 0
+    for _level, title in bookmarks:
+        key = title.casefold()
+        bare = _unnumbered(key)
+        candidates = [
+            _first_from(by_key.get(key, ()), after),
+            _first_from(by_unnumbered.get(key, ()), after),
+            _first_from(by_key.get(bare, ()) if bare is not None else (), after),
+        ]
+        line = min((n for n in candidates if n is not None), default=None)
+        matched.append(line)
+        if line is not None:
+            after = line + 1
+    # For each bookmark, the line of the next matched one after it (or the end of the lines).
+    following = [len(lines)] * len(bookmarks)
+    upcoming = len(lines)
+    for position in range(len(bookmarks) - 1, -1, -1):
+        following[position] = upcoming
+        line = matched[position]
+        if line is not None:
+            upcoming = line
+    headings: list[Heading] = []
+    previous = -1
+    for position, (level, title) in enumerate(bookmarks):
+        line = matched[position]
+        if line is None:
+            if previous + 1 >= following[position]:
+                continue
+            line = previous + 1
+        start, end, _key = lines[line]
+        headings.append(Heading(level, title, start, end))
+        previous = line
+    return tuple(headings)
+
+
+def _first_from(numbers: Sequence[int], after: int) -> int | None:
+    """The first of the sorted ``numbers`` that is ``after`` or later, or None."""
+    position = bisect.bisect_left(numbers, after)
+    return numbers[position] if position < len(numbers) else None
+
+
+def _same(line: str, title: str) -> bool:
+    """Whether a line of text and a title, each with white space collapsed and case folded, are
+    the same heading: equal, or equal once a section number in front of one of them is removed."""
+    return line == title or _unnumbered(line) == title or line == _unnumbered(title)
+
+
+def _unnumbered(key: str) -> str | None:
+    """``key`` without the section number in front of it, or None when it has none."""
+    number, space, rest = key.partition(" ")
+    if not space or not rest or not _SECTION_NUMBER.fullmatch(number):
+        return None
+    return rest
+
+
+def _stripped(text: str, start: int, end: int) -> tuple[int, int]:
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end
