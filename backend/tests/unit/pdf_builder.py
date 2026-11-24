@@ -5,6 +5,7 @@ with no text layer, an optional ``ToUnicode`` map (to give PDFium any characters
 font encoding with glyph names PDFium does not know (glyphs with no Unicode mapping), pages of any
 size, a page tree that claims more pages than it holds, a document information dictionary
 (``Info``, its strings given as bytes and encrypted with the file, or its source written as is),
+an outline (bookmarks with a title, a destination or an action, children, and a loop on request),
 and the standard security handler (revision 2, RC4 with a 40-bit
 key, ISO 32000-1 section 7.6.3), with a user password or an owner password only.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 # The padding string of the standard security handler (ISO 32000-1, 7.6.3.3, algorithm 2).
 _PAD: bytes = bytes.fromhex("28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A")
@@ -63,6 +65,25 @@ def to_unicode_map(mapping: dict[int, str]) -> bytes:
     )
 
 
+def utf16(text: str) -> bytes:
+    """A PDF text string in UTF-16BE with its byte order mark."""
+    return b"\xfe\xff" + text.encode("utf-16-be")
+
+
+@dataclass(frozen=True)
+class Bookmark:
+    """An outline item. ``title`` is the bytes of its title string (written in hex). ``page`` gives
+    it the destination ``[<that page> 0 R /XYZ 0 792 0]``, by index into the pages; ``dest`` and
+    ``action`` are a ``Dest`` and an ``A`` entry written as is, where ``{page0}``, ``{page1}`` ...
+    stand for the page objects' numbers. ``kids`` are its children, in order."""
+
+    title: bytes
+    page: int | None = None
+    dest: str | None = None
+    action: str | None = None
+    kids: tuple[Bookmark, ...] = ()
+
+
 def build(
     pages: list[bytes | None],
     *,
@@ -75,6 +96,9 @@ def build(
     sizes: Sequence[tuple[float, float]] | None = None,
     info: dict[str, bytes] | None = None,
     info_source: bytes | None = None,
+    outline: Sequence[Bookmark] | None = None,
+    outline_loop: str | None = None,
+    catalog_extra: str = "",
 ) -> bytes:
     """A PDF with one page per item of ``pages``: a content stream, or None for a page with no
     content at all. ``user_password`` encrypts the file (``b""`` for an owner password only);
@@ -84,7 +108,12 @@ def build(
     is each page's width and height in points (US Letter, 612 by 792, by default). ``info`` gives
     the trailer an ``Info`` dictionary whose entries are strings of exactly these bytes (written
     in hex, and encrypted when the file is); ``info_source`` gives it one written as is instead
-    (names, numbers, a key twice), never encrypted."""
+    (names, numbers, a key twice), never encrypted. ``outline`` gives the catalog an outline of
+    these top-level bookmarks; ``outline_loop`` makes it loop: ``"sibling"`` points the last
+    top-level bookmark's ``Next`` at the first, ``"child"`` makes the first top-level bookmark
+    the only child of its own first child. ``catalog_extra`` is written into the catalog as is
+    (a ``Dests`` dictionary of named destinations, say), with the same ``{pageN}`` stand-ins.
+    The outline is never encrypted, so it is for files without a password."""
     objects: dict[int, bytes] = {}
     streams: dict[int, bytes] = {}
     catalog, tree, font = 1, 2, 3
@@ -102,7 +131,14 @@ def build(
         objects[page_id] = (
             f"<< /Type /Page /Parent {tree} 0 R /MediaBox [0 0 {width} {height}] {resources}>>"
         ).encode()
-    objects[catalog] = f"<< /Type /Catalog /Pages {tree} 0 R >>".encode()
+    refs = {f"page{n}": kid for n, kid in enumerate(kids)}
+    outline_entry = ""
+    if outline is not None:
+        root, next_id = next_id, next_id + 1
+        next_id = _write_outline(objects, root, list(outline), next_id, kids, refs, outline_loop)
+        outline_entry = f" /Outlines {root} 0 R"
+    extra = f" {catalog_extra.format(**refs)}" if catalog_extra else ""
+    objects[catalog] = f"<< /Type /Catalog /Pages {tree} 0 R{outline_entry}{extra} >>".encode()
     count = len(pages) if claimed_pages is None else claimed_pages
     kid_list = " ".join(f"{kid} 0 R" for kid in kids)
     objects[tree] = f"<< /Type /Pages /Kids [{kid_list}] /Count {count} >>".encode()
@@ -175,3 +211,72 @@ def build(
         trailer += f" /Info {info_id} 0 R"
     out += f"trailer\n{trailer} >>\nstartxref\n{xref}\n%%EOF\n".encode()
     return bytes(out)
+
+
+def _write_outline(
+    objects: dict[int, bytes],
+    root: int,
+    items: list[Bookmark],
+    next_id: int,
+    page_ids: list[int],
+    refs: dict[str, int],
+    loop: str | None,
+) -> int:
+    """Writes the outline dictionary ``root`` and its items; returns the next free object number."""
+    numbers: dict[int, int] = {}  # id(item) -> object number, in preorder
+
+    def number(item: Bookmark) -> None:
+        nonlocal next_id
+        numbers[id(item)], next_id = next_id, next_id + 1
+        for kid in item.kids:
+            number(kid)
+
+    if not items:
+        objects[root] = b"<< /Type /Outlines /Count 0 >>"
+        return next_id
+    for item in items:
+        number(item)
+    links: dict[int, dict[str, int]] = {}
+
+    def link(parent: int, level: list[Bookmark]) -> None:
+        for position, item in enumerate(level):
+            entries = links.setdefault(numbers[id(item)], {})
+            entries["Parent"] = parent
+            if position > 0:
+                entries["Prev"] = numbers[id(level[position - 1])]
+            if position + 1 < len(level):
+                entries["Next"] = numbers[id(level[position + 1])]
+            if item.kids:
+                entries["First"] = numbers[id(item.kids[0])]
+                entries["Last"] = numbers[id(item.kids[-1])]
+                link(numbers[id(item)], list(item.kids))
+
+    link(root, items)
+    if loop == "sibling":
+        links[numbers[id(items[-1])]]["Next"] = numbers[id(items[0])]
+    elif loop == "child":
+        child = numbers[id(items[0].kids[0])]
+        links[child]["First"] = links[child]["Last"] = numbers[id(items[0])]
+    elif loop is not None:
+        raise ValueError(loop)
+
+    def write(item: Bookmark) -> None:
+        parts = [f"/Title <{item.title.hex()}>"]
+        parts += [f"/{key} {value} 0 R" for key, value in links[numbers[id(item)]].items()]
+        if item.page is not None:
+            parts.append(f"/Dest [{page_ids[item.page]} 0 R /XYZ 0 792 0]")
+        if item.dest is not None:
+            parts.append(f"/Dest {item.dest.format(**refs)}")
+        if item.action is not None:
+            parts.append(f"/A {item.action.format(**refs)}")
+        objects[numbers[id(item)]] = f"<< {' '.join(parts)} >>".encode()
+        for kid in item.kids:
+            write(kid)
+
+    for item in items:
+        write(item)
+    first, last = numbers[id(items[0])], numbers[id(items[-1])]
+    objects[root] = (
+        f"<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {len(numbers)} >>"
+    ).encode()
+    return next_id
