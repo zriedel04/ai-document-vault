@@ -10,8 +10,8 @@ The rules:
   the current user's Credential Manager, persisted on this computer only
   (``CRED_PERSIST_LOCAL_MACHINE``, so it does not roam with a domain profile), with a fixed user
   name and comment. It is called through advapi32 (``CredWriteW``, ``CredReadW``,
-  ``CredDeleteW``, ``CredFree``) with ``ctypes``, so no dependency is added (the plan names
-  ``keyring``; see the notes in ``docs/architecture.md``). The secret is stored as UTF-16-LE
+  ``CredDeleteW``, ``CredFree``) with ``ctypes``, so no dependency is added (ADR 0020 says
+  why not the plan's ``keyring``). The secret is stored as UTF-16-LE
   without a terminator, the encoding ``cmdkey`` and the Control Panel write, so a key entered
   there reads back here.
 - **Shape.** A key is 1 to :data:`MAX_KEY_LENGTH` visible ASCII characters (``!`` to ``~``):
