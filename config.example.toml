@@ -1,5 +1,5 @@
 # Copy to config.toml (git-ignored) and adjust. Never put API keys in this file.
-# Later sections (ai, pricing) arrive with their phases.
+# Later sections arrive with their phases.
 
 [vault]
 # An absolute folder outside every Git repository (the app refuses to start otherwise).
@@ -48,6 +48,33 @@ max_chunks_per_document = 3
 context_budget_tokens = 8000
 # Chunks before and after each source added for context when the budget allows (0 to 3).
 context_neighbor_chunks = 1
+
+# Model routing (plan section 9): features ask for a task, and these tables say which provider and
+# model serve it. Not used yet: nothing calls a model until Ask the Vault (Phase 5).
+# - Task names: answer, answer_deep, classify, query_rewrite. Any other name stops start-up.
+# - provider: "anthropic", "openai" or "fake" (offline, for tests and the demo). Only "fake" can
+#   be used until the Anthropic and OpenAI adapters exist.
+# - model: the provider's model id, written exactly as the provider spells it.
+# - batch: true or false (default false): the task may use the provider's batch API.
+# A table names both provider and model; a task left out keeps the route below. The Ask screen's
+# provider and model picker overrides the route for one question. API keys never go here.
+[ai.routes.answer]        # Ask the Vault default
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+
+[ai.routes.answer_deep]   # "Deep answer" toggle: cross-document synthesis
+provider = "anthropic"
+model = "claude-opus-5-5"
+
+[ai.routes.classify]      # metadata and summary suggestions
+provider = "anthropic"
+model = "claude-haiku-4-5"
+batch = true
+
+# Later (query rewriting); no route by default, so the task cannot run until one is set.
+# [ai.routes.query_rewrite]
+# provider = "openai"
+# model = "gpt-5.6-luna"
 
 [logging]
 level = "INFO"
