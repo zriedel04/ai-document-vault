@@ -68,6 +68,7 @@ from typing import Annotated, Any, Final
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 
 from vault.answers import graphemes
+from vault.db.ids import is_ulid
 
 # Bounds on what one answer may hold, so a malformed or hostile response costs bounded work. They
 # are far above a real answer (the plan sends 8-12 passages and asks for short quotes).
@@ -212,21 +213,29 @@ def parse_answer(raw: str) -> StructuredAnswer:
 
 @dataclass(frozen=True)
 class SentSource:
-    """A passage as it was sent to the model, with the ids the server resolves its label to."""
+    """A passage as it was sent to the model, with the ids the server resolves its label to.
+
+    ``chunk_id`` is a ``chunks.id``; ``version_id`` and ``document_id`` are the ULIDs of the
+    version and document the passage is from (``vault.db.ids``). A packed source of several
+    chunks (``vault.retrieval.packing``) is sent with the id of its first chunk, and the caller
+    maps a quote span to the chunks it touches with the source's own parts."""
 
     chunk_id: int
-    version_id: int
-    document_id: int
+    version_id: str
+    document_id: str
     page_start: int
     page_end: int
     # The passage text exactly as the prompt held it; quote spans are offsets into it.
     text: str = field(repr=False)
 
     def __post_init__(self) -> None:
-        numbers = (self.chunk_id, self.version_id, self.document_id, self.page_start, self.page_end)
+        numbers = (self.chunk_id, self.page_start, self.page_end)
         # ``type(...) is int`` and not ``isinstance``: ``True`` is an ``int`` too.
         if any(type(number) is not int or number < 1 for number in numbers):
-            msg = "a source's ids and pages must be whole numbers from 1"
+            msg = "a source's chunk id and pages must be whole numbers from 1"
+            raise SourceError(msg)
+        if not (is_ulid(self.version_id) and is_ulid(self.document_id)):
+            msg = "a source's version and document ids must be ULIDs"
             raise SourceError(msg)
         if self.page_end < self.page_start:
             msg = "a source's last page is before its first"
@@ -319,8 +328,8 @@ class Citation:
 
     label: str
     chunk_id: int
-    version_id: int
-    document_id: int
+    version_id: str
+    document_id: str
     page_start: int
     page_end: int
     quote_span: tuple[int, int] | None
@@ -347,7 +356,9 @@ class ValidatedAnswer:
 
     @property
     def cited_chunk_ids(self) -> frozenset[int]:
-        """The chunks a kept segment cites (``message_sources.cited``)."""
+        """The ``SentSource.chunk_id`` of each source a kept segment cites. For a packed source
+        of several chunks that is its first chunk only; ``vault.answers.ask`` resolves a quote to
+        the chunks it touches (``AskResult.chunks_for``)."""
         return frozenset(
             citation.chunk_id for segment in self.segments for citation in segment.citations
         )

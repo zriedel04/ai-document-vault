@@ -348,7 +348,14 @@ def test_the_fake_providers_answer_passes_the_validator() -> None:
     assert parsed.missing is None
     sources = SourceMap(
         [
-            SentSource(chunk_id=i, version_id=i, document_id=i, page_start=1, page_end=1, text=t)
+            SentSource(
+                chunk_id=i,
+                version_id=f"01J9Z3K4M5N6P7Q8R9S{i:07d}",
+                document_id=f"01J9Z3K4M5N6P7Q8R9T{i:07d}",
+                page_start=1,
+                page_end=1,
+                text=t,
+            )
             for i, t in enumerate(texts, start=1)
         ]
     )
