@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -18,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from vault.ai.providers.base import MODEL_ID, PROVIDER_NAMES
 from vault.ingest.extractors.text import FALLBACK_ENCODING, FALLBACK_ENCODINGS
 
 CONFIG_ENV_VAR = "AIVAULT_CONFIG"
@@ -181,6 +183,67 @@ class _EnvironmentWholeNumbers(PydanticBaseSettingsSource):
         return values
 
 
+# A price is US dollars per million tokens, from 0 to this, in steps of at most one millionth of a
+# dollar (six decimal places), so every price is a whole number of micro-dollars per million tokens
+# and the cost arithmetic (vault.ai.usage) is exact integer arithmetic.
+MAX_PRICE_USD_PER_MTOK: Final = Decimal(1000)
+PRICE_PLACES: Final = 6
+_PRICE_STEP: Final = Decimal(1).scaleb(-PRICE_PLACES)
+
+
+def _price(value: object) -> Decimal:
+    """``value`` as an exact price: a TOML number (read as a ``Decimal``, see :func:`load_settings`)
+    or a whole number, finite, from 0 to :data:`MAX_PRICE_USD_PER_MTOK`, with at most
+    :data:`PRICE_PLACES` decimal places. A ``float`` is refused (it is binary, not the number the
+    owner wrote), and so is text, a boolean and anything else."""
+    if isinstance(value, bool) or not isinstance(value, int | Decimal):
+        msg = "a price is a number written in config.toml (US dollars per million tokens)"
+        raise ValueError(msg)
+    price = Decimal(value)
+    if not price.is_finite() or not Decimal(0) <= price <= MAX_PRICE_USD_PER_MTOK:
+        msg = f"a price is from 0 to {MAX_PRICE_USD_PER_MTOK} US dollars per million tokens"
+        raise ValueError(msg)
+    if price != price.quantize(_PRICE_STEP):
+        msg = f"a price has at most {PRICE_PLACES} decimal places"
+        raise ValueError(msg)
+    return price
+
+
+class ModelPrice(_Section):
+    """What one model costs, in US dollars per million tokens (plan section 9, ``[pricing]``).
+
+    ``input`` is the price of input tokens read normally and ``cached_input`` of input tokens read
+    from the provider's prompt cache (``Usage.cached``, a part of ``Usage.input``); ``output`` is
+    the price of output tokens. All three are required: a missing one is an error, not zero.
+    """
+
+    input: Decimal
+    cached_input: Decimal
+    output: Decimal
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _exact_price(cls, value: object) -> Decimal:
+        return _price(value)
+
+
+def _pricing(value: object) -> object:
+    """The ``[pricing]`` table's two levels of keys: a provider of ``PROVIDER_NAMES``, then a model
+    id as ``LLMRequest.model`` accepts it (checked with ``fullmatch``)."""
+    if not isinstance(value, dict):
+        return value  # Pydantic refuses it with its own error
+    for provider, models in value.items():
+        if provider not in PROVIDER_NAMES:
+            msg = f"pricing has a table for each provider, one of {', '.join(PROVIDER_NAMES)}"
+            raise ValueError(msg)
+        if isinstance(models, dict):
+            for model in models:
+                if not isinstance(model, str) or not MODEL_ID.fullmatch(model):
+                    msg = "pricing names each model by its provider model id"
+                    raise ValueError(msg)
+    return value
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -196,7 +259,16 @@ class Settings(BaseSettings):
     processing: ProcessingSettings = ProcessingSettings()
     workers: WorkerSettings = WorkerSettings()
     retrieval: RetrievalSettings = RetrievalSettings()
+    # ``[pricing.<provider>."<model>"]`` tables (ModelPrice). A model without one has an unknown
+    # cost in the usage ledger, never zero. Set in the file only: an environment value is text,
+    # which a price refuses.
+    pricing: dict[str, dict[str, ModelPrice]] = Field(default_factory=dict)
     logging: LoggingSettings = LoggingSettings()
+
+    @field_validator("pricing", mode="before")
+    @classmethod
+    def _pricing_keys(cls, value: object) -> object:
+        return _pricing(value)
 
     @classmethod
     def settings_customise_sources(
@@ -226,7 +298,10 @@ def load_settings(config_file: Path | None = None) -> Settings:
     data: dict[str, object] = {}
     if config_file.is_file():
         with config_file.open("rb") as handle:
-            data = tomllib.load(handle)
+            # Every TOML float is read as the exact decimal written (a price of 0.2 is 0.2, not
+            # the binary float nearest to it). The other sections hold no floats, and their whole
+            # numbers refuse a Decimal as they refused a float.
+            data = tomllib.load(handle, parse_float=Decimal)
     elif explicit:
         msg = f"config file not found: {config_file}"
         raise FileNotFoundError(msg)
