@@ -20,6 +20,7 @@ from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from vault.ai.providers.base import MODEL_ID, PROVIDER_NAMES
+from vault.ai.routing import AISettings
 from vault.ingest.extractors.text import FALLBACK_ENCODING, FALLBACK_ENCODINGS
 
 CONFIG_ENV_VAR = "AIVAULT_CONFIG"
@@ -253,6 +254,33 @@ def _pricing(value: object) -> object:
     return value
 
 
+class _EnvironmentRouteFlags(PydanticBaseSettingsSource):
+    """The environment source, with ``AIVAULT_AI__ROUTES__<TASK>__BATCH`` read as a boolean.
+
+    A route's ``batch`` is strict, so the TOML file and values passed in code must hold a real
+    boolean. Environment variables hold text: exactly ``true`` or ``false`` (TOML's spelling)
+    becomes the boolean, and anything else (``1``, ``yes``, ``True``) is left for the strict field
+    to refuse.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        ai = values.get("ai")
+        routes = ai.get("routes") if isinstance(ai, dict) else None
+        if isinstance(routes, dict):
+            for table in routes.values():
+                if isinstance(table, dict) and table.get("batch") in ("true", "false"):
+                    table["batch"] = table["batch"] == "true"
+        return values
+
+
 class LoggingSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -272,6 +300,7 @@ class Settings(BaseSettings):
     # cost in the usage ledger, never zero. Set in the file only: an environment value is text,
     # which a price refuses.
     pricing: dict[str, dict[str, ModelPrice]] = Field(default_factory=dict)
+    ai: AISettings = AISettings()
     logging: LoggingSettings = LoggingSettings()
 
     @field_validator("pricing", mode="before")
@@ -289,7 +318,7 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         # Environment first (it wins), then the values read from the TOML file.
-        return (_EnvironmentWholeNumbers(env_settings), init_settings)
+        return (_EnvironmentRouteFlags(_EnvironmentWholeNumbers(env_settings)), init_settings)
 
 
 def resolve_config_file(config_file: Path | None = None) -> tuple[Path, bool]:
