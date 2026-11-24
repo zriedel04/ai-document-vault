@@ -43,6 +43,11 @@ vector_candidates = 50
 rrf_k = 60
 # At most this many chunks of one document in the results (1 to 100).
 max_chunks_per_document = 3
+# Context packing for Ask the Vault: at most this many tokens of sources go to the answer model,
+# counted with a conservative estimate (1,000 to 200,000).
+context_budget_tokens = 8000
+# Chunks before and after each source added for context when the budget allows (0 to 3).
+context_neighbor_chunks = 1
 
 # Model routing (plan section 9): features ask for a task, and these tables say which provider and
 # model serve it. Not used yet: nothing calls a model until Ask the Vault (Phase 5).
