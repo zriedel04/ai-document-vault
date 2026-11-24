@@ -94,6 +94,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}/labels/{label_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Assign Label
+         * @description Put a document (in use or in the trash) in a collection or give it a tag, as the owner's
+         *     own assignment (``source`` user, accepted), and return the document as it now is. Doing it
+         *     again changes nothing. A folder label is refused (409).
+         */
+        put: operations["assign_label_api_documents__document_id__labels__label_id__put"];
+        post?: never;
+        /**
+         * Unassign Label
+         * @description Take a collection or a tag off a document (the owner's own assignment; any other source's
+         *     stays) and return the document as it now is. A document without it is returned unchanged. A
+         *     folder label is refused (409).
+         */
+        delete: operations["unassign_label_api_documents__document_id__labels__label_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}/pages": {
         parameters: {
             query?: never;
@@ -241,11 +269,50 @@ export interface paths {
          */
         get: operations["read_labels_api_labels_get"];
         put?: never;
-        post?: never;
+        /**
+         * Create Label
+         * @description Make a collection or a tag, at the top or under ``parent_id`` (a label of the same kind),
+         *     and return it as the tree shows it. The name is cleaned as a folder name is (Unicode NFC;
+         *     control, bidirectional and invisible characters removed; white space collapsed; trailing dots
+         *     and spaces dropped); a name that is then empty or longer than 255 characters is a 422. Names
+         *     are compared as Windows compares them (``School`` and ``school`` are one name), and one kind
+         *     holds one label of a name under each parent (409).
+         */
+        post: operations["create_label_api_labels_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/labels/{label_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Label
+         * @description Delete a collection or a tag and every assignment of it. The documents stay where they
+         *     are. A label with labels under it is refused (409): delete or move those first. A folder
+         *     label is refused (409).
+         */
+        delete: operations["delete_label_api_labels__label_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Change Label
+         * @description Rename a collection or a tag (``name``, cleaned as on creation), move it (``parent_id``: a
+         *     label of the same kind, or null for the top), or both, and return it as the tree shows it.
+         *     Its documents and the labels below it move with it. A move under the label itself or a label
+         *     below it is refused (409), and so is a folder label (409): an import's folders are changed
+         *     only by the imports.
+         */
+        patch: operations["change_label_api_labels__label_id__patch"];
         trace?: never;
     };
     "/api/processing": {
@@ -582,6 +649,13 @@ export interface components {
              */
             status: "suggested" | "accepted" | "rejected";
         };
+        /** LabelChange */
+        LabelChange: {
+            /** Name */
+            name?: string | null;
+            /** Parent Id */
+            parent_id?: string | null;
+        };
         /** LabelNode */
         LabelNode: {
             /** Documents */
@@ -611,6 +685,18 @@ export interface components {
             id: string;
             /** Name */
             name: string;
+        };
+        /** NewLabel */
+        NewLabel: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "collection" | "tag";
+            /** Name */
+            name: string;
+            /** Parent Id */
+            parent_id?: string | null;
         };
         /**
          * Order
@@ -999,6 +1085,98 @@ export interface operations {
             };
         };
     };
+    assign_label_api_documents__document_id__labels__label_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description no such document; no such label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description folder labels are kept by imports and cannot be changed here */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unassign_label_api_documents__document_id__labels__label_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description no such document; no such label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description folder labels are kept by imports and cannot be changed here */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     read_document_pages_api_documents__document_id__pages_get: {
         parameters: {
             query?: {
@@ -1255,6 +1433,145 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LabelTree"];
+                };
+            };
+        };
+    };
+    create_label_api_labels_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewLabel"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LabelNode"];
+                };
+            };
+            /** @description no such parent label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description a label goes only under a label of its own kind; a label of this kind and name is already there; labels nest at most 64 levels deep */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_label_api_labels__label_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no such label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description folder labels are kept by imports and cannot be changed here; the label has labels under it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    change_label_api_labels__label_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LabelChange"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LabelNode"];
+                };
+            };
+            /** @description no such label; no such parent label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description folder labels are kept by imports and cannot be changed here; a label goes only under a label of its own kind; a label of this kind and name is already there; a label cannot go under itself or a label below it; labels nest at most 64 levels deep */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
