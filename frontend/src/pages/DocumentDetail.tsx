@@ -52,6 +52,8 @@ import {
 import { DEFAULT_SEARCH } from "./documents-search";
 import { isImageType } from "./image-limits";
 import { ImageView } from "./ImageView";
+import type { MutationLock } from "./mutation-lock";
+import { OwnerLabels } from "./OwnerLabels";
 import { PdfViewer } from "./PdfViewer";
 import { TextView } from "./TextView";
 
@@ -249,8 +251,25 @@ function Details({
   const [retrying, setRetrying] = useState(false);
   const [confirming, setConfirming] = useState(false);
   // Set at once on a click, before React re-renders the disabled button, so a second click that
-  // arrives in between sends nothing. One flag for moves, deletes and retries: one at a time.
+  // arrives in between sends nothing. One flag for moves, deletes, retries and label changes: one
+  // at a time.
   const movingNow = useRef(false);
+  // A collection or tag change holds the same lock (`OwnerLabels`): every change of the document
+  // answers with the whole document, so only one may be in flight (see mutation-lock.ts).
+  const [labelling, setLabelling] = useState(false);
+  const lock: MutationLock = {
+    begin: () => {
+      if (movingNow.current) return false;
+      movingNow.current = true;
+      setLabelling(true);
+      return true;
+    },
+    end: () => {
+      movingNow.current = false;
+      setLabelling(false);
+    },
+    busy: moving || deleting || retrying || labelling,
+  };
   const [outcome, setOutcome] = useState<MoveOutcome | null>(null);
   const trashed = document.state === "trashed";
   const navigate = useNavigate();
@@ -378,7 +397,7 @@ function Details({
                   move("restore");
                 }}
                 loading={moving}
-                disabled={deleting}
+                disabled={deleting || labelling}
               >
                 Restore
               </Button>
@@ -388,7 +407,7 @@ function Details({
                   setConfirming(true);
                 }}
                 loading={deleting}
-                disabled={moving}
+                disabled={moving || labelling}
               >
                 Delete permanently
               </Button>
@@ -401,7 +420,7 @@ function Details({
                 move("trash");
               }}
               loading={moving}
-              disabled={retrying}
+              disabled={retrying || labelling}
             >
               Move to trash
             </Button>
@@ -510,6 +529,8 @@ function Details({
         </SimpleGrid>
       </Card>
 
+      <OwnerLabels document={document} onDocument={setDocument} lock={lock} />
+
       <Title order={3}>Imports</Title>
       <Text size="sm" c="dimmed">
         Every time these exact bytes were imported, oldest first. The first import names the
@@ -546,7 +567,7 @@ function Details({
       <Group justify="space-between" align="center">
         <Title order={3}>Processing</Title>
         {canRetry && (
-          <Button variant="light" onClick={retry} loading={retrying} disabled={moving}>
+          <Button variant="light" onClick={retry} loading={retrying} disabled={moving || labelling}>
             Retry failed steps
           </Button>
         )}
