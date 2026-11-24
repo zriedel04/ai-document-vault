@@ -2,9 +2,9 @@
 
 :func:`build_answer_request` turns the owner's question and the retrieved passages
 (:class:`SourceBlock`, labelled ``S1`` to ``Sn`` in order) into an :class:`LLMRequest` for
-:attr:`Task.ANSWER`, and returns it with the id of the prompt it used (``answer.v1``), which is
-stored with the result. It is pure: no network, no database, no logging, no clock. The request
-holds:
+:attr:`Task.ANSWER` (or :attr:`Task.ANSWER_DEEP`), and returns it with the id of the prompt it
+used (``answer.v1``), which is stored with the result. It is pure: no network, no database, no
+logging, no clock. The request holds:
 
 - ``system``: the text of ``prompts/answer.v1.md`` exactly, the same for every question, so a
   provider's prompt cache can reuse it (it sits first in every request). The rules live only
@@ -55,6 +55,8 @@ from vault.ai.prompts import load_prompt
 from vault.ai.providers.base import Effort, LLMRequest, Message, Role, SourceBlock, Task
 
 ANSWER_PROMPT_ID: Final = "answer.v1"
+# The tasks the answer prompt serves (plan section 9: the default answer and "Deep answer").
+ANSWER_TASKS: Final = frozenset({Task.ANSWER, Task.ANSWER_DEEP})
 
 # The characters, other than ``<``, ``>`` and ``&``, whose NFKC form holds one of them, and every
 # character whose Unicode name holds "ANGLE BRACKET" (Unicode 15.0.0, Python 3.12). A test scans
@@ -163,12 +165,19 @@ def build_answer_request(
     model: str,
     max_output_tokens: int,
     effort: Effort | None = None,
+    task: Task = Task.ANSWER,
 ) -> AnswerRequest:
     """The :attr:`Task.ANSWER` request for ``question`` over ``sources`` (labelled ``S1``...).
 
-    With no sources the request is still built; the prompt tells the model to say the evidence is
-    insufficient. Raises ``ValueError`` (fixed text) for a blank question, sources that are not
-    ``S1`` to ``Sn`` in order, a lone surrogate, or any other rule of :class:`LLMRequest`."""
+    ``task`` is :attr:`Task.ANSWER_DEEP` for the Ask screen's "Deep answer" toggle: the same
+    prompt, routed to a stronger model and recorded as that task in the usage ledger. With no
+    sources the request is still built; the prompt tells the model to say the evidence is
+    insufficient. Raises ``ValueError`` (fixed text) for another task, a blank question, sources
+    that are not ``S1`` to ``Sn`` in order, a lone surrogate, or any other rule of
+    :class:`LLMRequest`."""
+    if not isinstance(task, Task) or task not in ANSWER_TASKS:
+        msg = "an answer request is for the answer or answer_deep task"
+        raise ValueError(msg)
     if isinstance(sources, str | bytes) or not isinstance(sources, Sequence):
         msg = "sources must be a sequence of SourceBlock"
         raise ValueError(msg)
@@ -183,7 +192,7 @@ def build_answer_request(
         _unicode(item.text, "a source's text")
     prompt = load_prompt(ANSWER_PROMPT_ID)
     request = LLMRequest(
-        task=Task.ANSWER,
+        task=task,
         model=model,
         system=prompt.text,
         messages=(message,),

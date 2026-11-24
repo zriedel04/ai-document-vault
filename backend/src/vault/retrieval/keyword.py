@@ -45,6 +45,11 @@ only by its file name or its section shows where the words matched. Its snippet 
 of the chosen chunk's text; for a match by name alone that is the document's first chunk, because
 without the title every chunk scores 0 and equal scores fall back to the lowest chunk id.
 
+Ask the Vault reads the same index differently (``rank_chunks``): its question is a sentence, so
+``build_match(..., any_term=True)`` joins the terms with OR instead of AND, and the list holds
+chunks, not documents, best BM25 first within the same scope (no filters yet), so one document
+can hold several places until fusion caps them.
+
 The query, the snippets and the names are the owner's: they go back to the page that asked and
 are never logged, and no error here quotes them.
 """
@@ -54,11 +59,11 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
-from sqlalchemy import BindParameter, DateTime, Engine, bindparam, text
+from sqlalchemy import BindParameter, Connection, DateTime, Engine, bindparam, text
 
 from vault.db.engine import read_snapshot
 from vault.db.labels import UNDER_LABEL_SQL, check_label
@@ -108,16 +113,28 @@ def _split(query: str) -> list[tuple[str, bool]]:
     return pieces
 
 
-def build_match(query: str) -> str | None:
+def build_match(
+    query: str,
+    *,
+    any_term: bool = False,
+    max_chars: int = MAX_QUERY_CHARS,
+    max_terms: int = MAX_TERMS,
+) -> str | None:
     """The FTS5 expression for the owner's ``query``, or ``None`` when it has no term to match.
+
+    Every term must match, unless ``any_term`` is set (Ask the Vault's question, which is a
+    sentence and not a list of required words): then a chunk that matches any term is found and
+    BM25 ranks the chunks that match more and rarer terms first. A term is read the same way in
+    both modes (phrases, prefixes, codes). ``max_chars`` and ``max_terms`` are the bounds, the
+    Search page's by default; they are constants of the caller, never values from a request.
 
     Raises ``QueryError`` for a query that is too long, has too many terms or holds text SQLite
     cannot store (a NUL, a lone surrogate)."""
     if not isinstance(query, str) or not is_storable(query):
         msg = "The query holds a character that is not text."
         raise QueryError(msg)
-    if len(query) > MAX_QUERY_CHARS:
-        msg = f"The query is longer than {MAX_QUERY_CHARS} characters."
+    if len(query) > max_chars:
+        msg = f"The query is longer than {max_chars} characters."
         raise QueryError(msg)
     terms: list[str] = []
     pieces = [(value, phrase) for value, phrase in _split(query) if _has_token(value)]
@@ -153,11 +170,12 @@ def build_match(query: str) -> str | None:
                 )
                 continue
         terms.append(_string(core))
-    if len(terms) > MAX_TERMS:
-        msg = f"The query has more than {MAX_TERMS} terms."
+    if len(terms) > max_terms:
+        msg = f"The query has more than {max_terms} terms."
         raise QueryError(msg)
-    # Explicit AND: FTS5 has no implicit AND next to a parenthesised group.
-    return " AND ".join(terms) if terms else None
+    # Explicit AND: FTS5 has no implicit AND next to a parenthesised group. Every term is a
+    # quoted string or a parenthesised group, so OR joins whole terms.
+    return (" OR " if any_term else " AND ").join(terms) if terms else None
 
 
 @dataclass(frozen=True)
@@ -238,7 +256,8 @@ WITH hits AS (
 ),
 scoped AS (
     SELECT
-        hits.chunk_id, chunks.document_id, chunks.page_start, chunks.char_start,
+        hits.chunk_id, hits.score AS chunk_score, chunks.document_id, chunks.page_start,
+        chunks.char_start,
         chunks.char_end, chunks.section_path, blobs.ext,
         min(hits.score) OVER (PARTITION BY chunks.document_id) AS score,
         row_number() OVER (
@@ -277,7 +296,17 @@ _SCOPE_PARAMS: Final[tuple[BindParameter[Any], ...]] = (
     bindparam("imported_from", type_=DateTime()),
     bindparam("imported_to", type_=DateTime()),
 )
+# Ask the Vault's keyword list: every chunk in scope, best BM25 first (title and section path
+# counted, as for the document's score), ties by chunk id, with the document's name.
+_RANK_SQL = (
+    _SCOPED  # noqa: S608
+    + """SELECT scoped.chunk_id, scoped.document_id, chunks_fts.title AS name
+    FROM scoped JOIN chunks_fts ON chunks_fts.rowid = scoped.chunk_id
+    ORDER BY scoped.chunk_score, scoped.chunk_id
+    LIMIT :limit"""
+)
 _COUNT = text(_COUNT_SQL).bindparams(*_SCOPE_PARAMS)
+_RANK = text(_RANK_SQL).bindparams(*_SCOPE_PARAMS)
 _PAGE = text(_PAGE_SQL).bindparams(*_SCOPE_PARAMS)
 _SNIPPETS = text(
     "SELECT rowid AS chunk_id,"
@@ -395,6 +424,43 @@ def search(engine: Engine, query: SearchQuery) -> SearchPage:
             )
         )
     return SearchPage(items=tuple(items), total=total)
+
+
+@dataclass(frozen=True)
+class RankedChunk:
+    """One place in Ask the Vault's keyword list: a chunk, its document and the document's name
+    (the keyword index's title, the library's name rule; ``None`` when it has none)."""
+
+    chunk_id: int
+    document_id: str
+    name: str | None = field(repr=False)
+
+
+def rank_chunks(connection: Connection, match: str, limit: int) -> tuple[RankedChunk, ...]:
+    """The first ``limit`` chunks that ``match`` (a :func:`build_match` expression) finds, best
+    first, within the scope of every search: documents not in the trash, only the chunks of
+    each document's current version. Unlike :func:`search` it lists chunks, not documents, so
+    one document can hold several places (Ask caps them per document after fusion).
+
+    ``connection`` is the caller's snapshot, so the chunks it loads next agree with the list."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        msg = "limit must be a whole number from 1"
+        raise ValueError(msg)
+    scope = {
+        "match": match,
+        "trashed": TRASHED,
+        "any_type": True,
+        "extensions": [""],
+        "any_label": True,
+        "label_id": None,
+        "imported_from": None,
+        "imported_to": None,
+        "limit": limit,
+    }
+    return tuple(
+        RankedChunk(chunk_id=row.chunk_id, document_id=row.document_id, name=row.name)
+        for row in connection.execute(_RANK, scope)
+    )
 
 
 def _plain(segments: tuple[Segment, ...]) -> str:

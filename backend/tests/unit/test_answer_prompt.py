@@ -200,6 +200,21 @@ def test_the_builder_makes_an_answer_request_with_the_prompt_first() -> None:
     assert (req.model, req.max_output_tokens) == ("fake-1", 2000)
 
 
+def test_a_deep_answer_is_the_same_prompt_for_the_answer_deep_task() -> None:
+    deep = _build(task=Task.ANSWER_DEEP)
+    plain = _build()
+    assert deep.request.task is Task.ANSWER_DEEP
+    assert deep.prompt_id == plain.prompt_id
+    assert deep.request.system == plain.request.system
+    assert render_user_turn(deep.request) == render_user_turn(plain.request)
+
+
+@pytest.mark.parametrize("task", [Task.CLASSIFY, Task.QUERY_REWRITE, "answer", None])
+def test_only_the_answer_tasks_take_the_answer_prompt(task: Any) -> None:
+    with pytest.raises(ValueError, match="answer or answer_deep"):
+        _build(task=task)
+
+
 def test_the_system_prompt_is_the_same_whatever_the_question_and_sources() -> None:
     first = _build("One question?", [_source(1)]).request
     second = _build("Another <question>?", [_source(1, INJECTION), _source(2)]).request

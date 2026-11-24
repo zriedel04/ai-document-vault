@@ -43,11 +43,16 @@ SYLLABUS = "Late work loses five points per day. The final exam is on December 1
 GRADES = "Homework 30%, project 40%, final exam 30%."
 
 
+def _ulid(number: int) -> str:
+    """A fixed, valid ULID for ``number``, so a test can name the id it expects."""
+    return f"01J9Z3K4M5N6P7Q8R9S{number:07d}"
+
+
 def _source(chunk_id: int, text: str, page: int = 1) -> SentSource:
     return SentSource(
         chunk_id=chunk_id,
-        version_id=chunk_id + 100,
-        document_id=chunk_id + 1000,
+        version_id=_ulid(chunk_id + 100),
+        document_id=_ulid(chunk_id + 1000),
         page_start=page,
         page_end=page,
         text=text,
@@ -94,8 +99,8 @@ def test_a_supported_segment_resolves_to_the_servers_ids() -> None:
     assert (citation.label, citation.chunk_id, citation.version_id, citation.document_id) == (
         "S1",
         11,
-        111,
-        1011,
+        _ulid(111),
+        _ulid(1011),
     )
     assert (citation.page_start, citation.page_end) == (4, 4)
     assert citation.verified
@@ -633,8 +638,11 @@ def test_find_quote_agrees_with_a_brute_force_reference() -> None:
         {"chunk_id": 0},
         {"chunk_id": -1},
         {"chunk_id": True},
-        {"version_id": 1.0},
+        {"version_id": 1},
+        {"version_id": "01j9z3k4m5n6p7q8r9s0t1v2w3"},
+        {"version_id": "01J9Z3K4M5N6P7Q8R9S0T1V2W3\n"},
         {"document_id": "7"},
+        {"document_id": 3},
         {"page_start": 0},
         {"page_start": 3, "page_end": 2},
         {"text": ""},
@@ -645,8 +653,8 @@ def test_find_quote_agrees_with_a_brute_force_reference() -> None:
 def test_a_malformed_source_is_refused(fields: dict[str, Any]) -> None:
     values: dict[str, Any] = {
         "chunk_id": 1,
-        "version_id": 2,
-        "document_id": 3,
+        "version_id": _ulid(2),
+        "document_id": _ulid(3),
         "page_start": 1,
         "page_end": 1,
         "text": "Some text.",

@@ -2,8 +2,8 @@
 
 A pure function, :func:`pack`, from a fused ranking (:mod:`vault.retrieval.fusion`, already capped
 per document by the caller) and the chunks it names to the sources the answer model will see,
-labelled ``S1`` to ``Sn``. Nothing calls it yet, and nothing here calls a model: the answer step
-is a later change. The caller loads the chunks (each hit's chunk and, for expansion, the chunks
+labelled ``S1`` to ``Sn``. Ask the Vault (:mod:`vault.answers.ask`) calls it; nothing here calls a
+model. The caller loads the chunks (each hit's chunk and, for expansion, the chunks
 next to it) and the documents' titles; this module reads nothing and writes nothing.
 
 The rules the plan leaves open:
