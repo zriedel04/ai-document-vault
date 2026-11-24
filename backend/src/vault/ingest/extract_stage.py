@@ -13,8 +13,8 @@ was deleted, ends without changing anything.
 2. The extractor for the type (``EXTRACTORS``) runs in the sandbox (``vault.jobs.sandbox``) with
    the configured limits, the text extractors with the configured fallback code page. Nothing is
    locked meanwhile. Its result is checked before it is stored: the extractor and version the
-   entry point writes, an encoding that extractor can report, no headings from an extractor that
-   finds none (PDF), measurements of the text layer from the PDF extractor and from no other
+   entry point writes, an encoding that extractor can report, measurements of the text layer
+   from the PDF extractor and from no other
    (``vault.ingest.text_layer.check_layer``), and the page rules of ``vault.db.pages``
    (``ExtractionResultError``), because a child that a hostile file took over writes its own
    answer. The OCR decision for each PDF page (``vault.ingest.text_layer.judge``) is made here,
@@ -42,9 +42,10 @@ the sandbox:
   ``SETUP_DELAY``, its error's class name showing why it waits; the document stays
   ``processing`` and is never failed by it.
 
-The types extracted are TXT, Markdown, DOCX and PDF. A PDF is read by its text layer only
-(``vault.ingest.extractors.pdf``, ``pdf-2``): a version on ADR 0015, which stays Proposed until
-the owner's PDF spike has run, so the extractor may still change or be replaced. A PDF page with
+The types extracted are TXT, Markdown, DOCX and PDF. A PDF is read by its text layer only, with
+headings from its outline (``vault.ingest.extractors.pdf``, ``pdf-3``): a version on ADR 0015,
+which stays Proposed until the owner's PDF spike has run, so the extractor may still change or be
+replaced. A PDF page with
 no text layer (a scan) is stored as an empty page and the document completes like any other: the
 chunk stage makes it searchable with no chunks for those pages. A page whose text layer is empty,
 too sparse for its area or mostly unreadable glyphs keeps the text it has and is marked for OCR
@@ -102,13 +103,12 @@ _TEXT_ENCODINGS: Final = frozenset(
 @dataclass(frozen=True)
 class Extractor:
     """How a blob type is extracted: the sandbox entry point, the extractor name and version its
-    result must carry, whether it takes the fallback code page (and may report it), whether it
-    can find headings at all, and whether it measures each page's text layer (and must)."""
+    result must carry, whether it takes the fallback code page (and may report it), and whether it
+    measures each page's text layer (and must)."""
 
     entry: str
     version: str
     text: bool
-    headings: bool = True
     layers: bool = False
 
     def encodings(self, fallback: str) -> frozenset[str | None]:
@@ -120,15 +120,13 @@ class Extractor:
 
 # By the blob's canonical extension (``vault.ingest.validate.EXTENSIONS``). The DOCX and PDF
 # versions are written out so the server never imports python-docx or loads PDFium; a test ties
-# each to its extractor's VERSION. ``pdf-2`` finds no headings (pdfplumber's font sizes, in ADR
-# 0015's proposal, are not used yet), so a PDF answer that holds one is refused; it is the only
-# extractor that measures text layers.
+# each to its extractor's VERSION. ``pdf`` is the only extractor that measures text layers.
 EXTRACTORS: Final[Mapping[str, Extractor]] = MappingProxyType(
     {
         "txt": Extractor("text", text_extractor.VERSION, text=True),
         "md": Extractor("markdown", text_extractor.VERSION, text=True),
         "docx": Extractor("docx", "docx-1", text=False),
-        "pdf": Extractor("pdf", "pdf-2", text=False, headings=False, layers=True),
+        "pdf": Extractor("pdf", "pdf-3", text=False, layers=True),
     }
 )
 EXTENSIONS: Final = frozenset(EXTRACTORS)
@@ -266,7 +264,6 @@ def _checked(
         not isinstance(result, Extraction)
         or result.extractor != extractor.version
         or result.encoding not in extractor.encodings(fallback)
-        or (not extractor.headings and any(page.headings for page in result.pages))
     ):
         raise ExtractionResultError
     try:

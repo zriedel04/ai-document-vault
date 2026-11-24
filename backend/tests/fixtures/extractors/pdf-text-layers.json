@@ -7,7 +7,7 @@
   "input_bytes": 2112,
   "input_sha256": "9fefe30c12f299574cc6a3952794642a3dcd0ff9b665e3fc8374e0fac1ecc0c7",
   "result": {
-    "extractor": "pdf-2",
+    "extractor": "pdf-3",
     "encoding": null,
     "pages": [
       {

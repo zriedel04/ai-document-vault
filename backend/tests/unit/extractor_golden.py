@@ -16,7 +16,7 @@ from the sandbox, so each fixture is also extracted in this process, which must 
 result, and gives the reason the golden file records.
 
 What a golden file records is what the current extractor versions (``text-1``, ``docx-1``,
-``pdf-2``) give, not what they should give: the PDF fixtures in particular record pdf-2's reading
+``pdf-3``) give, not what they should give: the PDF fixtures in particular record pdf-3's reading
 order across two columns, which ADR 0015 (Proposed) leaves to the owner's PDF spike.
 
 To regenerate the golden files after a deliberate change to a fixture or an extractor, run in
@@ -455,6 +455,33 @@ def _pdf_pages() -> bytes:
     )
 
 
+def _pdf_outline() -> bytes:
+    mark = pdf_builder.Bookmark
+    return pdf_builder.build(
+        [
+            pdf_builder.text_stream(["Course notes", "1 Overview", "What the course covers."]),
+            pdf_builder.text_stream(["1.1 Goals", "Read the syllabus.", "1.2 Schedule", "Weekly."]),
+            None,  # a scan: no line for its bookmark
+            pdf_builder.text_stream(["Appendix", "Tables."]),
+        ],
+        outline=[
+            mark(
+                b"Overview",  # "1 Overview" on the page, as LaTeX writes a numbered section
+                page=0,
+                kids=(
+                    mark(b"1.1 Goals", page=1),
+                    mark(pdf_builder.utf16(f"1.2 Schedule ({CYRILLIC})"), page=1),  # not found
+                ),
+            ),
+            mark(b"Scanned figure", page=2),
+            mark(b"\x01\x02", page=3),  # a blank title: not a heading
+            mark(b"APPENDIX", action="<< /S /GoTo /D [{page3} 0 R /Fit] >>"),
+            mark(b"Elsewhere", action="<< /S /GoToR /F (other.pdf) /D [0 /Fit] >>"),
+            mark(b"Past the end", dest="[9 /Fit]"),
+        ],
+    )
+
+
 # One-byte codes the ToUnicode map gives non-Latin characters (and two code points for one glyph).
 _UNICODE_CODES: Final = {
     0x80: "05E9",  # Hebrew shin
@@ -687,6 +714,14 @@ FIXTURES: Final[tuple[Fixture, ...]] = (
         "Four pages: a hyphenated word at a line end, a page with no content, a page of white "
         "space, and escaped characters",
         _pdf_pages,
+    ),
+    Fixture(
+        "pdf-outline",
+        "pdf",
+        "Headings from bookmarks: nested, a title without its section number, a title not on its "
+        "page, a page with no text, a blank title, a GoTo action, a link to another file and a "
+        "page past the end",
+        _pdf_outline,
     ),
     Fixture(
         "pdf-text-layers",
