@@ -41,3 +41,4 @@ Each file here records one decision: the context, what was decided, the alternat
 | [0017](0017-project-licence.md) | Project licence: Apache-2.0 | Accepted |
 | [0018](0018-markdown-parsing-with-markdown-it-py.md) | Markdown parsing with markdown-it-py | Accepted |
 | [0019](0019-sqlite-vec-licence.md) | sqlite-vec licence: MIT OR Apache-2.0 | Accepted |
+| [0020](0020-credential-manager-without-keyring.md) | Credential Manager through advapi32, not keyring | Accepted |

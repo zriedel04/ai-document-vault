@@ -36,6 +36,8 @@ Left in Phase 2: PDF headings (which wait on ADR 0015, below). The phase is done
 
 **Built ahead of its phase:** pause, resume and retry of background processing, an image viewer for PNG and JPEG (without text until OCR), `vault.ps1` `check`, `backup`, `restore` and `export`, and `python -m vault.eval`, which scores keyword search on the public evaluation set.
 
+**API keys (Phase 5 groundwork).** `vault.ai.keys` stores, reads and deletes one API key per cloud provider in Windows Credential Manager, and nothing calls it yet. Next: entering a key on the Settings page and in `vault.ps1 configure` (showing only "key set, ends in ..."), the development override, and the Anthropic and OpenAI adapters that read the key at call time.
+
 **Waiting on the spikes.** The embedding model, the OCR engine and the PDF extraction approach are Proposed ([ADRs 0013 to 0015](docs/decisions/README.md)) until their spikes have run on the owner's PC. The PDF extractor is a first version on ADR 0015's proposal and finds no headings until pdfplumber is added for them; images and scanned PDFs are imported but hold no searchable text until the OCR stage (Phase 3); embeddings, semantic and hybrid search (Phase 4) and Ask the Vault (Phase 5) are not built. The full list of what has changed is in the [changelog](CHANGELOG.md).
 
 ## Architecture in brief
