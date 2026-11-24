@@ -58,7 +58,8 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
     are moved to ``blobs/orphans/``, vectors in ``index.db`` whose chunk is gone are removed (or a
     damaged ``index.db`` is emptied), jobs that a killed process left running are queued again,
     import sources recorded before folder labels existed get their labels (once) and documents
-    whose file properties were never read get a ``metadata`` job, all before the first request.
+    whose file properties were never read get a ``metadata`` job, and current versions whose pages
+    an older extractor version wrote get an ``extract`` job (once), all before the first request.
     The worker pool (``vault.jobs.worker``) starts with the server and is stopped when it shuts
     down. A bad vault folder (inside a Git repository, say) or a
     damaged blob store (the temporary folder is a link) or a link where ``index.db`` belongs stops
@@ -120,6 +121,9 @@ def create_app(settings: Settings | None = None, *, serve_frontend: bool = True)
         # Before any import can run: documents whose file properties were never read get a job.
         pending = metadata_stage.queue_pending(engine, queue)
         log_event(logger, "metadata.queued", jobs=metric(pending))
+        # Before any worker runs: versions whose pages an older extractor wrote are queued again.
+        outdated = extract_stage.queue_outdated(engine, queue)
+        log_event(logger, "extract.outdated", jobs=metric(outdated))
         importer = Importer(engine, blobs)
         # Only extraction (of the types with an extractor), DOCX and PDF file properties and
         # chunking have handlers so far; jobs of the other stages and types wait in the queue.

@@ -26,7 +26,7 @@ import docx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Connection, Engine, insert, select, update
+from sqlalchemy import Connection, Engine, insert, select, text, update
 
 from tests.conftest import LOCAL
 from tests.unit.pdf_builder import build, text_stream
@@ -35,9 +35,16 @@ from tests.unit.test_setup_failures import SETUP_KINDS
 from vault.core.config import ProcessingSettings, Settings
 from vault.db import ids
 from vault.db.engine import read_snapshot
-from vault.db.pages import HEADING_LEVELS, PageHeading, PageText, read_pages
+from vault.db.pages import (
+    HEADING_LEVELS,
+    UNJUDGED_EXTRACTOR,
+    PageHeading,
+    PageText,
+    read_pages,
+    replace_pages,
+)
 from vault.db.schema import blobs, document_versions, documents, jobs
-from vault.ingest import extract_stage
+from vault.ingest import chunk_stage, extract_stage
 from vault.ingest.chunk_stage import CHUNK_STAGE
 from vault.ingest.extract_stage import (
     EXTRACT_STAGE,
@@ -772,3 +779,216 @@ def test_imported_pdfs_become_searchable_scans_included(
     output = capfd.readouterr()
     for private in ("quokka", "Jane Roe", "Syllabus"):
         assert private not in caplog.text + output.out + output.err
+
+
+# --- pages from an older extractor version -------------------------------------------------------
+
+# A synthetic extractor version that no extractor writes, standing for an older one.
+OUTDATED = "legacy-1"
+
+
+def run_stage(engine: Engine, store: BlobStore, stage: str, **options: Any) -> Completion | None:
+    """Claim and run one job of ``stage``; None if there was none to claim."""
+    queue = JobQueue(engine)
+    job = queue.claim(WORKER, [stage])
+    if job is None:
+        return None
+    if stage == EXTRACT_STAGE:
+        run = extract_stage.handler(engine, queue, store, LIMITS, **options)
+    else:
+        run = chunk_stage.handler(engine, queue)
+    try:
+        return run(job)
+    except Exception as error:  # as the worker pool records a handler that raised
+        return Completion(queue.fail(job.id, job.worker_id, error))
+
+
+def processed(library: Library, engine: Engine, store: BlobStore, name: str, data: bytes) -> str:
+    """Import ``data`` and run its extract and chunk jobs: a searchable document."""
+    document_id, _ = add(library, name, data)
+    assert run_stage(engine, store, EXTRACT_STAGE) is Completion.RECORDED
+    assert run_stage(engine, store, CHUNK_STAGE) is Completion.RECORDED
+    assert state(engine, document_id) == "searchable"
+    return document_id
+
+
+def make_outdated(
+    engine: Engine, store: BlobStore, document_id: str, pages: list[PageText]
+) -> None:
+    """Store ``pages`` as the version's pages from ``OUTDATED`` and chunk them, as an older
+    extractor would have left the document."""
+    version_id = version_of(engine, document_id)
+    replace_pages(engine, version_id, pages, OUTDATED, None)
+    with engine.connect() as connection:
+        sha256: str = connection.execute(
+            select(document_versions.c.blob_sha256).where(document_versions.c.id == version_id)
+        ).scalar_one()
+    JobQueue(engine).enqueue(document_id, CHUNK_STAGE, sha256)
+    assert run_stage(engine, store, CHUNK_STAGE) is Completion.RECORDED
+
+
+def keyword_hits(engine: Engine, word: str) -> list[str]:
+    with engine.connect() as connection:
+        return list(
+            connection.execute(
+                text(
+                    "SELECT chunks.document_id FROM chunks_fts"
+                    " JOIN chunks ON chunks.id = chunks_fts.rowid WHERE chunks_fts MATCH :word"
+                ),
+                {"word": word},
+            ).scalars()
+        )
+
+
+def extract_jobs(engine: Engine, document_id: str) -> list[tuple[str, int]]:
+    return [
+        (row.status, row.attempts)
+        for row in jobs_of(engine, document_id)
+        if row.stage == EXTRACT_STAGE
+    ]
+
+
+def test_pages_from_an_older_extractor_are_extracted_again_once(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    document_id = processed(library, engine, store, "notes.txt", b"quokka seminar\n")
+    make_outdated(engine, store, document_id, [PageText(1, "zebra legacy\n")])
+    assert keyword_hits(engine, "zebra") == [document_id]
+    queue = JobQueue(engine)
+    assert extract_stage.queue_outdated(engine, queue) == 1
+    assert extract_stage.queue_outdated(engine, queue) == 0  # already queued
+    assert extract_jobs(engine, document_id) == [("done", 1), ("queued", 0)]
+    assert run_stage(engine, store, EXTRACT_STAGE) is Completion.RECORDED
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert (stored.extractor, stored.pages) == ("text-1", (PageText(1, "quokka seminar\n"),))
+    # The old chunks and their index rows went with the old pages; the chunk job writes new ones.
+    assert keyword_hits(engine, "zebra") == []
+    assert run_stage(engine, store, CHUNK_STAGE) is Completion.RECORDED
+    assert keyword_hits(engine, "quokka") == [document_id]
+    assert state(engine, document_id) == "searchable"
+    assert extract_stage.queue_outdated(engine, queue) == 0  # nothing outdated now
+    assert run_stage(engine, store, EXTRACT_STAGE) is None
+
+
+def test_only_current_versions_from_another_extractor_version_are_queued(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    current = processed(library, engine, store, "current.txt", b"current\n")
+    trashed = processed(library, engine, store, "trashed.txt", b"trashed\n")
+    make_outdated(engine, store, trashed, [PageText(1, "old\n")])
+    library.trash(trashed)
+    waiting, _ = add(library, "waiting.txt", b"never extracted\n")
+    image, _ = add(library, "scan.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    assert extract_stage.queue_outdated(engine, JobQueue(engine)) == 0
+    assert extract_jobs(engine, current) == [("done", 1)]
+    assert extract_jobs(engine, trashed) == [("done", 1)]
+    assert extract_jobs(engine, waiting) == [("queued", 0)]
+    assert extract_jobs(engine, image) == [("queued", 0)]
+
+
+def test_a_newer_version_whose_old_version_is_outdated_is_not_queued(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    document_id = processed(library, engine, store, "notes.txt", b"first\n")
+    make_outdated(engine, store, document_id, [PageText(1, "old\n")])
+    move_to_other_bytes(engine, document_id)  # the outdated version is no longer current
+    assert extract_stage.queue_outdated(engine, JobQueue(engine)) == 0
+
+
+def test_a_failed_extraction_of_outdated_pages_is_not_queued_again(
+    library: Library,
+    engine: Engine,
+    store: BlobStore,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    document_id = processed(library, engine, store, PRIVATE_NAME, f"{CANARY}\n".encode())
+    make_outdated(engine, store, document_id, [PageText(1, f"{CANARY} old\n")])
+    queue = JobQueue(engine)
+    assert extract_stage.queue_outdated(engine, queue) == 1
+    with engine.begin() as connection:
+        connection.execute(update(jobs).where(jobs.c.status == "queued").values(max_attempts=1))
+    assert run_stage(engine, store, EXTRACT_STAGE, runner=crash) is Completion.ATTEMPT_FAILED
+    # Failed as any extraction is, with the old pages kept; a start-up does not retry it.
+    assert extract_jobs(engine, document_id) == [("done", 1), ("failed", 1)]
+    assert state(engine, document_id) == "failed"
+    stored = read_pages(engine, version_of(engine, document_id))
+    assert stored is not None
+    assert stored.extractor == OUTDATED
+    assert extract_stage.queue_outdated(engine, queue) == 0
+    # The Retry button queues it again; once it succeeds, nothing is outdated.
+    assert queue.retry_document(document_id) == 1
+    assert extract_stage.queue_outdated(engine, queue) == 0
+    assert run_stage(engine, store, EXTRACT_STAGE) is Completion.RECORDED
+    assert extract_stage.queue_outdated(engine, queue) == 0
+    output = capfd.readouterr()
+    for private in (CANARY, PRIVATE_NAME):
+        assert private not in caplog.text + output.out + output.err
+
+
+def test_an_outdated_extraction_whose_setup_fails_waits_and_is_not_queued_twice(
+    library: Library, engine: Engine, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id = processed(library, engine, store, "notes.txt", b"notes\n")
+    make_outdated(engine, store, document_id, [PageText(1, "old\n")])
+    queue = JobQueue(engine)
+    assert extract_stage.queue_outdated(engine, queue) == 1
+    setup, _error = SETUP_KINDS["refused"]
+    assert run_stage(engine, store, EXTRACT_STAGE, **setup(monkeypatch)) is Completion.DEFERRED
+    assert extract_jobs(engine, document_id) == [("done", 1), ("queued", 0)]
+    assert extract_stage.queue_outdated(engine, queue) == 0
+
+
+def test_pdf_1_pages_are_extracted_again_with_their_ocr_decision(
+    library: Library, engine: Engine, store: BlobStore
+) -> None:
+    sentence = "The survey began in early spring, when the water was high."
+    document_id = processed(
+        library, engine, store, "survey.pdf", build([text_stream([sentence]), None])
+    )
+    version_id = version_of(engine, document_id)
+    # What pdf-1 stored and migration 0008 marked: no decision for a page of text.
+    replace_pages(
+        engine,
+        version_id,
+        [PageText(1, sentence, text_layer="unjudged"), PageText(2, "", text_layer="empty")],
+        UNJUDGED_EXTRACTOR,
+        None,
+    )
+    assert extract_stage.queue_outdated(engine, JobQueue(engine)) == 1
+    assert run_stage(engine, store, EXTRACT_STAGE) is Completion.RECORDED
+    stored = read_pages(engine, version_id)
+    assert stored is not None
+    assert stored.extractor == EXTRACTORS["pdf"].version
+    assert [page.text_layer for page in stored.pages] == ["usable", "empty"]
+
+
+def test_the_start_up_queues_outdated_pages_and_logs_only_the_count(
+    vault_dir: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    settings = Settings.model_validate({"vault": {"path": str(vault_dir)}})
+    first = create_app(settings)
+    engine: Engine = first.state.engine
+    store: BlobStore = first.state.blobs
+    library = Library(first, vault_dir.parent / "incoming")
+    library.folder.mkdir()
+    document_id = processed(library, engine, store, PRIVATE_NAME, f"{CANARY}\n".encode())
+    make_outdated(engine, store, document_id, [PageText(1, "zebra legacy\n")])
+    engine.dispose()
+    capfd.readouterr()
+    second = create_app(settings)  # it sends the log to stderr
+    started = capfd.readouterr().err
+    [event] = [line for line in started.splitlines() if "extract.outdated" in line]
+    headers = {"Authorization": f"Bearer {second.state.token}", "Origin": LOCAL}
+    with TestClient(second, base_url=LOCAL, headers=headers):
+        deadline = time.monotonic() + 60
+        while keyword_hits(second.state.engine, "Patient") != [document_id]:
+            assert time.monotonic() < deadline, "the document was never extracted again"
+            time.sleep(0.05)
+    assert event.endswith("extract.outdated jobs=1"), event
+    assert keyword_hits(second.state.engine, "zebra") == []
+    output = capfd.readouterr()
+    for private in (CANARY, PRIVATE_NAME, "zebra"):
+        assert private not in started + output.out + output.err

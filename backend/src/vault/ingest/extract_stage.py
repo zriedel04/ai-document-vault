@@ -53,6 +53,22 @@ which finds them by that mark; nothing here runs OCR. A PDF that needs a passwor
 is over the extractor's caps or cannot be parsed fails the attempt as an extractor that raised
 (``SandboxChildError``).
 
+Pages stored by an extractor version other than the one ``EXTRACTORS`` names for their type now
+(``pdf-1`` pages once the extractor is ``pdf-2``, say) are extracted again: ``queue_outdated``
+runs at start-up, before any worker, and queues an ``extract`` job for each such current version
+whose last extraction of those bytes completed (the plan's invalidation by hash chain: an
+extractor version that changes re-queues the stages that depend on it). The job is an ordinary
+one: its pages replace the old ones in one transaction, which removes the version's chunks and
+their keyword index rows with them (a foreign-key cascade), and its chunk job writes the new
+chunks and index rows in another, as after any extraction. Until the extraction commits, the old
+pages and chunks stay as they were; between the two commits the version has no chunks, so
+keyword search does not find it for that moment. The document's state is left alone. A version whose
+last ``extract`` job for those bytes is still open or failed is left alone (the open one runs, and
+a failed one is the Retry button's), so a new extractor that fails on a file fails it once, by the
+queue's own attempts and with its document marked Failed as any failed extraction does, and is
+not queued again at every start-up. A document in the trash is skipped; it is queued at the first
+start-up after it is restored.
+
 A type with no extractor yet (PNG and JPEG, which wait on the OCR stage) is never claimed: the
 worker pool claims ``extract`` jobs only for the types in ``EXTRACTORS`` (``EXTENSIONS``), so those
 jobs wait in the queue, as a stage with no handler does, and run when their extractor arrives.
@@ -70,13 +86,14 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
-from sqlalchemy import Connection, Engine, select
+from sqlalchemy import Connection, Engine, case, exists, select
 
 from vault.db import ids
 from vault.db.engine import read_snapshot, write_transaction
 from vault.db.pages import PageHeading, PageText, check_pages, write_pages
+from vault.db.schema import TRASHED, document_versions, documents, jobs
 from vault.db.schema import blobs as blob_rows
-from vault.db.schema import document_versions, documents
+from vault.db.schema import pages as page_rows
 from vault.ingest.chunk_stage import CHUNK_STAGE
 from vault.ingest.extractors import Extraction, Page
 from vault.ingest.extractors import text as text_extractor
@@ -84,7 +101,7 @@ from vault.ingest.setup_failures import run_deferring_setup
 from vault.ingest.text_layer import check_layer, judge
 from vault.ingest.validate import TEXT_BOMS
 from vault.jobs import sandbox
-from vault.jobs.queue import Completion, Job, JobQueue
+from vault.jobs.queue import Completion, Job, JobQueue, current_work
 from vault.jobs.sandbox import SandboxLimits
 from vault.jobs.worker import Handler
 from vault.storage.blobs import BlobStore
@@ -314,6 +331,54 @@ def _failed(
     queue, job = finish
     status = queue.fail(job.id, job.worker_id, error, connection=connection)
     return Outcome.FAILED if status == "failed" else Outcome.RETRY
+
+
+def queue_outdated(engine: Engine, queue: JobQueue) -> int:
+    """Queue an ``extract`` job, in one transaction, for every current version of a document not
+    in the trash whose stored pages were written by another extractor version than the one
+    ``EXTRACTORS`` names for its type, unless the latest ``extract`` job for its bytes (its
+    document's current work for the stage, ``current_work``) is still open or has failed.
+    Returns how many were queued.
+
+    Run it at start-up, before any worker. A job it queues either stores pages of the current
+    version, after which nothing is outdated, or ends open or failed, after which this skips the
+    version: it never queues the same work twice, and a failure is never retried by a start-up."""
+    expected = case(
+        {ext: extractor.version for ext, extractor in EXTRACTORS.items()},
+        value=blob_rows.c.ext,
+    )
+    previous = jobs.alias("previous_extract")
+    outdated = (
+        select(documents.c.id, document_versions.c.blob_sha256)
+        .select_from(
+            documents.join(
+                document_versions,
+                (document_versions.c.id == documents.c.current_version_id)
+                & (document_versions.c.document_id == documents.c.id),
+            ).join(blob_rows, blob_rows.c.sha256 == document_versions.c.blob_sha256)
+        )
+        .where(
+            documents.c.state != TRASHED,
+            blob_rows.c.ext.in_(sorted(EXTENSIONS)),
+            exists().where(
+                page_rows.c.version_id == document_versions.c.id,
+                page_rows.c.extractor != expected,
+            ),
+            ~exists().where(
+                previous.c.document_id == documents.c.id,
+                previous.c.stage == EXTRACT_STAGE,
+                previous.c.input_hash == document_versions.c.blob_sha256,
+                previous.c.status != "done",
+                current_work(previous),
+            ),
+        )
+        .order_by(documents.c.created_at, documents.c.id)
+    )
+    with write_transaction(engine) as connection:
+        found = connection.execute(outdated).all()
+        for row in found:
+            queue.enqueue(row.id, EXTRACT_STAGE, row.blob_sha256, connection=connection)
+    return len(found)
 
 
 def handler(
