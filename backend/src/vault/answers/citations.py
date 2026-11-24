@@ -6,6 +6,16 @@ support it and one short quote, an ``insufficient_evidence`` flag and a note on 
 :func:`validate_answer` resolves the labels to the database ids the server holds and checks every
 quote against the text that was sent; the model never supplies an id.
 
+**The shape.** :class:`StructuredAnswer` is the one definition of the answer: the schema sent to
+the provider (``vault.ai.answer.ANSWER_SCHEMA``) is its JSON schema (:func:`answer_json_schema`),
+and both readers, :func:`parse_answer` for the model's JSON text and ``vault.ai.answer.read_answer``
+for a provider's parsed output, go through :func:`read_structured`. Every field is required and no
+other field is allowed (what strict structured output on both providers expects); ``quote`` and
+``missing`` may be ``null`` for "no quote" and "nothing missing", which the rules below treat as
+blank. The size bounds (``MAX_*`` but ``MAX_ANSWER_CHARS``) are in the schema too. A label is any
+short text with no pattern, in the schema and here alike: a label the server did not give is
+``invented_label`` (ADR 0011: removed and the segment unsupported), not a refused answer.
+
 Rules (each failure is a :class:`Finding` with a fixed code and fixed text):
 
 - **Labels.** A label is accepted only exactly as :class:`SourceMap` writes it (``S3``): ``[S3]``,
@@ -15,7 +25,7 @@ Rules (each failure is a :class:`Finding` with a fixed code and fixed text):
 - **Segment status**, by precedence. ``uncited``: the segment names no label (shown muted).
   ``unsupported``: it names at least one label that was not given, whatever its other labels
   show; the labels that were given are still resolved and checked. ``supported``: the quote is
-  found in at least one cited passage. ``unverified``: anything less (a blank quote,
+  found in at least one cited passage. ``unverified``: anything less (a blank or ``null`` quote,
   ``missing_quote``, or one found in no cited passage). Each citation records its own match, so a
   quote found in ``S3`` and not in ``S5`` verifies ``S3`` only (``quote_not_found`` for ``S5``).
 - **Quote matching.** The quote must occur in one cited passage's text, as a whole: a quote that
@@ -34,10 +44,10 @@ Rules (each failure is a :class:`Finding` with a fixed code and fixed text):
   selector, modifier or the rest of its ZWJ sequence, or one regional indicator of a flag. Its
   span is given in code points of the passage text as it was sent, for the highlight.
 - **The flag.** With ``insufficient_evidence`` set the answer should hold no segments
-  (``flag_with_claims``) and should say what is missing (``missing_note``). Without it, an answer
-  with no segment left is ``empty_answer``. Segments whose text is blank are removed
-  (``empty_segment``). :attr:`ValidatedAnswer.insufficient_evidence` is true when the flag is set or
-  no segment is left; weak retrieval scores are judged by the caller.
+  (``flag_with_claims``) and should say what is missing (``missing_note``, for a blank or ``null``
+  note). Without it, an answer with no segment left is ``empty_answer``. Segments whose text is
+  blank are removed (``empty_segment``). :attr:`ValidatedAnswer.insufficient_evidence` is true when
+  the flag is set or no segment is left; weak retrieval scores are judged by the caller.
 
 The model's output is untrusted text, as document text is: nothing here logs it, and no message or
 finding repeats a label, a quote, an answer or a passage. A finding names a segment and a label by
@@ -53,7 +63,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import cache
 from types import MappingProxyType
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 
@@ -112,29 +122,64 @@ def _utf8(value: str) -> str:
 Text = Annotated[str, AfterValidator(_utf8)]
 
 
+def _without_description(schema: dict[str, Any]) -> None:
+    schema.pop("description", None)
+
+
 class _Strict(BaseModel):
     # Unknown fields and values of the wrong kind (a number for a string, ``"true"`` or ``1`` for
-    # the flag, an object for a list) are refused, not coerced.
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    # the flag, an object for a list) are refused, not coerced. hide_input_in_errors: a
+    # ValidationError never repeats the model's text, should one reach a caller.
+    # The JSON schema is sent to the model, so a class docstring (written for this code) is left
+    # out of it: what the model is told belongs to the prompt.
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        frozen=True,
+        hide_input_in_errors=True,
+        json_schema_extra=_without_description,
+    )
+
+
+Label = Annotated[Text, Field(max_length=MAX_LABEL_CHARS)]
+Quote = Annotated[Text, Field(max_length=MAX_QUOTE_CHARS)]
+Note = Annotated[Text, Field(max_length=MAX_NOTE_CHARS)]
 
 
 class AnswerSegment(_Strict):
     """One sentence or short segment of the answer, as the model wrote it."""
 
     text: Annotated[Text, Field(max_length=MAX_SEGMENT_CHARS, repr=False)]
-    sources: Annotated[
-        list[Annotated[Text, Field(max_length=MAX_LABEL_CHARS)]],
-        Field(max_length=MAX_SOURCES_PER_SEGMENT, repr=False),
-    ]
-    quote: Annotated[Text, Field(max_length=MAX_QUOTE_CHARS, repr=False)]
+    sources: Annotated[list[Label], Field(max_length=MAX_SOURCES_PER_SEGMENT, repr=False)]
+    # ``null``: no quote, which the validator treats as a blank one (``missing_quote``).
+    quote: Annotated[Quote | None, Field(repr=False)]
 
 
 class StructuredAnswer(_Strict):
-    """The model's structured output: every field is required, and no other field is allowed."""
+    """The model's structured output: every field is required, and no other field is allowed.
+
+    The one definition of the answer's shape: the provider schema and both readers come from it,
+    so they cannot drift apart."""
 
     answer: Annotated[list[AnswerSegment], Field(max_length=MAX_SEGMENTS)]
     insufficient_evidence: bool
-    missing: Annotated[Text, Field(max_length=MAX_NOTE_CHARS, repr=False)]
+    # ``null``: nothing is said to be missing, which the validator treats as a blank note.
+    missing: Annotated[Note | None, Field(repr=False)]
+
+
+def answer_json_schema() -> dict[str, object]:
+    """The JSON schema of :class:`StructuredAnswer`, as sent to a provider (a fresh copy)."""
+    return StructuredAnswer.model_json_schema()
+
+
+def read_structured(data: object) -> StructuredAnswer:
+    """``data``, a value a JSON reader built, as a :class:`StructuredAnswer`, or
+    :class:`AnswerFormatError` with fixed text and no cause (the schema's messages quote it)."""
+    try:
+        return StructuredAnswer.model_validate(data, strict=True)
+    except ValidationError:
+        msg = "the answer does not match the answer schema"
+        raise AnswerFormatError(msg) from None
 
 
 def _no_repeated_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -150,8 +195,10 @@ def parse_answer(raw: str) -> StructuredAnswer:
 
     The text is bounded first (``MAX_ANSWER_CHARS``), then read as JSON with an object that names
     a key twice refused (a JSON reader would keep one of the two silently), then checked against
-    the schema in strict mode. The error is fixed text and is raised without its cause, because
-    the JSON reader's and the schema's messages quote the input."""
+    the schema in strict mode (:func:`read_structured`). The size bound is on the text before it
+    is parsed, a cost bound and not part of the shape: a provider's output is bounded by its
+    ``max_output_tokens`` instead. The error is fixed text and is raised without its cause,
+    because the JSON reader's and the schema's messages quote the input."""
     if not isinstance(raw, str) or len(raw) > MAX_ANSWER_CHARS:
         msg = "the answer is not JSON text within the size limit"
         raise AnswerFormatError(msg)
@@ -160,11 +207,7 @@ def parse_answer(raw: str) -> StructuredAnswer:
     except (ValueError, RecursionError):
         msg = "the answer is not valid JSON"
         raise AnswerFormatError(msg) from None
-    try:
-        return StructuredAnswer.model_validate(data, strict=True)
-    except ValidationError:
-        msg = "the answer does not match the answer schema"
-        raise AnswerFormatError(msg) from None
+    return read_structured(data)
 
 
 @dataclass(frozen=True)
@@ -290,7 +333,7 @@ class Citation:
 @dataclass(frozen=True)
 class ValidatedSegment:
     text: str = field(repr=False)
-    quote: str = field(repr=False)
+    quote: str | None = field(repr=False)
     citations: tuple[Citation, ...]
     status: SegmentStatus
 
@@ -299,7 +342,7 @@ class ValidatedSegment:
 class ValidatedAnswer:
     segments: tuple[ValidatedSegment, ...]
     insufficient_evidence: bool
-    missing: str = field(repr=False)
+    missing: str | None = field(repr=False)
     findings: tuple[Finding, ...]
 
     @property
@@ -483,7 +526,9 @@ def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAn
         if not segment.text.strip():
             findings.append(Finding(FindingCode.EMPTY_SEGMENT, position))
             continue
-        quoted = bool(normalise(segment.quote))
+        # A ``null`` quote is no quote, as a blank one is.
+        quote = segment.quote or ""
+        quoted = bool(normalise(quote))
         citations: list[Citation] = []
         seen: set[str] = set()
         invented = False
@@ -501,7 +546,7 @@ def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAn
             if quoted:
                 if label not in passages:
                     passages[label] = _folded(source.text)
-                span = _find(segment.quote, passages[label])
+                span = _find(quote, passages[label])
                 if span is None:
                     findings.append(Finding(FindingCode.QUOTE_NOT_FOUND, position, index))
             citations.append(
@@ -530,7 +575,7 @@ def validate_answer(answer: StructuredAnswer, sources: SourceMap) -> ValidatedAn
     if answer.insufficient_evidence:
         if segments:
             findings.append(Finding(FindingCode.FLAG_WITH_CLAIMS))
-        if not answer.missing.strip():
+        if answer.missing is None or not answer.missing.strip():
             findings.append(Finding(FindingCode.MISSING_NOTE))
     elif not segments:
         findings.append(Finding(FindingCode.EMPTY_ANSWER))
