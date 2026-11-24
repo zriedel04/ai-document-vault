@@ -48,6 +48,10 @@ from typing import Final, Protocol
 # ``fullmatch`` (``$`` would accept a trailing newline).
 MODEL_ID: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}")
 MAX_OUTPUT_TOKENS: Final = 128_000
+# The providers a ``LLMProvider.name`` may be: the two of plan section 9 and the fake. The usage
+# ledger (``ai_requests.provider``) and the price table (``[pricing]``) accept exactly these; a new
+# adapter (a local model) adds its name here, with a migration for the ledger's CHECK.
+PROVIDER_NAMES: Final = ("anthropic", "openai", "fake")
 
 
 class Task(Enum):

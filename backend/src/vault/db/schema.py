@@ -32,6 +32,7 @@ from sqlalchemy import (
     text,
 )
 
+from vault.ai.providers.base import PROVIDER_NAMES, ErrorKind, Task
 from vault.db.ids import ulid_check
 
 # Named constraints, so a later migration can drop one by name on SQLite.
@@ -84,6 +85,10 @@ MAX_FIELD_CHARS: Final = MAX_LABEL_CHARS
 # Whether a PDF page's text layer is usable or the page needs OCR (vault.ingest.text_layer, which
 # defines each value; ``unjudged`` marks a page of text stored by pdf-1, before the rule).
 TEXT_LAYERS: Final = ("usable", "empty", "sparse", "unreadable", "unjudged")
+# The outcome of one provider call in the usage ledger (``ai_requests``).
+AI_REQUEST_STATUSES: Final = ("ok", "error")
+AI_TASKS: Final = tuple(task.value for task in Task)
+AI_ERROR_KINDS: Final = tuple(kind.value for kind in ErrorKind)
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:
@@ -509,6 +514,70 @@ document_fields = Table(
         ondelete="CASCADE",
     ),
     Index("ix_document_fields_version_id", "version_id"),
+)
+
+
+def _whole(column: str, *, nullable: bool = False) -> str:
+    """A CHECK that ``column`` holds an integer of at least 0 (SQLite keeps ``1.5`` or ``'x'`` in an
+    INTEGER column as it is, so the type is checked too)."""
+    check = f"typeof({column}) = 'integer' AND {column} >= 0"
+    return f"{column} IS NULL OR ({check})" if nullable else check
+
+
+# The usage ledger (plan section 9, "Usage tracking"): one row per provider call, written by
+# vault.ai.usage.record_call. A call that answered (``ok``) has the token counts the provider
+# reported (``Usage``; never estimated) and a cost estimated from the price table when the model
+# has a price, or NULL when it has none (unknown, never zero). A call that failed (``error``) has
+# its ``ErrorKind`` and no counts or cost: the provider reported none. The cost is a whole number of
+# nano-dollars (10^-9 USD), so the dashboard's sums are exact. ``doc_count`` is the number of
+# documents whose passages the call sent. The plan's link to the conversation message is left out
+# until the conversations tables exist (a later migration adds it with its foreign key). The
+# table holds no text from a request or a response: no prompt, passage, answer, title or path.
+ai_requests = Table(
+    "ai_requests",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("created_at", DateTime, nullable=False),
+    Column("task", String, nullable=False),
+    Column("provider", String, nullable=False),
+    Column("model", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("error_kind", String, nullable=True),
+    Column("input_tokens", Integer, nullable=True),
+    Column("cached_tokens", Integer, nullable=True),
+    Column("output_tokens", Integer, nullable=True),
+    Column("est_cost_nanousd", Integer, nullable=True),
+    Column("latency_ms", Integer, nullable=False),
+    Column("doc_count", Integer, nullable=False),
+    CheckConstraint(_one_of("task", AI_TASKS), name="task_known"),
+    CheckConstraint(_one_of("provider", PROVIDER_NAMES), name="provider_known"),
+    # A looser net than LLMRequest's MODEL_ID, which is the rule the application applies.
+    CheckConstraint(
+        "length(model) BETWEEN 1 AND 128 AND model NOT GLOB '*[^A-Za-z0-9._:/@-]*'",
+        name="model_shape",
+    ),
+    CheckConstraint(_one_of("status", AI_REQUEST_STATUSES), name="status_known"),
+    CheckConstraint(
+        f"error_kind IS NULL OR {_one_of('error_kind', AI_ERROR_KINDS)}", name="error_kind_known"
+    ),
+    CheckConstraint(
+        "(status = 'ok' AND error_kind IS NULL AND input_tokens IS NOT NULL"
+        " AND cached_tokens IS NOT NULL AND output_tokens IS NOT NULL)"
+        " OR (status = 'error' AND error_kind IS NOT NULL AND input_tokens IS NULL"
+        " AND cached_tokens IS NULL AND output_tokens IS NULL AND est_cost_nanousd IS NULL)",
+        name="outcome_shape",
+    ),
+    CheckConstraint(_whole("input_tokens", nullable=True), name="input_tokens_whole"),
+    CheckConstraint(_whole("cached_tokens", nullable=True), name="cached_tokens_whole"),
+    CheckConstraint(
+        "cached_tokens IS NULL OR cached_tokens <= input_tokens", name="cached_part_of_input"
+    ),
+    CheckConstraint(_whole("output_tokens", nullable=True), name="output_tokens_whole"),
+    CheckConstraint(_whole("est_cost_nanousd", nullable=True), name="cost_whole"),
+    CheckConstraint(_whole("latency_ms"), name="latency_whole"),
+    CheckConstraint(_whole("doc_count"), name="doc_count_whole"),
+    Index("ix_ai_requests_created_at", "created_at"),
+    sqlite_autoincrement=True,
 )
 
 # The FTS5 table over chunks and the shadow tables FTS5 keeps for it. The migration ``0005`` creates
