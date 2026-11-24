@@ -8,8 +8,10 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
     "alembic>=1.14",
+    "anthropic>=2.13.0",
     "anyio>=4.6",
     "fastapi>=0.115",
+    "httpx2>=2.16",
     "markdown-it-py>=4.0",
     "pydantic-settings>=2.6",
     "pypdfium2>=5.14",
@@ -21,7 +23,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx2>=0.1",
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-cov>=6.0",

@@ -375,8 +375,8 @@ def test_the_example_config_shows_the_plans_query_rewrite_route_commented_out() 
 # --- the registry ----------------------------------------------------------------------------
 
 
-def test_only_the_fake_is_registered() -> None:
-    assert set(registry.FACTORIES) == {"fake"}
+def test_the_fake_and_anthropic_are_registered() -> None:
+    assert set(registry.FACTORIES) == {"fake", "anthropic"}
     assert set(registry.FACTORIES) <= PROVIDER_NAMES
 
 
@@ -387,7 +387,7 @@ def test_the_registry_creates_the_fake() -> None:
     assert registry.create_provider("fake") is not provider  # a new one each time
 
 
-@pytest.mark.parametrize("name", sorted(PROVIDER_NAMES - {"fake"}))
+@pytest.mark.parametrize("name", sorted(PROVIDER_NAMES - {"fake", "anthropic"}))
 def test_a_known_provider_without_an_adapter_is_unavailable(name: str) -> None:
     with pytest.raises(registry.ProviderUnavailableError) as caught:
         registry.create_provider(name)
