@@ -100,6 +100,10 @@ All notable changes are recorded here, following [Keep a Changelog](https://keep
 - `@types/node` is pinned to the oldest Node.js release the frontend supports (22.13, was 22.20), and Dependabot no longer proposes its major or minor updates; a test in `scripts/tests/test_node_types.py` checks that `engines.node`, CI and the types agree.
 - Dependabot no longer proposes a TypeScript major version (TypeScript 7 does not install next to `openapi-typescript` and `typescript-eslint`, so the npm group failed to resolve) or a `uv-build` bump (the build backend is pinned to the tested minor series and is bumped by hand).
 
+### Fixed
+
+- The cited answer of ADR 0011 had two definitions that disagreed: `vault.ai.answer.CitedAnswer`, whose schema is sent to the provider, allowed `quote` and `missing` to be `null` and had no size bounds, while the citation validator's `StructuredAnswer` required both as text, so `parse_answer` refused a normal answer with `missing: null` that the provider schema and `FakeProvider` produce. `vault.answers.citations.StructuredAnswer` is now the one definition: `ANSWER_SCHEMA` is its JSON schema (`answer_json_schema`, with its size bounds and without the code's docstrings), and `read_answer` and `parse_answer` both read through its `read_structured`. `quote` and `missing` may be `null`; the validator treats a `null` quote as a missing one (`missing_quote`) and a `null` note with the flag as `missing_note`. `CitedAnswer` is removed. Tests check every field's type, nullability and bound in the schema, compare the schema with both readers on 4,000 generated answers through an independent JSON Schema check, and fail if another class declares the answer's fields.
+
 ### Security
 
 - The Content-Security-Policy allows `blob:` images (`img-src 'self' blob:`) for the image viewer; only this origin's scripts make such addresses, so no channel to another host opens. The original-file route sends only a media type the importer gives (PDF, DOCX, PNG, JPEG, text) and `application/octet-stream` for any other stored type, so a hand-edited database cannot make it serve HTML or SVG.

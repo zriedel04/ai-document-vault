@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 import vault
-from vault.ai.answer import ANSWER_SCHEMA, CitedAnswer, read_answer
+from vault.ai.answer import ANSWER_SCHEMA, read_answer
 from vault.ai.providers.base import (
     RETRYABLE,
     Effort,
@@ -27,6 +27,7 @@ from vault.ai.providers.base import (
     parse_structured,
     thaw,
 )
+from vault.answers.citations import StructuredAnswer
 
 SECRET = "Patient diagnosis confidential"  # noqa: S105 - synthetic private-looking text
 
@@ -309,12 +310,12 @@ def test_llm_error_messages_are_fixed_text_and_retryable_is_by_kind() -> None:
 
 
 def test_answer_schema_is_the_cited_answer_model_and_read_only() -> None:
-    assert thaw(ANSWER_SCHEMA) == CitedAnswer.model_json_schema()
+    assert thaw(ANSWER_SCHEMA) == StructuredAnswer.model_json_schema()
     assert isinstance(ANSWER_SCHEMA, Mapping)
     with pytest.raises(TypeError):
         ANSWER_SCHEMA["type"] = "array"  # type: ignore[index]
     # Strict structured output on both providers: every field required, no others allowed.
-    schema = CitedAnswer.model_json_schema()
+    schema = StructuredAnswer.model_json_schema()
     for part in [schema, *schema["$defs"].values()]:
         assert part["additionalProperties"] is False
         assert set(part["required"]) == set(part["properties"])
