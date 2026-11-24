@@ -1,9 +1,10 @@
 """The provider contract (plan section 9, Phase 5 testing: "same suite against both adapters").
 
 Every test takes ``subject``, a :class:`Subject` that builds the provider under test, healthy or
-failing with a given :class:`ErrorKind`. Only the fake exists now; the Anthropic and OpenAI
-adapters join the ``params`` with recorded responses (``tests/fixtures/llm_recordings/``), so
-this suite runs against them unchanged and without keys. A test here asserts only what every
+failing with a given :class:`ErrorKind`. The fake and the Anthropic adapter are here; the
+Anthropic adapter runs on recorded responses (``tests/fixtures/llm_recordings/anthropic/``,
+replayed by ``anthropic_replay.Replay`` through ``httpx2.MockTransport``), so the suite needs no
+key and no network. The OpenAI adapter joins the same way. A test here asserts only what every
 provider must do; what is particular to the fake is in ``test_fake_provider.py``.
 """
 
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 import pytest
 
 from vault.ai.answer import ANSWER_SCHEMA, read_answer
+from vault.ai.providers.anthropic import AnthropicProvider
 from vault.ai.providers.base import (
     Completed,
     ErrorKind,
@@ -34,6 +36,8 @@ from vault.ai.providers.base import (
     parse_structured,
 )
 from vault.ai.providers.fake import FakeProvider
+
+from .anthropic_replay import Replay, SyntheticKey
 
 # Synthetic text only. The marker lets a test look for the request's text in log output.
 MARKER = "zqxjv-private-marker"
@@ -53,7 +57,23 @@ def _fake_open(provider: LLMProvider) -> int | None:
     return provider.open_streams
 
 
+def _anthropic(failure: ErrorKind | None, after: int) -> LLMProvider:
+    replay = Replay(failure=failure, after=after)
+    return AnthropicProvider(SyntheticKey(), http_client=replay.client(), max_retries=0)
+
+
+def _anthropic_open(provider: LLMProvider) -> int | None:
+    assert isinstance(provider, AnthropicProvider)
+    return provider.open_streams
+
+
 SUBJECTS = {
+    "anthropic": Subject(
+        name="anthropic",
+        make=_anthropic,
+        model="claude-sonnet-5-5",
+        open_streams=_anthropic_open,
+    ),
     "fake": Subject(
         name="fake",
         make=lambda failure, after: FakeProvider(failure=failure, failure_after_deltas=after),

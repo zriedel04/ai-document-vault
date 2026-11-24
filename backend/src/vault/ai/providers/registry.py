@@ -1,10 +1,13 @@
 """Provider names to provider factories (plan section 9, ADR 0009).
 
 The router (``vault.ai.routing``) says which provider *name* serves a task; this registry turns
-the name into an :class:`~vault.ai.providers.base.LLMProvider`. Only ``fake`` is registered: the
-Anthropic and OpenAI adapters join :data:`FACTORIES` when they exist, so until then a route to
-them is valid config that cannot be used (:class:`ProviderUnavailableError`). Creating a provider
-reads no key and makes no network call; an adapter reads its key when it is called.
+the name into an :class:`~vault.ai.providers.base.LLMProvider`. ``fake`` and ``anthropic`` are
+registered; the OpenAI adapter joins :data:`FACTORIES` when it exists, so until then a route to it
+is valid config that cannot be used (:class:`ProviderUnavailableError`). Creating a provider reads
+no key and makes no network call. The Anthropic adapter is created without a key for now, so every
+call it gets is :attr:`~vault.ai.providers.base.ErrorKind.AUTHENTICATION` and sends nothing; the
+step that wires the key store (``vault.ai.keys``) to the AI service gives it the key. Its module
+(and with it the SDK) is imported only when the first one is created.
 """
 
 from __future__ import annotations
@@ -19,7 +22,16 @@ from vault.ai.routing import PROVIDER_NAMES
 
 type ProviderFactory = Callable[[], LLMProvider]
 
-FACTORIES: Final[Mapping[str, ProviderFactory]] = MappingProxyType({"fake": FakeProvider})
+
+def _anthropic() -> LLMProvider:
+    from vault.ai.providers.anthropic import AnthropicProvider
+
+    return AnthropicProvider()
+
+
+FACTORIES: Final[Mapping[str, ProviderFactory]] = MappingProxyType(
+    {"fake": FakeProvider, "anthropic": _anthropic}
+)
 
 
 class ProviderUnavailableError(Exception):
